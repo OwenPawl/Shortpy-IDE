@@ -1,0 +1,28 @@
+.DS_Store
+*.xcuserstate
+
+# Build outputs
+bridge/build-sim/
+bridge/logs/
+bridge/**/*.o
+bridge/**/*.dylib
+
+# Python/Node caches
+__pycache__/
+*.py[cod]
+node_modules/
+npm-debug.log*
+
+# Packaged extension artifacts
+*.vsix
+
+# Local editor/cache state
+.vscode/
+.idea/
+
+# Local RE scratch
+*.ips
+*.crash
+*.trace
+*.jsonl
+*.typescript

@@ -1,0 +1,268 @@
+{
+  "name": "shortpy-ide",
+  "displayName": "Shortpy IDE",
+  "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
+  "version": "0.1.13",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:python",
+    "onCustomEditor:shortcutsRuntimeIDE.workflowEditor",
+    "onCommand:shortcutsRuntimeIDE.connectBridge",
+    "onCommand:shortcutsRuntimeIDE.saveRuntimePlistFromPython",
+    "onCommand:shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
+    "onCommand:shortcutsRuntimeIDE.validatePython",
+    "onCommand:shortcutsRuntimeIDE.openWorkflowPlistFromPython",
+    "onCommand:shortcutsRuntimeIDE.pythonToPlistDebugJson",
+    "onCommand:shortcutsRuntimeIDE.loadPythonFromPlist",
+    "onCommand:shortcutsRuntimeIDE.searchActions",
+    "onCommand:shortcutsRuntimeIDE.searchTriggers",
+    "onCommand:shortcutsRuntimeIDE.resolveEntity",
+    "onCommand:shortcutsRuntimeIDE.refreshToolMetadata",
+    "onCommand:shortcutsRuntimeIDE.refreshToolKitMetadata",
+    "onCommand:shortcutsRuntimeIDE.refreshToolRendererInterface",
+    "onCommand:shortcutsRuntimeIDE.showToolKitStatus",
+    "onCommand:shortcutsRuntimeIDE.pointSimulatorToolKitToHost",
+    "onCommand:shortcutsRuntimeIDE.status"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "shortcutsRuntimeIDE.workflowEditor",
+        "displayName": "Shortcuts Workflow Python",
+        "selector": [
+          {
+            "filenamePattern": "*.shortcut"
+          },
+          {
+            "filenamePattern": "*.plist"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "shortcutsRuntimeIDE.connectBridge",
+        "title": "Shortcuts IDE: Connect To Bridge"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
+        "title": "Shortcuts IDE: Export Python To Plist"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
+        "title": "Shortcuts IDE: Write Sibling Runtime Plist"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.validatePython",
+        "title": "Shortcuts IDE: Validate With Apple Runtime"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
+        "title": "Shortcuts IDE: Open Workflow Plist From Python"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.pythonToPlistDebugJson",
+        "title": "Shortcuts IDE: Python To Plist Debug JSON"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
+        "title": "Shortcuts IDE: Import Plist As Python"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.searchActions",
+        "title": "Shortcuts IDE: Retrieve Relevant Actions"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.searchTriggers",
+        "title": "Shortcuts IDE: Retrieve Relevant Triggers"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.resolveEntity",
+        "title": "Shortcuts IDE: Resolve Entity"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.refreshToolMetadata",
+        "title": "Shortcuts IDE: Refresh Tool Metadata"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.refreshToolKitMetadata",
+        "title": "Shortcuts IDE: Refresh ToolKit Metadata"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.refreshToolRendererInterface",
+        "title": "Shortcuts IDE: Refresh Native ToolRenderer Interface"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.showToolKitStatus",
+        "title": "Shortcuts IDE: Simulator ToolKit Status"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.pointSimulatorToolKitToHost",
+        "title": "Shortcuts IDE: Point Simulator ToolKit To Host"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.status",
+        "title": "Shortcuts IDE: Show Bridge Status"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
+          "when": "editorLangId == python",
+          "group": "navigation@50"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
+          "when": "editorLangId == python",
+          "group": "navigation@51"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.validatePython",
+          "when": "editorLangId == python",
+          "group": "navigation@52"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
+          "when": "editorLangId == python",
+          "group": "navigation@53"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.searchActions",
+          "when": "editorLangId == python",
+          "group": "navigation@54"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.searchTriggers",
+          "when": "editorLangId == python",
+          "group": "navigation@55"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.resolveEntity",
+          "when": "editorLangId == python",
+          "group": "navigation@56"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.refreshToolMetadata",
+          "when": "editorLangId == python",
+          "group": "navigation@57"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
+          "group": "navigation@58"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
+          "when": "resourceExtname == .shortcut || resourceExtname == .plist",
+          "group": "navigation@50"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Shortpy IDE",
+      "properties": {
+        "shortcutsRuntimeIDE.bridgeCtlPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to bridgectl.py. Leave empty to use bridge/tools/bridgectl.py from the Shortpy IDE repository."
+        },
+        "shortcutsRuntimeIDE.toolkitCtlPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to simulator toolkitctl.py. Leave empty to use bridge/tools/toolkitctl.py from the Shortpy IDE repository."
+        },
+        "shortcutsRuntimeIDE.simulatorDevice": {
+          "type": "string",
+          "default": "booted",
+          "description": "Simulator UDID for ToolKit commands, or booted."
+        },
+        "shortcutsRuntimeIDE.toolkitMetadataPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to cached ToolKit metadata JSON. Leave empty to use extension storage."
+        },
+        "shortcutsRuntimeIDE.toolRendererMetadataPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to cached native ToolRenderer interface metadata JSON. Leave empty to use extension storage."
+        },
+        "shortcutsRuntimeIDE.refreshToolKitMetadataOnActivation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh simulator ToolKit Python-name metadata when the extension activates."
+        },
+        "shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load cached Apple's native ToolRenderer Python interface metadata when the extension activates. Use the explicit native ToolRenderer refresh command for a live render."
+        },
+        "shortcutsRuntimeIDE.highlightKnownCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight known Shortcuts action and trigger Python names from ToolKit metadata."
+        },
+        "shortcutsRuntimeIDE.writeToDebugConsole": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mirror key bridge and ToolKit events into the VS Code Debug Console when available."
+        },
+        "shortcutsRuntimeIDE.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable used to run bridgectl.py."
+        },
+        "shortcutsRuntimeIDE.socket": {
+          "type": "string",
+          "default": "auto",
+          "description": "Shortcuts IDE bridge socket path, or auto for bridgectl.py discovery."
+        },
+        "shortcutsRuntimeIDE.defaultShortcutExtension": {
+          "type": "string",
+          "default": ".shortcut",
+          "description": "Extension used when saving a runtime-generated binary plist from Python."
+        },
+        "shortcutsRuntimeIDE.autoConvertPlistOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Legacy behavior: automatically open a separate Python document when a .shortcut or workflow .plist is opened. The custom editor is the primary UI."
+        },
+        "shortcutsRuntimeIDE.validateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate Python files with the Shortcuts runtime bridge on save and surface compiler errors in Problems."
+        },
+        "shortcutsRuntimeIDE.validateOnType": {
+          "type": "boolean",
+          "default": false,
+          "description": "Validate Python with the Shortcuts runtime bridge while editing. This calls into the live Shortcuts process after a debounce."
+        },
+        "shortcutsRuntimeIDE.validateDebounceMs": {
+          "type": "number",
+          "default": 900,
+          "description": "Debounce in milliseconds for validate-on-type."
+        },
+        "shortcutsRuntimeIDE.offerOpenInShortcutsAfterSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer to open the saved .shortcut/.plist file after a runtime plist save."
+        },
+        "shortcutsRuntimeIDE.overwriteSiblingShortcut": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Write Sibling Runtime Plist to overwrite an existing sibling shortcut without prompting."
+        }
+      }
+    }
+  }
+}
