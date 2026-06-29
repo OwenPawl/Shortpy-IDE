@@ -5,6 +5,7 @@
 - Simulator bridge uses `ToolVisibilityFilter.any`.
 - Production `python-to-bplist` uses the native whole-workflow record serializer:
   `ShortcutsLanguage.pythonToShortcut -> WFWorkflow.saveToRecord -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:`.
+- Host-side `python-to-bplist` signs `.shortcut` output by default with macOS `shortcuts sign --mode anyone` while preserving the unsigned `plist_payload`.
 - `saveToRecord` is called on `workflow.databaseAccessQueue`, not through `WFWorkflow.save`.
 - Root decorators such as `@runnable` and `@input_fallback` round trip through workflow plist.
 - Native trigger decorators such as `@when_app_opened` round trip through workflow plist.

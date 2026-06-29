@@ -9,6 +9,7 @@ const {
   runBridgeCli,
   runBridgeCommand,
   runBridgeStatus,
+  shortcutBufferFromResponse,
 } = require("./bridge");
 const { parseAppleDiagnostic } = require("./diagnostics");
 const {
@@ -60,6 +61,9 @@ function configOptions() {
     pythonPath: config.get("pythonPath") || "python3",
     socket: config.get("socket") || "auto",
     defaultShortcutExtension: config.get("defaultShortcutExtension") || ".shortcut",
+    signShortcutExports: config.get("signShortcutExports") !== false,
+    shortcutSigningMode: config.get("shortcutSigningMode") || "anyone",
+    shortcutsCliPath: config.get("shortcutsCliPath") || undefined,
     autoConvertPlistOnOpen: config.get("autoConvertPlistOnOpen") !== false,
     validateOnSave: Boolean(config.get("validateOnSave")),
     validateOnType: Boolean(config.get("validateOnType")),
@@ -654,7 +658,30 @@ function refreshToolkitDiagnosticsForOpenDocuments(collection) {
   }
 }
 
-async function compilePythonDocument(document, source, collection) {
+function compileOptionsForValidation() {
+  return {
+    ...configOptions(),
+    signShortcut: false,
+  };
+}
+
+function compileOptionsForExport() {
+  const options = configOptions();
+  return {
+    ...options,
+    signShortcut: options.signShortcutExports,
+  };
+}
+
+function shortcutBytesForTarget(response, target) {
+  const extension = target && target.fsPath ? path.extname(target.fsPath).toLowerCase() : "";
+  if (extension === ".plist") {
+    return bplistBufferFromResponse(response);
+  }
+  return shortcutBufferFromResponse(response);
+}
+
+async function compilePythonDocument(document, source, collection, bridgeOptions = compileOptionsForValidation()) {
   const prepared = compilationSourceForDocument(document, source);
   try {
     setBridgeStatus("validating", "Validating");
@@ -663,7 +690,7 @@ async function compilePythonDocument(document, source, collection) {
       postWorkflowSessionStatus(prepared.session, `Validating ${path.basename(prepared.session.workflowUri.fsPath)}`);
     }
     logRuntime("compile python-to-bplist", { uri: document.uri.toString(), bytes: Buffer.byteLength(prepared.source, "utf8") });
-    const response = await runBridgeCommand("python-to-bplist", prepared.source, configOptions());
+    const response = await runBridgeCommand("python-to-bplist", prepared.source, bridgeOptions);
     setSuccessDiagnostics(collection, document, prepared.visibleSource, response);
     const actions = response && response.plist_summary && response.plist_summary.WFWorkflowActions_count;
     logRuntime("compile ok", { actions, compiledTrigger: response && response.plist_builder && response.plist_builder.unifiedAutomationTriggers_serialized });
@@ -701,24 +728,26 @@ async function saveRuntimePlistFromPython(collection) {
   const options = configOptions();
   const source = selectedOrFullText(editor);
   const response = collection
-    ? await compilePythonDocument(editor.document, source, collection)
-    : await runBridgeCommand("python-to-bplist", source, options);
-  const bytes = bplistBufferFromResponse(response);
+    ? await compilePythonDocument(editor.document, source, collection, compileOptionsForExport())
+    : await runBridgeCommand("python-to-bplist", source, compileOptionsForExport());
   const defaultUri = siblingShortcutUri(editor.document, options.defaultShortcutExtension);
   const target = await vscode.window.showSaveDialog({
     defaultUri,
     filters: {
-      "Shortcut plist": ["shortcut", "plist"],
+      "Shortcut": ["shortcut"],
+      "Workflow plist": ["plist"],
       "All files": ["*"],
     },
-    saveLabel: "Save Runtime Plist",
+    saveLabel: "Save Shortcut",
   });
   if (!target) {
     return;
   }
+  const bytes = shortcutBytesForTarget(response, target);
   await vscode.workspace.fs.writeFile(target, bytes);
   const count = response.plist_summary && response.plist_summary.WFWorkflowActions_count;
-  await offerOpenInShortcuts(target, `Saved runtime plist (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
+  const signed = Boolean(response.shortcut_payload) && path.extname(target.fsPath).toLowerCase() !== ".plist";
+  await offerOpenInShortcuts(target, `Saved ${signed ? "signed shortcut" : "runtime plist"} (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
 }
 
 async function writeSiblingRuntimePlistFromPython(collection) {
@@ -742,11 +771,12 @@ async function writeSiblingRuntimePlistFromPython(collection) {
       return;
     }
   }
-  const response = await compilePythonDocument(editor.document, selectedOrFullText(editor), collection);
-  const bytes = bplistBufferFromResponse(response);
+  const response = await compilePythonDocument(editor.document, selectedOrFullText(editor), collection, compileOptionsForExport());
+  const bytes = shortcutBytesForTarget(response, target);
   await vscode.workspace.fs.writeFile(target, bytes);
   const count = response.plist_summary && response.plist_summary.WFWorkflowActions_count;
-  await offerOpenInShortcuts(target, `Wrote ${path.basename(target.fsPath)} (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
+  const signed = Boolean(response.shortcut_payload) && path.extname(target.fsPath).toLowerCase() !== ".plist";
+  await offerOpenInShortcuts(target, `Wrote ${signed ? "signed " : ""}${path.basename(target.fsPath)} (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
 }
 
 async function validatePython(collection) {
@@ -768,7 +798,7 @@ async function pythonToPlistDebugJson(collection) {
   const source = selectedOrFullText(editor);
   const response = collection
     ? await compilePythonDocument(editor.document, source, collection)
-    : await runBridgeCommand("python-to-bplist", source, configOptions());
+    : await runBridgeCommand("python-to-bplist", source, compileOptionsForValidation());
   const debugResponse = { ...response };
   if (debugResponse.plist_payload && debugResponse.plist_payload.data) {
     debugResponse.plist_payload = {
@@ -788,7 +818,7 @@ async function loadPythonFromPlist(uri) {
 
 async function roundTripPythonThroughPlist(collection) {
   const editor = activeEditorOrThrow();
-  const options = configOptions();
+  const options = compileOptionsForValidation();
   const compiled = collection
     ? await compilePythonDocument(editor.document, selectedOrFullText(editor), collection)
     : await runBridgeCommand("python-to-bplist", selectedOrFullText(editor), options);
@@ -1626,8 +1656,16 @@ class WorkflowPythonCustomEditorProvider {
         } else if (commandName === "validate") {
           await validatePythonDocument();
         } else if (commandName === "export") {
-          const response = await validatePythonDocument();
-          const bytes = bplistBufferFromResponse(response);
+          const pyDocument = await pythonDocument();
+          await showWorkflowPythonEditor(session, { preserveFocus: true });
+          const shouldSign = path.extname(document.uri.fsPath).toLowerCase() !== ".plist";
+          const response = await compilePythonDocument(
+            pyDocument,
+            pyDocument.getText(),
+            this.runtimeDiagnosticsCollection,
+            shouldSign ? compileOptionsForExport() : compileOptionsForValidation()
+          );
+          const bytes = shortcutBytesForTarget(response, document.uri);
           await vscode.workspace.fs.writeFile(document.uri, bytes);
           postWorkflowSessionStatus(session, `Exported ${bytes.length} bytes to ${path.basename(document.uri.fsPath)}`);
           setBridgeStatus("connected", `Exported ${path.basename(document.uri.fsPath)}`);

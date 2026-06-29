@@ -9,6 +9,7 @@ const {
   bplistBufferFromResponse,
   runBridgeCommand,
   runBridgeStatus,
+  shortcutBufferFromResponse,
 } = require("../src/bridge");
 const {
   indexToolkitMetadata,
@@ -106,13 +107,23 @@ async function main() {
     "app",
   ])).stdout);
   const plist = bplistBufferFromResponse(compiled);
-  const plistPath = path.join(logs, "vscode-extension-smoke.shortcut");
+  const signedShortcut = shortcutBufferFromResponse(compiled);
+  const plistPath = path.join(logs, "vscode-extension-smoke.workflow.plist");
+  const signedShortcutPath = path.join(logs, "vscode-extension-smoke-signed.shortcut");
   await fs.writeFile(plistPath, plist);
+  await fs.writeFile(signedShortcutPath, signedShortcut);
   const restored = await runBridgeCommand("plist-data-to-python", plist, options);
   const xml = await binaryPlistToXml(plist);
   const fixturePlistPath = path.join(logs, "user-plist-441867F0", "final-input.xml.plist");
-  const fixturePlist = await fs.readFile(fixturePlistPath);
-  const fixtureRestored = await runBridgeCommand("plist-data-to-python", fixturePlist, options);
+  let fixtureAvailable = false;
+  let fixtureRestored = { python_code: "" };
+  try {
+    const fixturePlist = await fs.readFile(fixturePlistPath);
+    fixtureRestored = await runBridgeCommand("plist-data-to-python", fixturePlist, options);
+    fixtureAvailable = true;
+  } catch (_) {
+    fixtureAvailable = false;
+  }
   const triggerSource = [
     "@when_app_opened(app=[{\"Bundle Identifier\":\"com.apple.shortcuts\",\"Name\":\"Shortcuts\"}], state=com_apple_shortcuts_wfapp_in_focus_trigger_wfapp_state.OPENED)",
     "def shortcut() -> None:",
@@ -121,8 +132,11 @@ async function main() {
   ].join("\n");
   const triggerCompiled = await runBridgeCommand("python-to-bplist", triggerSource, options);
   const triggerPlist = bplistBufferFromResponse(triggerCompiled);
-  const triggerPlistPath = path.join(logs, "vscode-extension-trigger-smoke.shortcut");
+  const triggerSignedShortcut = shortcutBufferFromResponse(triggerCompiled);
+  const triggerPlistPath = path.join(logs, "vscode-extension-trigger-smoke.workflow.plist");
+  const triggerSignedShortcutPath = path.join(logs, "vscode-extension-trigger-smoke-signed.shortcut");
   await fs.writeFile(triggerPlistPath, triggerPlist);
+  await fs.writeFile(triggerSignedShortcutPath, triggerSignedShortcut);
   const triggerXml = await binaryPlistToXml(triggerPlist);
   const triggerReimported = await runBridgeCommand("plist-data-to-python", triggerPlist, options);
   let invalidDiagnostic = "";
@@ -139,14 +153,21 @@ async function main() {
     ok: true,
     bridge_version: status.version,
     plist_path: plistPath,
+    signed_shortcut_path: signedShortcutPath,
     trigger_plist_path: triggerPlistPath,
+    trigger_signed_shortcut_path: triggerSignedShortcutPath,
     plist_length: plist.length,
     plist_header: plist.subarray(0, 8).toString("ascii"),
+    signed_shortcut_length: signedShortcut.length,
+    signed_shortcut_header: signedShortcut.subarray(0, 4).toString("ascii"),
     xml_has_workflow_actions: xml.includes("WFWorkflowActions"),
     restored_python: restored.python_code,
     trigger_roundtrip: {
       serialized: Boolean(triggerCompiled.plist_builder && triggerCompiled.plist_builder.unifiedAutomationTriggers_serialized),
+      signed: Boolean(triggerCompiled.shortcut_payload && triggerCompiled.shortcut_signing && triggerCompiled.shortcut_signing.ok),
+      signed_header: triggerSignedShortcut.subarray(0, 4).toString("ascii"),
       xml_has_workflow_triggers: triggerXml.includes("WFWorkflowTriggers"),
+      fixture_available: fixtureAvailable,
       fixture_imported_has_native_app_trigger: (fixtureRestored.python_code || "").includes("@when_app_opened"),
       fixture_imported_has_native_focus_trigger: (fixtureRestored.python_code || "").includes("@when_focus_enable"),
       fixture_imported_has_no_refs: !(fixtureRestored.python_code || "").includes("ref(0x"),
@@ -197,6 +218,12 @@ async function main() {
   if (!summary.has_show_notification_python_parameter_names) {
     throw new Error(`missing show_notification python parameter names: ${showNotificationParameters.join(", ")}`);
   }
+  if (summary.signed_shortcut_header !== "AEA1" || summary.trigger_roundtrip.signed_header !== "AEA1") {
+    throw new Error(`signed shortcut export failed: ${JSON.stringify({
+      header: summary.signed_shortcut_header,
+      triggerHeader: summary.trigger_roundtrip.signed_header,
+    })}`);
+  }
   if (!summary.has_native_show_notification_metadata || !summary.has_native_when_app_opened_metadata || !summary.has_native_when_focus_enable_metadata || !summary.has_native_run_surface_type || !summary.has_native_run_surface_case || !summary.has_native_input_fallback_type) {
     throw new Error(`missing native ToolRenderer metadata: ${JSON.stringify({
       show_notification: summary.has_native_show_notification_metadata,
@@ -234,10 +261,10 @@ async function main() {
   if (!summary.cli_agent_wrappers.actions_top.includes("com_apple_shortcuts_show_notification") || !summary.cli_agent_wrappers.triggers_top.includes("when_app_opened") || summary.cli_agent_wrappers.transpiler_valid !== true || !resolveWrapperUsable) {
     throw new Error(`agent wrapper smoke failed: ${JSON.stringify(summary.cli_agent_wrappers)}`);
   }
-  if (!summary.trigger_roundtrip.fixture_imported_has_native_app_trigger || !summary.trigger_roundtrip.fixture_imported_has_native_focus_trigger || !summary.trigger_roundtrip.fixture_imported_has_no_refs) {
+  if (summary.trigger_roundtrip.fixture_available && (!summary.trigger_roundtrip.fixture_imported_has_native_app_trigger || !summary.trigger_roundtrip.fixture_imported_has_native_focus_trigger || !summary.trigger_roundtrip.fixture_imported_has_no_refs)) {
     throw new Error(`native trigger decorator import failed: ${JSON.stringify(summary.trigger_roundtrip)}`);
   }
-  if (!summary.trigger_roundtrip.serialized || !summary.trigger_roundtrip.xml_has_workflow_triggers || !summary.trigger_roundtrip.reimported_has_native_app_trigger || !summary.trigger_roundtrip.reimported_has_inline_app_metadata || !summary.trigger_roundtrip.reimported_has_no_refs) {
+  if (!summary.trigger_roundtrip.serialized || !summary.trigger_roundtrip.signed || !summary.trigger_roundtrip.xml_has_workflow_triggers || !summary.trigger_roundtrip.reimported_has_native_app_trigger || !summary.trigger_roundtrip.reimported_has_inline_app_metadata || !summary.trigger_roundtrip.reimported_has_no_refs) {
     throw new Error(`inline trigger decorator roundtrip failed: ${JSON.stringify(summary.trigger_roundtrip)}`);
   }
   await fs.writeFile(

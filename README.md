@@ -23,7 +23,7 @@ ShortcutsLanguage.pythonToShortcut
   -> WFWorkflowFile.fileDataWithError:
 ```
 
-This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`.
+This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
 
 Editable Python should use inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge rewrites that representation internally for Apple's compiler.
 
@@ -42,6 +42,16 @@ Check bridge status:
 bridge/tools/bridgectl.py --socket auto status
 ```
 
+Compile and sign a shortcut:
+
+```sh
+bridge/tools/bridgectl.py --raw python-to-bplist --text 'def shortcut() -> None:
+    com_apple_shortcuts_show_notification(title="Hello", body="World")
+'
+```
+
+The response contains both `plist_payload` (unsigned workflow plist bytes) and `shortcut_payload` (signed `.shortcut` bytes). Use `--no-sign` for validation/debug paths that only need the unsigned plist payload.
+
 Run VS Code extension syntax checks:
 
 ```sh
@@ -56,5 +66,5 @@ Package the extension from `vscode-extension/` with `vsce` when needed.
 
 - Primary target is iOS Simulator 27.0.
 - The bridge uses private Apple frameworks and is a local RE/development tool.
-- Signed `.shortcut`/AEA1 envelope handling is separate from unsigned workflow plist export.
+- Signed `.shortcut`/AEA1 envelope import is separate from unsigned workflow plist import.
 - Launch-time dylib loading is the supported simulator path; live injection is retained as a debug fallback.

@@ -16,6 +16,9 @@ function normalizeOptions(options = {}) {
     pythonPath: options.pythonPath || "python3",
     bridgeCtlPath: options.bridgeCtlPath || defaultBridgeCtlPath(),
     socket: options.socket || "auto",
+    signShortcut: options.signShortcut,
+    shortcutSigningMode: options.shortcutSigningMode || "anyone",
+    shortcutsCliPath: options.shortcutsCliPath || "",
   };
 }
 
@@ -65,6 +68,19 @@ async function runBridgeCommand(command, input, options = {}) {
     if (!noInputCommands.has(command)) {
       args.push("--file", file);
     }
+    if (command === "python-to-bplist") {
+      if (config.signShortcut === false) {
+        args.push("--no-sign");
+      } else if (config.signShortcut === true) {
+        args.push("--sign");
+      }
+      if (config.shortcutSigningMode) {
+        args.push("--sign-mode", config.shortcutSigningMode);
+      }
+      if (config.shortcutsCliPath) {
+        args.push("--shortcuts-cli", config.shortcutsCliPath);
+      }
+    }
     const stdout = await execFile(config.pythonPath, args);
     let response;
     try {
@@ -73,7 +89,11 @@ async function runBridgeCommand(command, input, options = {}) {
       throw new Error(`Bridge returned non-JSON response for ${command}: ${stdout.slice(0, 500)}`);
     }
     if (!response.ok) {
-      const diagnostic = response.diagnostic || response.error || JSON.stringify(response);
+      const signing = response.shortcut_signing;
+      const signingDetail = signing && signing.stderr
+        ? `\n${signing.stderr}`
+        : "";
+      const diagnostic = `${response.diagnostic || response.error || JSON.stringify(response)}${signingDetail}`;
       const err = new Error(diagnostic);
       err.bridgeResponse = response;
       throw err;
@@ -98,7 +118,11 @@ async function runBridgeCli(args, options = {}) {
     throw new Error(`Bridge returned non-JSON response: ${stdout.slice(0, 500)}`);
   }
   if (!response.ok) {
-    const diagnostic = response.diagnostic || response.error || JSON.stringify(response);
+    const signing = response.shortcut_signing;
+    const signingDetail = signing && signing.stderr
+      ? `\n${signing.stderr}`
+      : "";
+    const diagnostic = `${response.diagnostic || response.error || JSON.stringify(response)}${signingDetail}`;
     const err = new Error(diagnostic);
     err.bridgeResponse = response;
     throw err;
@@ -120,6 +144,14 @@ function bplistBufferFromResponse(response) {
   return Buffer.from(payload.data, "base64");
 }
 
+function shortcutBufferFromResponse(response) {
+  const payload = response && response.shortcut_payload;
+  if (!payload || payload.encoding !== "base64" || typeof payload.data !== "string") {
+    return bplistBufferFromResponse(response);
+  }
+  return Buffer.from(payload.data, "base64");
+}
+
 module.exports = {
   binaryPlistToXml,
   bplistBufferFromResponse,
@@ -128,4 +160,5 @@ module.exports = {
   runBridgeCli,
   runBridgeCommand,
   runBridgeStatus,
+  shortcutBufferFromResponse,
 };

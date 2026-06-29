@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -55,11 +55,11 @@
       },
       {
         "command": "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
-        "title": "Shortcuts IDE: Export Python To Plist"
+        "title": "Shortcuts IDE: Export Python To Shortcut"
       },
       {
         "command": "shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
-        "title": "Shortcuts IDE: Write Sibling Runtime Plist"
+        "title": "Shortcuts IDE: Write Sibling Shortcut"
       },
       {
         "command": "shortcutsRuntimeIDE.validatePython",
@@ -230,7 +230,26 @@
         "shortcutsRuntimeIDE.defaultShortcutExtension": {
           "type": "string",
           "default": ".shortcut",
-          "description": "Extension used when saving a runtime-generated binary plist from Python."
+          "description": "Extension used when saving a shortcut from Python."
+        },
+        "shortcutsRuntimeIDE.signShortcutExports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sign .shortcut exports with macOS shortcuts sign --mode anyone. .plist exports always remain raw workflow plist bytes."
+        },
+        "shortcutsRuntimeIDE.shortcutSigningMode": {
+          "type": "string",
+          "enum": [
+            "anyone",
+            "people-who-know-me"
+          ],
+          "default": "anyone",
+          "description": "Signing mode passed to macOS shortcuts sign for .shortcut exports."
+        },
+        "shortcutsRuntimeIDE.shortcutsCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the macOS shortcuts CLI used for signing. Leave empty to use /usr/bin/shortcuts."
         },
         "shortcutsRuntimeIDE.autoConvertPlistOnOpen": {
           "type": "boolean",
@@ -255,12 +274,12 @@
         "shortcutsRuntimeIDE.offerOpenInShortcutsAfterSave": {
           "type": "boolean",
           "default": true,
-          "description": "Offer to open the saved .shortcut/.plist file after a runtime plist save."
+          "description": "Offer to open the saved .shortcut/.plist file after export."
         },
         "shortcutsRuntimeIDE.overwriteSiblingShortcut": {
           "type": "boolean",
           "default": false,
-          "description": "Allow Write Sibling Runtime Plist to overwrite an existing sibling shortcut without prompting."
+          "description": "Allow Write Sibling Shortcut to overwrite an existing sibling shortcut without prompting."
         }
       }
     }

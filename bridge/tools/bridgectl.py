@@ -4,13 +4,17 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import re
 import socket
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 DEFAULT_SOCKET = "/tmp/shortcuts-ide-bridge-sim.sock"
 SOCKET_NAME = "shortcuts-ide-bridge-sim.sock"
+DEFAULT_SHORTCUTS_CLI = "/usr/bin/shortcuts"
 DEFAULT_TOOLRENDERER_FRAMEWORK = Path(
     "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/"
     "iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/ToolRenderer.framework"
@@ -686,6 +690,12 @@ class InlineCatalogError(Exception):
         super().__init__("; ".join(item.get("message", "inline catalog error") for item in diagnostics))
 
 
+class ShortcutSigningError(Exception):
+    def __init__(self, message: str, details: dict):
+        self.details = details
+        super().__init__(message)
+
+
 def call_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -1302,6 +1312,89 @@ def compile_python_to_bplist(
     return attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
 
 
+def sign_shortcut_response(
+    response: dict,
+    signing_mode: str = "anyone",
+    shortcuts_cli: str = DEFAULT_SHORTCUTS_CLI,
+) -> dict:
+    if not response.get("ok"):
+        return response
+    payload = response.get("plist_payload")
+    if not isinstance(payload, dict) or payload.get("encoding") != "base64" or not isinstance(payload.get("data"), str):
+        raise ShortcutSigningError(
+            "bridge response did not include a base64 workflow plist payload to sign",
+            {"payload_present": isinstance(payload, dict)},
+        )
+    try:
+        unsigned_bytes = base64.b64decode(payload["data"], validate=True)
+    except Exception as exc:
+        raise ShortcutSigningError(
+            f"workflow plist payload was not valid base64: {exc}",
+            {"payload_length": len(payload.get("data", ""))},
+        ) from exc
+
+    cli = Path(shortcuts_cli)
+    if not cli.exists():
+        raise ShortcutSigningError(
+            f"shortcuts CLI not found: {cli}",
+            {"tool": str(cli), "mode": signing_mode},
+        )
+
+    with tempfile.TemporaryDirectory(prefix="shortpy-sign-") as tmp:
+        tmpdir = Path(tmp)
+        unsigned_path = tmpdir / "unsigned.shortcut"
+        signed_path = tmpdir / "signed.shortcut"
+        unsigned_path.write_bytes(unsigned_bytes)
+        command = [
+            str(cli),
+            "sign",
+            "--mode",
+            signing_mode,
+            "--input",
+            str(unsigned_path),
+            "--output",
+            str(signed_path),
+        ]
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not signed_path.exists():
+            raise ShortcutSigningError(
+                "shortcuts sign failed",
+                {
+                    "tool": str(cli),
+                    "mode": signing_mode,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip(),
+                },
+            )
+        signed_bytes = signed_path.read_bytes()
+
+    response["shortcut_signing"] = {
+        "ok": True,
+        "tool": str(cli),
+        "mode": signing_mode,
+        "unsigned_length": len(unsigned_bytes),
+        "signed_length": len(signed_bytes),
+        "signed_header_ascii": signed_bytes[:8].decode("ascii", errors="replace"),
+        "signed_header_hex": signed_bytes[:8].hex(),
+        "looks_like_aea1": signed_bytes.startswith(b"AEA1"),
+    }
+    response["shortcut_payload"] = {
+        "format": "com.apple.shortcut.signed",
+        "encoding": "base64",
+        "length": len(signed_bytes),
+        "signing_mode": signing_mode,
+        "source": "macOS shortcuts sign",
+        "data": base64.b64encode(signed_bytes).decode("ascii"),
+    }
+    return response
+
+
 def compile_python_record_file_probe(
     socket_path: str,
     source: bytes,
@@ -1530,7 +1623,7 @@ def main() -> int:
     )
     python_to_bplist = sub.add_parser(
         "python-to-bplist",
-        help="Compile Python through ShortcutsLanguage and return binary plist bytes as a base64 payload",
+        help="Compile Python through ShortcutsLanguage and return unsigned plist plus signed .shortcut payloads",
     )
     add_source_args(python_to_bplist)
     python_to_bplist.add_argument(
@@ -1538,6 +1631,30 @@ def main() -> int:
         type=int,
         default=0,
         help="Bridge transport flags passed to python-to-bplist-b64-flags [0]",
+    )
+    python_to_bplist.add_argument(
+        "--sign",
+        dest="sign_shortcut",
+        action="store_true",
+        default=True,
+        help="Sign the compiled workflow with macOS shortcuts sign [default]",
+    )
+    python_to_bplist.add_argument(
+        "--no-sign",
+        dest="sign_shortcut",
+        action="store_false",
+        help="Return only the unsigned workflow plist payload",
+    )
+    python_to_bplist.add_argument(
+        "--sign-mode",
+        choices=["anyone", "people-who-know-me"],
+        default="anyone",
+        help="macOS shortcuts sign mode [anyone]",
+    )
+    python_to_bplist.add_argument(
+        "--shortcuts-cli",
+        default=os.environ.get("SHORTPY_SHORTCUTS_CLI", DEFAULT_SHORTCUTS_CLI),
+        help=f"Path to macOS shortcuts CLI [{DEFAULT_SHORTCUTS_CLI}]",
     )
     record_file_probe = sub.add_parser(
         "record-file-probe",
@@ -1685,12 +1802,24 @@ def main() -> int:
     if args.command == "python-to-bplist":
         try:
             response = compile_python_to_bplist(args.socket, read_source(args), args.flags)
+            if args.sign_shortcut:
+                response = sign_shortcut_response(response, args.sign_mode, args.shortcuts_cli)
         except InlineCatalogError as exc:
             response = {
                 "ok": False,
                 "mode": "python-to-workflow-file-data",
                 "diagnostic": str(exc),
                 "inline_catalog_diagnostics": exc.diagnostics,
+            }
+        except ShortcutSigningError as exc:
+            response = {
+                "ok": False,
+                "mode": "python-to-workflow-file-data",
+                "diagnostic": str(exc),
+                "shortcut_signing": {
+                    "ok": False,
+                    **exc.details,
+                },
             }
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0

@@ -47,6 +47,19 @@ bridge/tools/bridgectl.py --raw python-to-bplist --text 'def shortcut() -> None:
 '
 ```
 
+`python-to-bplist` signs by default with:
+
+```sh
+/usr/bin/shortcuts sign --mode anyone --input <unsigned-workflow> --output <signed-shortcut>
+```
+
+The JSON response keeps both payloads:
+
+- `plist_payload`: unsigned workflow plist bytes from the simulator runtime.
+- `shortcut_payload`: signed `.shortcut` bytes from the macOS Shortcuts CLI.
+
+Pass `--no-sign` to skip host signing for validation or plist-preview workflows.
+
 ## Optional Live Injection
 
 ```sh
