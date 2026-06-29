@@ -52,6 +52,15 @@ bridge/tools/bridgectl.py --raw python-to-bplist --text 'def shortcut() -> None:
 
 The response contains both `plist_payload` (unsigned workflow plist bytes) and `shortcut_payload` (signed `.shortcut` bytes). Use `--no-sign` for validation/debug paths that only need the unsigned plist payload.
 
+Import a raw workflow plist, signed `.shortcut` file, or iCloud Shortcuts link:
+
+```sh
+bridge/tools/bridgectl.py --raw plist-data-to-python --file Example.shortcut
+bridge/tools/bridgectl.py --raw plist-data-to-python --text 'https://www.icloud.com/shortcuts/00000000-0000-0000-0000-000000000000'
+```
+
+Signed import unwraps either `anyone` or `people-who-know-me` AEA1 envelopes host-side. iCloud import resolves `fields.shortcut.value.downloadURL` from the public record API. Both paths send the resulting unsigned `Shortcut.wflow` plist to the simulator edit-mode converter.
+
 Run VS Code extension syntax checks:
 
 ```sh
@@ -66,5 +75,5 @@ Package the extension from `vscode-extension/` with `vsce` when needed.
 
 - Primary target is iOS Simulator 27.0.
 - The bridge uses private Apple frameworks and is a local RE/development tool.
-- Signed `.shortcut`/AEA1 envelope import is separate from unsigned workflow plist import.
+- Signed `.shortcut`/AEA1 envelope import is handled host-side before the simulator plist-to-Python bridge call.
 - Launch-time dylib loading is the supported simulator path; live injection is retained as a debug fallback.

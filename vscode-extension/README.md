@@ -13,7 +13,8 @@ Commands:
 - `Shortcuts IDE: Write Sibling Shortcut` writes `<current-file-name>.shortcut` next to the active Python file.
 - `Shortcuts IDE: Validate With Apple Runtime` compiles the active Python through the runtime bridge and surfaces compiler errors in VS Code Problems.
 - `Shortcuts IDE: Open Workflow Plist From Python` opens the generated Workflow plist as XML without using JSON as the plist representation.
-- `Shortcuts IDE: Import Plist As Python` opens edit-mode Python from a selected `.shortcut` or `.plist`.
+- `Shortcuts IDE: Import Plist As Python` opens edit-mode Python from a selected signed `.shortcut`, raw workflow `.plist`, or selected/open iCloud Shortcuts link text.
+- `Shortcuts IDE: Import iCloud Link As Python` prompts for a `https://www.icloud.com/shortcuts/<UUID>` link and opens edit-mode Python.
 - `Shortcuts IDE: Retrieve Relevant Actions` searches Apple's native ToolRenderer action definitions.
 - `Shortcuts IDE: Retrieve Relevant Triggers` searches Apple's native ToolRenderer trigger decorators.
 - `Shortcuts IDE: Resolve Entity` remains a debug/research command. Editable Python should prefer inline parameter-state metadata; `ref(...)` is an internal compiler representation.
@@ -27,7 +28,7 @@ Prerequisites:
 
 - Shortcuts must be running in the iOS 27 simulator through `bridge/tools/launch_shortcuts_sim_bridge.sh`.
 - The default `bridgectl.py` path assumes this extension is checked out next to this repository's `bridge` folder. Set `shortcutsRuntimeIDE.bridgeCtlPath` if installed elsewhere.
-- Raw workflow plist bytes (`bplist00` or XML plist) can be imported. Signed `.shortcut` files beginning with `AEA1` are detected and reported as signed envelopes; unwrapping those envelopes is a separate import primitive.
+- Raw workflow plist bytes (`bplist00` or XML plist), signed `.shortcut` files beginning with `AEA1`, and iCloud Shortcuts links can be imported.
 
 The signed `.shortcut` output is produced by the macOS Shortcuts CLI. The simulator bridge still owns compilation and unsigned workflow plist serialization.
 

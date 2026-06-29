@@ -420,14 +420,38 @@ async function readPlistBytes(uri) {
   return Buffer.from(selectedOrFullText(editor), "utf8");
 }
 
-function assertRawWorkflowPlistBytes(bytes, sourceName = "input") {
-  if (bytes.subarray(0, 4).toString("ascii") === "AEA1") {
-    throw new Error(`${sourceName} is an AEA1 signed shortcut envelope. The simulator bridge currently imports raw workflow plist bytes (bplist00 or XML plist), not signed .shortcut envelopes.`);
+function isICloudShortcutUrlBytes(bytes) {
+  let text;
+  try {
+    text = bytes.toString("utf8").trim();
+  } catch (_) {
+    return false;
+  }
+  if (!text) {
+    return false;
+  }
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" &&
+      url.hostname === "www.icloud.com" &&
+      /^\/shortcuts\/(?:api\/records\/)?[A-Fa-f0-9-]{32,40}\/?$/.test(url.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function assertShortcutImportBytes(bytes, sourceName = "input") {
+  if (isICloudShortcutUrlBytes(bytes)) {
+    return;
+  }
+  const signedPrefix = bytes.subarray(0, 4).toString("ascii");
+  if (signedPrefix === "AEA1") {
+    return;
   }
   const prefix = bytes.subarray(0, 8).toString("ascii");
   const trimmed = bytes.toString("utf8", 0, Math.min(bytes.length, 64)).trimStart();
   if (prefix !== "bplist00" && !trimmed.startsWith("<?xml") && !trimmed.startsWith("<plist")) {
-    throw new Error(`${sourceName} is not a raw workflow plist. Expected bplist00 or XML plist bytes.`);
+    throw new Error(`${sourceName} is not a workflow plist, signed shortcut, or iCloud shortcut link. Expected AEA1, bplist00, XML plist, or https://www.icloud.com/shortcuts/<UUID>.`);
   }
 }
 
@@ -485,7 +509,7 @@ async function writeWorkflowPythonSource(session, source) {
 
 async function importWorkflowPlistToSession(context, workflowUri) {
   const bytes = Buffer.from(await vscode.workspace.fs.readFile(workflowUri));
-  assertRawWorkflowPlistBytes(bytes, path.basename(workflowUri.fsPath));
+  assertShortcutImportBytes(bytes, path.basename(workflowUri.fsPath));
   const response = await runBridgeCommand("plist-data-to-python", bytes, configOptions());
   const key = workflowSessionKey(workflowUri);
   let session = workflowSessionsByWorkflowUri.get(key);
@@ -811,9 +835,28 @@ async function pythonToPlistDebugJson(collection) {
 
 async function loadPythonFromPlist(uri) {
   const bytes = await readPlistBytes(uri);
-  assertRawWorkflowPlistBytes(bytes, uri && uri.fsPath ? path.basename(uri.fsPath) : "input");
+  assertShortcutImportBytes(bytes, uri && uri.fsPath ? path.basename(uri.fsPath) : "input");
   const response = await runBridgeCommand("plist-data-to-python", bytes, configOptions());
   await openText(response.python_code || "", "python", "Loaded Python from Shortcuts plist");
+}
+
+async function importICloudShortcutLink() {
+  const link = await vscode.window.showInputBox({
+    prompt: "Paste an iCloud Shortcuts link",
+    placeHolder: "https://www.icloud.com/shortcuts/00000000-0000-0000-0000-000000000000",
+    ignoreFocusOut: true,
+    validateInput(value) {
+      return isICloudShortcutUrlBytes(Buffer.from(String(value || ""), "utf8"))
+        ? undefined
+        : "Enter a valid https://www.icloud.com/shortcuts/<UUID> link.";
+    },
+  });
+  if (!link) {
+    return;
+  }
+  const bytes = Buffer.from(link.trim(), "utf8");
+  const response = await runBridgeCommand("plist-data-to-python", bytes, configOptions());
+  await openText(response.python_code || "", "python", "Loaded Python from iCloud Shortcut");
 }
 
 async function roundTripPythonThroughPlist(collection) {
@@ -1744,6 +1787,7 @@ function activate(context) {
     vscode.commands.registerCommand("shortcutsRuntimeIDE.openWorkflowPlistFromPython", command(() => openWorkflowPlistFromPython(diagnostics))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.pythonToPlistDebugJson", command(() => pythonToPlistDebugJson(diagnostics))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.loadPythonFromPlist", command(loadPythonFromPlist)),
+    vscode.commands.registerCommand("shortcutsRuntimeIDE.importICloudShortcutLink", command(importICloudShortcutLink)),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.roundTripPythonThroughPlist", command(() => roundTripPythonThroughPlist(diagnostics))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.searchNativeAgentTools", command(() => searchNativeAgentTools(context))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.searchActions", command(() => searchNativeAgentTools(context, "tool"))),

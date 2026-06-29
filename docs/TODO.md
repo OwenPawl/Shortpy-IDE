@@ -6,6 +6,8 @@
 - Production `python-to-bplist` uses the native whole-workflow record serializer:
   `ShortcutsLanguage.pythonToShortcut -> WFWorkflow.saveToRecord -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:`.
 - Host-side `python-to-bplist` signs `.shortcut` output by default with macOS `shortcuts sign --mode anyone` while preserving the unsigned `plist_payload`.
+- Host-side `plist-data-to-python` unwraps signed AEA1 `.shortcut` files, including `anyone` and `people-who-know-me` auth-data, and sends the embedded `Shortcut.wflow` plist to the simulator bridge.
+- Host-side `plist-data-to-python` imports iCloud Shortcuts links by resolving the public record API download URL before simulator conversion.
 - `saveToRecord` is called on `workflow.databaseAccessQueue`, not through `WFWorkflow.save`.
 - Root decorators such as `@runnable` and `@input_fallback` round trip through workflow plist.
 - Native trigger decorators such as `@when_app_opened` round trip through workflow plist.
@@ -29,4 +31,4 @@
 - Roundtrip debug JSON commands should remain debug/log paths, not primary UI actions.
 - `submit_answer` is not part of the editor tool surface.
 - Legacy custom trigger DSL should not be preserved.
-- Signed shortcut/AES/AEA1 envelope extraction is a later import feature.
+- Legacy pre-AEA signed shortcut variants beyond current AEA1 import should remain explicit follow-up work.

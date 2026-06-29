@@ -60,6 +60,19 @@ The JSON response keeps both payloads:
 
 Pass `--no-sign` to skip host signing for validation or plist-preview workflows.
 
+## Signed Import
+
+`plist-data-to-python` accepts signed `.shortcut` files, iCloud Shortcuts links, and raw workflow plist bytes:
+
+```sh
+bridge/tools/bridgectl.py --raw plist-data-to-python --file Example.shortcut
+bridge/tools/bridgectl.py --raw plist-data-to-python --text 'https://www.icloud.com/shortcuts/00000000-0000-0000-0000-000000000000'
+```
+
+The host CLI unwraps AEA1 envelopes with the macOS `aea`, `aa`, and `openssl` tools, then sends the extracted `Shortcut.wflow` bytes to the simulator bridge. Both `shortcuts sign --mode anyone` and `--mode people-who-know-me` auth-data forms are supported.
+
+For iCloud links, the host CLI calls `https://www.icloud.com/shortcuts/api/records/<UUID>`, handles `{"error":true,"reason":"..."}` as an import diagnostic, downloads `fields.shortcut.value.downloadURL`, and sends those unsigned workflow plist bytes to the simulator bridge.
+
 ## Optional Live Injection
 
 ```sh

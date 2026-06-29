@@ -113,6 +113,15 @@ async function main() {
   await fs.writeFile(plistPath, plist);
   await fs.writeFile(signedShortcutPath, signedShortcut);
   const restored = await runBridgeCommand("plist-data-to-python", plist, options);
+  const signedRestored = await runBridgeCommand("plist-data-to-python", signedShortcut, options);
+  const contactsCompiled = await runBridgeCommand("python-to-bplist", source, {
+    ...options,
+    shortcutSigningMode: "people-who-know-me",
+  });
+  const contactsSignedShortcut = shortcutBufferFromResponse(contactsCompiled);
+  const contactsSignedShortcutPath = path.join(logs, "vscode-extension-smoke-signed-contacts.shortcut");
+  await fs.writeFile(contactsSignedShortcutPath, contactsSignedShortcut);
+  const contactsSignedRestored = await runBridgeCommand("plist-data-to-python", contactsSignedShortcut, options);
   const xml = await binaryPlistToXml(plist);
   const fixturePlistPath = path.join(logs, "user-plist-441867F0", "final-input.xml.plist");
   let fixtureAvailable = false;
@@ -139,6 +148,7 @@ async function main() {
   await fs.writeFile(triggerSignedShortcutPath, triggerSignedShortcut);
   const triggerXml = await binaryPlistToXml(triggerPlist);
   const triggerReimported = await runBridgeCommand("plist-data-to-python", triggerPlist, options);
+  const triggerSignedReimported = await runBridgeCommand("plist-data-to-python", triggerSignedShortcut, options);
   let invalidDiagnostic = "";
   try {
     await runBridgeCommand("python-to-bplist", "def shortcut():\n    com_apple_shortcuts_not_real()\n", options);
@@ -154,14 +164,23 @@ async function main() {
     bridge_version: status.version,
     plist_path: plistPath,
     signed_shortcut_path: signedShortcutPath,
+    contacts_signed_shortcut_path: contactsSignedShortcutPath,
     trigger_plist_path: triggerPlistPath,
     trigger_signed_shortcut_path: triggerSignedShortcutPath,
     plist_length: plist.length,
     plist_header: plist.subarray(0, 8).toString("ascii"),
     signed_shortcut_length: signedShortcut.length,
     signed_shortcut_header: signedShortcut.subarray(0, 4).toString("ascii"),
+    signed_shortcut_import_ok: Boolean(signedRestored.signed_shortcut_import && signedRestored.signed_shortcut_import.ok),
+    signed_shortcut_import_key_source: signedRestored.signed_shortcut_import && signedRestored.signed_shortcut_import.signing_key_source,
+    contacts_signed_shortcut_length: contactsSignedShortcut.length,
+    contacts_signed_shortcut_header: contactsSignedShortcut.subarray(0, 4).toString("ascii"),
+    contacts_signed_shortcut_import_ok: Boolean(contactsSignedRestored.signed_shortcut_import && contactsSignedRestored.signed_shortcut_import.ok),
+    contacts_signed_shortcut_import_key_source: contactsSignedRestored.signed_shortcut_import && contactsSignedRestored.signed_shortcut_import.signing_key_source,
     xml_has_workflow_actions: xml.includes("WFWorkflowActions"),
     restored_python: restored.python_code,
+    signed_restored_python: signedRestored.python_code,
+    contacts_signed_restored_python: contactsSignedRestored.python_code,
     trigger_roundtrip: {
       serialized: Boolean(triggerCompiled.plist_builder && triggerCompiled.plist_builder.unifiedAutomationTriggers_serialized),
       signed: Boolean(triggerCompiled.shortcut_payload && triggerCompiled.shortcut_signing && triggerCompiled.shortcut_signing.ok),
@@ -175,6 +194,11 @@ async function main() {
       reimported_has_inline_app_metadata: (triggerReimported.python_code || "").includes("\"Bundle Identifier\": \"com.apple.shortcuts\"") ||
         (triggerReimported.python_code || "").includes("\"BundleIdentifier\": \"com.apple.shortcuts\""),
       reimported_has_no_refs: !(triggerReimported.python_code || "").includes("ref(0x"),
+      signed_reimport_ok: Boolean(triggerSignedReimported.signed_shortcut_import && triggerSignedReimported.signed_shortcut_import.ok),
+      signed_reimported_has_native_app_trigger: (triggerSignedReimported.python_code || "").includes("@when_app_opened"),
+      signed_reimported_has_inline_app_metadata: (triggerSignedReimported.python_code || "").includes("\"Bundle Identifier\": \"com.apple.shortcuts\"") ||
+        (triggerSignedReimported.python_code || "").includes("\"BundleIdentifier\": \"com.apple.shortcuts\""),
+      signed_reimported_has_no_refs: !(triggerSignedReimported.python_code || "").includes("ref(0x"),
     },
     toolkit_counts: metadataRefresh.counts,
     toolrenderer_counts: toolRendererRefresh.counts,
@@ -218,10 +242,19 @@ async function main() {
   if (!summary.has_show_notification_python_parameter_names) {
     throw new Error(`missing show_notification python parameter names: ${showNotificationParameters.join(", ")}`);
   }
-  if (summary.signed_shortcut_header !== "AEA1" || summary.trigger_roundtrip.signed_header !== "AEA1") {
+  if (summary.signed_shortcut_header !== "AEA1" || summary.trigger_roundtrip.signed_header !== "AEA1" || !summary.signed_shortcut_import_ok || summary.signed_shortcut_import_key_source !== "SigningCertificateChain") {
     throw new Error(`signed shortcut export failed: ${JSON.stringify({
       header: summary.signed_shortcut_header,
       triggerHeader: summary.trigger_roundtrip.signed_header,
+      importOk: summary.signed_shortcut_import_ok,
+      keySource: summary.signed_shortcut_import_key_source,
+    })}`);
+  }
+  if (summary.contacts_signed_shortcut_header !== "AEA1" || !summary.contacts_signed_shortcut_import_ok || summary.contacts_signed_shortcut_import_key_source !== "SigningPublicKey") {
+    throw new Error(`contacts-only signed shortcut import failed: ${JSON.stringify({
+      header: summary.contacts_signed_shortcut_header,
+      importOk: summary.contacts_signed_shortcut_import_ok,
+      keySource: summary.contacts_signed_shortcut_import_key_source,
     })}`);
   }
   if (!summary.has_native_show_notification_metadata || !summary.has_native_when_app_opened_metadata || !summary.has_native_when_focus_enable_metadata || !summary.has_native_run_surface_type || !summary.has_native_run_surface_case || !summary.has_native_input_fallback_type) {
@@ -264,7 +297,7 @@ async function main() {
   if (summary.trigger_roundtrip.fixture_available && (!summary.trigger_roundtrip.fixture_imported_has_native_app_trigger || !summary.trigger_roundtrip.fixture_imported_has_native_focus_trigger || !summary.trigger_roundtrip.fixture_imported_has_no_refs)) {
     throw new Error(`native trigger decorator import failed: ${JSON.stringify(summary.trigger_roundtrip)}`);
   }
-  if (!summary.trigger_roundtrip.serialized || !summary.trigger_roundtrip.signed || !summary.trigger_roundtrip.xml_has_workflow_triggers || !summary.trigger_roundtrip.reimported_has_native_app_trigger || !summary.trigger_roundtrip.reimported_has_inline_app_metadata || !summary.trigger_roundtrip.reimported_has_no_refs) {
+  if (!summary.trigger_roundtrip.serialized || !summary.trigger_roundtrip.signed || !summary.trigger_roundtrip.xml_has_workflow_triggers || !summary.trigger_roundtrip.reimported_has_native_app_trigger || !summary.trigger_roundtrip.reimported_has_inline_app_metadata || !summary.trigger_roundtrip.reimported_has_no_refs || !summary.trigger_roundtrip.signed_reimport_ok || !summary.trigger_roundtrip.signed_reimported_has_native_app_trigger || !summary.trigger_roundtrip.signed_reimported_has_inline_app_metadata || !summary.trigger_roundtrip.signed_reimported_has_no_refs) {
     throw new Error(`inline trigger decorator roundtrip failed: ${JSON.stringify(summary.trigger_roundtrip)}`);
   }
   await fs.writeFile(

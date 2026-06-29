@@ -5,16 +5,28 @@ import base64
 import hashlib
 import json
 import os
+import plistlib
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 DEFAULT_SOCKET = "/tmp/shortcuts-ide-bridge-sim.sock"
 SOCKET_NAME = "shortcuts-ide-bridge-sim.sock"
 DEFAULT_SHORTCUTS_CLI = "/usr/bin/shortcuts"
+DEFAULT_AEA_CLI = "/usr/bin/aea"
+DEFAULT_AA_CLI = "/usr/bin/aa"
+DEFAULT_OPENSSL_CLI = "/usr/bin/openssl"
+ICLOUD_SHORTCUTS_HOST = "www.icloud.com"
+ICLOUD_SHORTCUTS_API_PREFIX = "/shortcuts/api/records/"
+ICLOUD_SHORTCUTS_LINK_PREFIX = "/shortcuts/"
+ICLOUD_FETCH_TIMEOUT = 30
 DEFAULT_TOOLRENDERER_FRAMEWORK = Path(
     "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/"
     "iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/ToolRenderer.framework"
@@ -1395,6 +1407,258 @@ def sign_shortcut_response(
     return response
 
 
+def is_signed_shortcut_bytes(data: bytes) -> bool:
+    return data.startswith(b"AEA1")
+
+
+def run_required(command: list[str], failure: str) -> subprocess.CompletedProcess:
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RuntimeError(f"{failure}: {detail}")
+    return result
+
+
+def read_aea_auth_data_plist(signed_shortcut: bytes) -> dict:
+    if len(signed_shortcut) < 12 or not is_signed_shortcut_bytes(signed_shortcut):
+        raise RuntimeError("not an AEA1 signed shortcut")
+    auth_data_size = int.from_bytes(signed_shortcut[8:12], "little")
+    auth_start = 12
+    auth_end = auth_start + auth_data_size
+    if auth_data_size <= 0 or auth_end > len(signed_shortcut):
+        raise RuntimeError("signed shortcut has an invalid AEA auth-data size")
+    auth_data = signed_shortcut[auth_start:auth_end]
+    try:
+        value = plistlib.loads(auth_data)
+    except Exception as exc:
+        raise RuntimeError(f"signed shortcut auth data is not a plist: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("signed shortcut auth data plist is not a dictionary")
+    return value
+
+
+def p256_public_key_pem(raw_key: bytes) -> str:
+    if len(raw_key) != 65 or raw_key[0] != 0x04:
+        raise RuntimeError(
+            "signed shortcut SigningPublicKey is not an uncompressed P-256 public key"
+        )
+    spki_prefix = bytes.fromhex(
+        "3059301306072a8648ce3d020106082a8648ce3d030107034200"
+    )
+    encoded = base64.encodebytes(spki_prefix + raw_key).decode("ascii")
+    body = "\n".join(line for line in encoded.splitlines() if line)
+    return f"-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n"
+
+
+def extract_signing_public_key_pem(auth_data: dict, tmpdir: Path, openssl_cli: str) -> tuple[str, str, int]:
+    certificate_chain = auth_data.get("SigningCertificateChain")
+    if isinstance(certificate_chain, list) and certificate_chain:
+        leaf_cert = certificate_chain[0]
+        if not isinstance(leaf_cert, (bytes, bytearray)):
+            raise RuntimeError("SigningCertificateChain leaf certificate is not DER bytes")
+        cert_path = tmpdir / "leaf.der"
+        cert_path.write_bytes(bytes(leaf_cert))
+        public_key_result = run_required(
+            [
+                openssl_cli,
+                "x509",
+                "-inform",
+                "DER",
+                "-in",
+                str(cert_path),
+                "-pubkey",
+                "-noout",
+            ],
+            "failed to extract signing public key from shortcut certificate",
+        )
+        return public_key_result.stdout, "SigningCertificateChain", len(certificate_chain)
+
+    signing_public_key = auth_data.get("SigningPublicKey")
+    if isinstance(signing_public_key, (bytes, bytearray)):
+        return p256_public_key_pem(bytes(signing_public_key)), "SigningPublicKey", 0
+
+    raise RuntimeError("signed shortcut auth data did not contain a supported signing public key")
+
+
+# Narrow extraction path credited to 0xilis (Snoolie). It mirrors the MIT-licensed
+# libshortcutsign extract_signed_shortcut concept without vendoring the full library:
+# decrypt the AEA1 envelope, then unwrap Shortcut.wflow from the embedded Apple Archive.
+def extract_signed_shortcut(
+    signed_shortcut_path: Path,
+    dest_path: Path,
+    aea_cli: str = DEFAULT_AEA_CLI,
+    aa_cli: str = DEFAULT_AA_CLI,
+    openssl_cli: str = DEFAULT_OPENSSL_CLI,
+) -> dict:
+    signed_bytes = signed_shortcut_path.read_bytes()
+    auth_data = read_aea_auth_data_plist(signed_bytes)
+
+    with tempfile.TemporaryDirectory(prefix="shortpy-extract-") as tmp:
+        tmpdir = Path(tmp)
+        public_key_path = tmpdir / "leaf-public.pem"
+        aar_path = tmpdir / "shortcut.aar"
+        extract_dir = tmpdir / "extract"
+        extract_dir.mkdir()
+
+        public_key_pem, signing_key_source, signing_certificate_count = extract_signing_public_key_pem(
+            auth_data,
+            tmpdir,
+            openssl_cli,
+        )
+        public_key_path.write_text(public_key_pem)
+        run_required(
+            [
+                aea_cli,
+                "decrypt",
+                "-i",
+                str(signed_shortcut_path),
+                "-o",
+                str(aar_path),
+                "-sign-pub",
+                str(public_key_path),
+            ],
+            "failed to decrypt signed shortcut AEA envelope",
+        )
+        run_required(
+            [
+                aa_cli,
+                "extract",
+                "-i",
+                str(aar_path),
+                "-d",
+                str(extract_dir),
+                "-include-path",
+                "Shortcut.wflow",
+            ],
+            "failed to extract Shortcut.wflow from signed shortcut archive",
+        )
+        extracted = extract_dir / "Shortcut.wflow"
+        if not extracted.exists():
+            raise RuntimeError("signed shortcut archive did not contain Shortcut.wflow")
+        shutil.copyfile(extracted, dest_path)
+
+    return {
+        "ok": True,
+        "source": "AEA1 signed shortcut",
+        "credit": "Narrow extraction flow based on MIT-licensed libshortcutsign extract_signed_shortcut by 0xilis (Snoolie).",
+        "auth_data_keys": sorted(str(key) for key in auth_data.keys()),
+        "signing_key_source": signing_key_source,
+        "certificate_count": signing_certificate_count,
+        "apple_id_certificate_count": len(auth_data.get("AppleIDCertificateChain") or []),
+        "workflow_plist_length": dest_path.stat().st_size,
+        "tools": {
+            "aea": aea_cli,
+            "aa": aa_cli,
+            "openssl": openssl_cli,
+        },
+    }
+
+
+def workflow_plist_bytes_for_import(input_bytes: bytes) -> tuple[bytes, dict | None]:
+    if not is_signed_shortcut_bytes(input_bytes):
+        return input_bytes, None
+    with tempfile.TemporaryDirectory(prefix="shortpy-signed-import-") as tmp:
+        tmpdir = Path(tmp)
+        signed_path = tmpdir / "signed.shortcut"
+        workflow_path = tmpdir / "Shortcut.wflow"
+        signed_path.write_bytes(input_bytes)
+        metadata = extract_signed_shortcut(signed_path, workflow_path)
+        return workflow_path.read_bytes(), metadata
+
+
+def text_icloud_shortcut_uuid(input_bytes: bytes) -> str | None:
+    try:
+        text = input_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if not text:
+        return None
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme != "https" or parsed.netloc.lower() != ICLOUD_SHORTCUTS_HOST:
+        return None
+    path = parsed.path.rstrip("/")
+    if path.startswith(ICLOUD_SHORTCUTS_API_PREFIX):
+        candidate = path[len(ICLOUD_SHORTCUTS_API_PREFIX):]
+    elif path.startswith(ICLOUD_SHORTCUTS_LINK_PREFIX):
+        candidate = path[len(ICLOUD_SHORTCUTS_LINK_PREFIX):]
+    else:
+        return None
+    if "/" in candidate or not re.fullmatch(r"[A-Fa-f0-9-]{32,40}", candidate):
+        raise RuntimeError(f"invalid iCloud shortcut identifier in URL: {text}")
+    return candidate
+
+
+def fetch_url_bytes(url: str, allow_http_error_body: bool = False) -> tuple[bytes, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json, application/octet-stream, */*",
+            "User-Agent": "Shortpy-IDE/0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=ICLOUD_FETCH_TIMEOUT) as response:
+            final_url = response.geturl()
+            return response.read(), final_url
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        if allow_http_error_body:
+            return body, exc.url or url
+        detail = body.decode("utf-8", errors="replace").strip()
+        if len(detail) > 500:
+            detail = f"{detail[:500]}..."
+        raise RuntimeError(f"HTTP {exc.code} fetching {url}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"failed to fetch {url}: {exc.reason}") from exc
+
+
+def workflow_plist_bytes_from_icloud_link(input_bytes: bytes) -> tuple[bytes, dict] | None:
+    shortcut_uuid = text_icloud_shortcut_uuid(input_bytes)
+    if shortcut_uuid is None:
+        return None
+    record_url = f"https://{ICLOUD_SHORTCUTS_HOST}{ICLOUD_SHORTCUTS_API_PREFIX}{shortcut_uuid}"
+    record_data, final_record_url = fetch_url_bytes(record_url, allow_http_error_body=True)
+    try:
+        record = json.loads(record_data.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"iCloud shortcut record response was not JSON: {exc}") from exc
+    if not isinstance(record, dict):
+        raise RuntimeError("iCloud shortcut record response was not an object")
+    if record.get("error") is True:
+        reason = record.get("reason") or "unknown error"
+        raise RuntimeError(f"iCloud shortcut record error: {reason}")
+    download_url = (((record.get("fields") or {}).get("shortcut") or {}).get("value") or {}).get("downloadURL")
+    if not isinstance(download_url, str) or not download_url:
+        raise RuntimeError("iCloud shortcut record did not contain fields.shortcut.value.downloadURL")
+    parsed_download = urllib.parse.urlparse(download_url)
+    if parsed_download.scheme != "https":
+        raise RuntimeError("iCloud shortcut downloadURL was not HTTPS")
+    plist_data, final_download_url = fetch_url_bytes(download_url)
+    metadata = {
+        "ok": True,
+        "source": "iCloud shortcut link",
+        "shortcut_id": shortcut_uuid,
+        "record_url": record_url,
+        "final_record_url": final_record_url,
+        "download_url": download_url,
+        "final_download_url": final_download_url,
+        "workflow_plist_length": len(plist_data),
+    }
+    return plist_data, metadata
+
+
+def workflow_import_source_bytes(input_bytes: bytes) -> tuple[bytes, dict | None, dict | None]:
+    icloud_import = workflow_plist_bytes_from_icloud_link(input_bytes)
+    if icloud_import is not None:
+        plist_data, metadata = icloud_import
+        plist_data, signed_metadata = workflow_plist_bytes_for_import(plist_data)
+        if signed_metadata is not None:
+            metadata["signed_shortcut_import"] = signed_metadata
+        return plist_data, None, metadata
+    plist_data, signed_metadata = workflow_plist_bytes_for_import(input_bytes)
+    return plist_data, signed_metadata, None
+
+
 def compile_python_record_file_probe(
     socket_path: str,
     source: bytes,
@@ -1846,10 +2110,21 @@ def main() -> int:
         return 0
 
     if args.command == "plist-data-to-python":
-        plist_data = read_source(args)
-        payload = base64.b64encode(plist_data).decode("ascii")
-        response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
-        response = inline_catalog_import_response(args.socket, response)
+        try:
+            plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
+            payload = base64.b64encode(plist_data).decode("ascii")
+            response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
+            response = inline_catalog_import_response(args.socket, response)
+            if signed_import is not None:
+                response["signed_shortcut_import"] = signed_import
+            if icloud_import is not None:
+                response["icloud_shortcut_import"] = icloud_import
+        except Exception as exc:
+            response = {
+                "ok": False,
+                "mode": "plist-data-to-python",
+                "diagnostic": str(exc),
+            }
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0
 

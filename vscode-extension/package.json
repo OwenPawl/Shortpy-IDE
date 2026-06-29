@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -21,6 +21,7 @@
     "onCommand:shortcutsRuntimeIDE.openWorkflowPlistFromPython",
     "onCommand:shortcutsRuntimeIDE.pythonToPlistDebugJson",
     "onCommand:shortcutsRuntimeIDE.loadPythonFromPlist",
+    "onCommand:shortcutsRuntimeIDE.importICloudShortcutLink",
     "onCommand:shortcutsRuntimeIDE.searchActions",
     "onCommand:shortcutsRuntimeIDE.searchTriggers",
     "onCommand:shortcutsRuntimeIDE.resolveEntity",
@@ -76,6 +77,10 @@
       {
         "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
         "title": "Shortcuts IDE: Import Plist As Python"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.importICloudShortcutLink",
+        "title": "Shortcuts IDE: Import iCloud Link As Python"
       },
       {
         "command": "shortcutsRuntimeIDE.searchActions",
@@ -159,6 +164,10 @@
         {
           "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
           "group": "navigation@58"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.importICloudShortcutLink",
+          "group": "navigation@59"
         }
       ],
       "explorer/context": [
