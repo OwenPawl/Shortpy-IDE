@@ -27,10 +27,6 @@ ICLOUD_SHORTCUTS_HOST = "www.icloud.com"
 ICLOUD_SHORTCUTS_API_PREFIX = "/shortcuts/api/records/"
 ICLOUD_SHORTCUTS_LINK_PREFIX = "/shortcuts/"
 ICLOUD_FETCH_TIMEOUT = 30
-DEFAULT_TOOLRENDERER_FRAMEWORK = Path(
-    "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/"
-    "iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/ToolRenderer.framework"
-)
 QUERY_STOPWORDS = {
     "a",
     "an",
@@ -465,14 +461,15 @@ def cached_toolrenderer_items() -> tuple[list[dict], str] | tuple[None, None]:
             ("trigger", "trigger", "triggers"),
         ]:
             for item in metadata.get(key, []) or []:
+                clean_item = visible_toolrenderer_item(item)
                 items.append(
                     {
-                        "pythonName": item.get("pythonName", ""),
+                        "pythonName": clean_item.get("pythonName", ""),
                         "kind": output_kind,
-                        "displayName": item.get("displayName") or item.get("pythonName", ""),
-                        "documentation": item.get("documentation") or item.get("summary") or "",
-                        "signature": item.get("signature", ""),
-                        "parameters": item.get("parameters", []),
+                        "displayName": clean_item.get("displayName") or clean_item.get("pythonName", ""),
+                        "documentation": clean_item.get("documentation") or clean_item.get("summary") or "",
+                        "signature": clean_item.get("signature", ""),
+                        "parameters": clean_item.get("parameters", []),
                         "sourceKind": source_kind,
                     }
                 )
@@ -483,13 +480,83 @@ def cached_toolrenderer_items() -> tuple[list[dict], str] | tuple[None, None]:
     return None, None
 
 
+VISIBLE_TOOLKIT_ITEM_KEYS = {
+    "bindingSource",
+    "customDescription",
+    "id",
+    "nativeIdentifier",
+    "toolkitDisplayName",
+}
+
+VISIBLE_TOOLKIT_PARAMETER_KEYS = {
+    "binding",
+    "catalog",
+    "customDescription",
+    "key",
+    "rawKey",
+    "sortOrder",
+}
+
+
+def visible_toolrenderer_parameter(parameter: object) -> object:
+    if not isinstance(parameter, dict):
+        return parameter
+    return {
+        key: value
+        for key, value in parameter.items()
+        if key not in VISIBLE_TOOLKIT_PARAMETER_KEYS
+    }
+
+
+def visible_toolrenderer_item(item: object) -> object:
+    if not isinstance(item, dict):
+        return item
+    output = {
+        key: value
+        for key, value in item.items()
+        if key not in VISIBLE_TOOLKIT_ITEM_KEYS
+    }
+    if isinstance(output.get("parameters"), list):
+        output["parameters"] = [visible_toolrenderer_parameter(parameter) for parameter in output["parameters"]]
+    return output
+
+
+def visible_toolrenderer_metadata(metadata: dict) -> dict:
+    output = {
+        key: value
+        for key, value in metadata.items()
+        if key not in {"customDescriptionSource", "customDescriptionCounts"}
+    }
+    actions = [visible_toolrenderer_item(item) for item in output.get("actions", []) or []]
+    triggers = [visible_toolrenderer_item(item) for item in output.get("triggers", []) or []]
+    helpers = [visible_toolrenderer_item(item) for item in output.get("helpers", []) or []]
+    types = [visible_toolrenderer_item(item) for item in output.get("types", []) or []]
+    output.update({
+        "source": "ToolRenderer.pythonInterface",
+        "actions": actions,
+        "triggers": triggers,
+        "helpers": helpers,
+        "types": types,
+        "items": helpers + actions + triggers,
+        "counts": {
+            **(output.get("counts", {}) or {}),
+            "actions": len(actions),
+            "triggers": len(triggers),
+            "helpers": len(helpers),
+            "types": len(types),
+            "items": len(helpers) + len(actions) + len(triggers),
+        },
+    })
+    return output
+
+
 def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
     response = None
     if refresh:
         raw = send_command(socket_path, "toolrenderer-structured-metadata")
         response = json.loads(raw)
         if response.get("ok") and response.get("items"):
-            return enrich_structured_toolrenderer_metadata(response)
+            return visible_toolrenderer_metadata(response)
         if response.get("ok"):
             structured = parse_toolrenderer_structured_from_source(
                 response.get("python_interface") or response.get("pythonInterface") or ""
@@ -504,7 +571,7 @@ def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> 
                 "provider_symbols": response.get("provider_symbols"),
             }
             structured["diagnostics"] = (response.get("diagnostics") or []) + structured.get("diagnostics", [])
-            return enrich_structured_toolrenderer_metadata(structured)
+            return visible_toolrenderer_metadata(structured)
     metadata_path = Path(__file__).resolve().parents[1] / "logs" / "vscode-extension-toolrenderer-interface.json"
     raw_path = Path(__file__).resolve().parents[1] / "logs" / "toolrenderer-python-interface.py"
     if metadata_path.exists():
@@ -512,14 +579,14 @@ def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> 
         if raw_path.exists() and not cached.get("types"):
             structured = parse_toolrenderer_structured_from_source(raw_path.read_text())
             structured["source"] = f"cached raw {raw_path}; replaced stale no-types metadata {metadata_path}"
-            return enrich_structured_toolrenderer_metadata(structured)
+            return visible_toolrenderer_metadata(structured)
         cached["ok"] = True
         cached.setdefault("mode", "toolrenderer-structured-metadata")
         cached.setdefault("source", f"cached {metadata_path}")
         cached.setdefault("diagnostics", [])
-        return enrich_structured_toolrenderer_metadata(cached)
+        return visible_toolrenderer_metadata(cached)
     if raw_path.exists():
-        return enrich_structured_toolrenderer_metadata(parse_toolrenderer_structured_from_source(raw_path.read_text()))
+        return visible_toolrenderer_metadata(parse_toolrenderer_structured_from_source(raw_path.read_text()))
     if response is not None:
         return response
     return {
@@ -731,6 +798,24 @@ def load_toolkit_metadata() -> dict:
     if TOOLKIT_METADATA_CACHE is not None:
         return TOOLKIT_METADATA_CACHE
     metadata_path = Path(__file__).resolve().parents[1] / "logs" / "vscode-extension-toolkit-metadata.json"
+    if not metadata_path.exists():
+        try:
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("toolkitctl.py")),
+                    "--quiet",
+                    "metadata",
+                    "--out",
+                    str(metadata_path),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
     try:
         parsed = json.loads(metadata_path.read_text())
         if isinstance(parsed, dict):
@@ -822,26 +907,6 @@ def preferred_parameter_key(item: dict, parameter_name: str) -> str | None:
     return candidates[0]["key"] if candidates else None
 
 
-def preferred_parameter_item(item: dict, parameter_name: str) -> dict | None:
-    parameters = item.get("parameters", [])
-    if not isinstance(parameters, list):
-        return None
-    candidates = [
-        parameter
-        for parameter in parameters
-        if isinstance(parameter, dict)
-        and parameter.get("pythonName") == parameter_name
-        and isinstance(parameter.get("key"), str)
-    ]
-    for parameter in candidates:
-        if parameter["key"].startswith("WF"):
-            return parameter
-    for parameter in candidates:
-        if parameter["key"] != parameter_name:
-            return parameter
-    return candidates[0] if candidates else None
-
-
 def trigger_identifier_and_variant(item: dict) -> tuple[str, str] | None:
     identifier = item.get("id")
     if not isinstance(identifier, str):
@@ -857,189 +922,6 @@ def trigger_identifier_and_variant(item: dict) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def catalog_type_info(parameter: dict) -> dict | None:
-    type_text = str(parameter.get("type", ""))
-    compact = re.sub(r"\s+", "", type_text)
-    if "Resolved[" not in compact and "Picked[" not in compact:
-        return None
-    return {
-        "kind": "picked" if "Picked[" in compact else "resolved",
-        "representation": "inline parameterState JSON rewritten to ref(...) plus WFParameterStateCatalog",
-        "bindingRequired": True,
-    }
-
-
-def load_toolrenderer_custom_descriptions() -> dict:
-    framework = DEFAULT_TOOLRENDERER_FRAMEWORK
-
-    def load(name: str) -> dict:
-        path = framework / name
-        if not path.exists():
-            return {}
-        try:
-            parsed = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-
-    enum_descriptions = {
-        **load("CustomDescriptions_Enums_macOS.json"),
-        **load("CustomDescriptions_Enums_iOS.json"),
-    }
-    return {
-        "source": str(framework),
-        "tools": load("CustomDescriptions_Tools.json"),
-        "triggers": load("CustomDescriptions_Triggers.json"),
-        "enumDescriptions": enum_descriptions,
-    }
-
-
-def append_source(source: object, suffix: str) -> str:
-    base = source if isinstance(source, str) and source else "ToolRenderer.pythonInterface"
-    parts = []
-    for part in base.split(";"):
-        clean = part.strip()
-        if clean and clean not in parts:
-            parts.append(clean)
-    if suffix not in parts:
-        parts.append(suffix)
-    return "; ".join(parts)
-
-
-def enrich_structured_toolrenderer_metadata(metadata: dict) -> dict:
-    custom_descriptions = load_toolrenderer_custom_descriptions()
-
-    def enrich_item(item: dict) -> dict:
-        if item.get("kind") == "trigger":
-            candidates = toolkit_items("triggers", item.get("pythonName", ""))
-            toolkit_item = candidates[0] if candidates else None
-        elif item.get("kind") == "action":
-            toolkit_item = preferred_action_item(item.get("pythonName", ""))
-        else:
-            toolkit_item = None
-        if not toolkit_item:
-            return item
-        enriched = dict(item)
-        identifier = toolkit_item.get("id")
-        if isinstance(identifier, str):
-            enriched["nativeIdentifier"] = identifier
-            enriched["id"] = identifier
-        custom = None
-        if item.get("kind") == "action" and isinstance(identifier, str):
-            custom = custom_descriptions.get("tools", {}).get(identifier)
-        elif item.get("kind") == "trigger" and isinstance(identifier, str):
-            custom = custom_descriptions.get("triggers", {}).get(identifier)
-        custom_parameter_descriptions = {}
-        if isinstance(custom, dict):
-            custom_parameter_descriptions = custom.get("parameter_descriptions") or {}
-            if not isinstance(custom_parameter_descriptions, dict):
-                custom_parameter_descriptions = {}
-            main_description = custom.get("main_description")
-            if isinstance(main_description, str) and main_description:
-                enriched.setdefault("summary", main_description)
-                enriched.setdefault("documentation", main_description)
-                enriched.setdefault("docString", main_description)
-            enriched["customDescription"] = {
-                "source": str(DEFAULT_TOOLRENDERER_FRAMEWORK / (
-                    "CustomDescriptions_Triggers.json" if item.get("kind") == "trigger" else "CustomDescriptions_Tools.json"
-                )),
-                "mainDescription": main_description or "",
-                "parameterDescriptions": custom_parameter_descriptions,
-            }
-        if not enriched.get("displayName") and toolkit_item.get("displayName"):
-            enriched["displayName"] = toolkit_item.get("displayName")
-        parameters = []
-        for parameter in enriched.get("parameters", []) or []:
-            if not isinstance(parameter, dict):
-                continue
-            merged = dict(parameter)
-            toolkit_param = preferred_parameter_item(toolkit_item, parameter.get("pythonName", ""))
-            if toolkit_param:
-                raw_key = toolkit_param.get("key")
-                if isinstance(raw_key, str):
-                    merged["rawKey"] = raw_key
-                    merged["key"] = raw_key
-                if toolkit_param.get("displayName"):
-                    merged.setdefault("displayName", toolkit_param.get("displayName"))
-                if toolkit_param.get("summary") and not merged.get("summary"):
-                    merged["summary"] = toolkit_param.get("summary")
-                custom_doc = None
-                if raw_key and isinstance(custom_parameter_descriptions.get(raw_key), str):
-                    custom_doc = custom_parameter_descriptions.get(raw_key)
-                elif isinstance(custom_parameter_descriptions.get(parameter.get("pythonName", "")), str):
-                    custom_doc = custom_parameter_descriptions.get(parameter.get("pythonName", ""))
-                if custom_doc:
-                    merged.setdefault("summary", custom_doc)
-                    merged.setdefault("doc", custom_doc)
-                    merged["customDescription"] = {
-                        "source": "ToolRenderer CustomDescriptions_Tools.json",
-                        "text": custom_doc,
-                    }
-                handle = None
-                if item.get("kind") == "trigger":
-                    parsed = trigger_identifier_and_variant(toolkit_item)
-                    if parsed and raw_key:
-                        handle = {
-                            "trigger": {
-                                "identifier": parsed[0],
-                                "variant": parsed[1],
-                            }
-                        }
-                elif item.get("kind") == "action" and identifier and raw_key:
-                    handle = {"action": {"identifier": identifier}}
-                if handle and raw_key:
-                    merged["binding"] = {
-                        "source": "ToolKit.SharedToolDatabaseProvider metadata",
-                        "hostAndKey": {
-                            "handle": handle,
-                            "key": raw_key,
-                        },
-                    }
-            catalog = catalog_type_info(merged)
-            if catalog:
-                catalog["supported"] = bool(merged.get("binding"))
-                merged["catalog"] = catalog
-            parameters.append(merged)
-        enriched["parameters"] = parameters
-        enriched["bindingSource"] = (
-            "ToolRenderer.pythonInterface + ToolKit raw key metadata + ToolRenderer custom descriptions"
-            if custom else
-            "ToolRenderer.pythonInterface + ToolKit raw key metadata"
-        )
-        return enriched
-
-    actions = [enrich_item(item) for item in metadata.get("actions", []) or []]
-    triggers = [enrich_item(item) for item in metadata.get("triggers", []) or []]
-    helpers = metadata.get("helpers", []) or []
-    items = helpers + actions + triggers
-    enriched = dict(metadata)
-    enriched.update({
-        "source": append_source(
-            metadata.get("source"),
-            "enriched with ToolKit raw keys and ToolRenderer custom descriptions",
-        ),
-        "actions": actions,
-        "triggers": triggers,
-        "helpers": helpers,
-        "items": items,
-        "counts": {
-            **(metadata.get("counts", {}) or {}),
-            "actions": len(actions),
-            "triggers": len(triggers),
-            "helpers": len(helpers),
-            "types": len(metadata.get("types", []) or []),
-            "items": len(items),
-        },
-        "customDescriptionSource": custom_descriptions.get("source"),
-        "customDescriptionCounts": {
-            "actions": sum(1 for item in actions if item.get("customDescription")),
-            "triggers": sum(1 for item in triggers if item.get("customDescription")),
-            "enumDescriptions": len(custom_descriptions.get("enumDescriptions", {})),
-        },
-    })
-    return enriched
-
-
 def state_variant_from_call(call: ast.Call) -> str:
     for keyword in call.keywords:
         if keyword.arg != "state":
@@ -1052,7 +934,15 @@ def state_variant_from_call(call: ast.Call) -> str:
     return "opened"
 
 
-def catalog_handle_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict:
+def native_metadata_provider_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict | None:
+    # TODO: Replace the internal fallback below by exporting the native
+    # WFParameterMetadataProvider.binding(toolID:) and binding(triggerID:) results.
+    # Keep this adapter boundary stable so inline catalog compilation does not
+    # depend on ToolKit sqlite records once native binding extraction is proven.
+    return None
+
+
+def internal_toolkit_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict:
     trigger_items = toolkit_items("triggers", action_name)
     if trigger_items:
         trigger_item = trigger_items[0]
@@ -1072,6 +962,7 @@ def catalog_handle_for_context(action_name: str, parameter_name: str, call: ast.
                         }
                     ])
             return {
+                "source": "internal-toolkit-fallback",
                 "hostAndKey": {
                     "handle": {
                         "trigger": {
@@ -1088,6 +979,7 @@ def catalog_handle_for_context(action_name: str, parameter_name: str, call: ast.
         key = preferred_parameter_key(action_item, parameter_name)
         if isinstance(identifier, str) and key:
             return {
+                "source": "internal-toolkit-fallback",
                 "hostAndKey": {
                     "handle": {
                         "action": {
@@ -1100,11 +992,21 @@ def catalog_handle_for_context(action_name: str, parameter_name: str, call: ast.
     raise InlineCatalogError([
         {
             "code": "unsupportedInlineCatalogContext",
-            "message": f"Inline catalog metadata for {action_name}.{parameter_name} has no native ToolRenderer/ToolKit binding; refusing to guess a host/key.",
+            "message": f"Inline catalog metadata for {action_name}.{parameter_name} has no native metadata-provider binding and no internal fallback; refusing to guess a host/key.",
             "actionName": action_name,
             "actionParameter": parameter_name,
         }
     ])
+
+
+def metadata_provider_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict:
+    native_binding = native_metadata_provider_binding_for_context(action_name, parameter_name, call)
+    if native_binding is not None:
+        return {
+            "source": "native-metadata-provider",
+            **native_binding,
+        }
+    return internal_toolkit_binding_for_context(action_name, parameter_name, call)
 
 
 def stable_ref_tag(entry: dict, used: set[str]) -> str:
@@ -1114,6 +1016,7 @@ def stable_ref_tag(entry: dict, used: set[str]) -> str:
             "actionParameter": entry["actionParameter"],
             "parameterType": entry.get("parameterType"),
             "handle": entry["handle"],
+            "bindingSource": entry.get("bindingSource"),
             "metadata": entry["metadata"],
         },
         sort_keys=True,
@@ -1199,14 +1102,15 @@ def rewrite_inline_catalog_metadata(source: bytes) -> dict:
             for literal_node in literal_nodes:
                 try:
                     metadata = literal_json_value(literal_node)
-                    handle = catalog_handle_for_context(action_name, keyword.arg, node)
+                    binding = metadata_provider_binding_for_context(action_name, keyword.arg, node)
                     entry = {
                         "actionName": action_name,
                         "actionParameter": keyword.arg,
                         "parameterType": parameter_info["type"],
                         "catalogKind": parameter_info["catalogKind"],
                         "isList": parameter_info["isList"],
-                        "handle": handle,
+                        "handle": {"hostAndKey": binding["hostAndKey"]},
+                        "bindingSource": binding.get("source"),
                         "metadata": metadata,
                     }
                     tag = stable_ref_tag(entry, used_tags)
@@ -1284,6 +1188,7 @@ def attach_inline_catalog_summary(response: dict, prepared: dict, expand_respons
                 "actionParameter": entry["actionParameter"],
                 "parameterType": entry.get("parameterType"),
                 "catalogKind": entry.get("catalogKind"),
+                "bindingSource": entry.get("bindingSource"),
             }
             for entry in prepared["entries"]
         ],
@@ -2014,11 +1919,11 @@ def main() -> int:
     )
     sub.add_parser(
         "toolrenderer-python-interface",
-        help="Render the full ToolRenderer Python interface from the shared ToolKit database",
+        help="Render the full ToolRenderer Python interface",
     )
     structured = sub.add_parser(
         "toolrenderer-structured-metadata",
-        help="Render structured ToolRenderer metadata for IDE hovers, completions, signatures, and catalog bindings",
+        help="Render ToolRenderer-only visible metadata for IDE hovers, completions, signatures, and diagnostics",
     )
     structured.add_argument(
         "--cached",

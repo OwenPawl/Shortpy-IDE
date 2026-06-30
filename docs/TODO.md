@@ -12,15 +12,18 @@
 - Root decorators such as `@runnable` and `@input_fallback` round trip through workflow plist.
 - Native trigger decorators such as `@when_app_opened` round trip through workflow plist.
 - Inline app metadata round trips without exposing `ref(...)` in editable Python for the proven app-trigger case.
-- VS Code extension has native commands for bridge status/connect, plist import/export, Apple runtime validation, action/trigger search, entity debug flow, ToolKit metadata, and ToolRenderer metadata.
-- Static diagnostics validate action/trigger names and top-level keyword parameters only.
+- VS Code extension has native commands for bridge status/connect, plist import/export, Apple runtime validation, action/trigger search, entity debug flow, and ToolRenderer metadata refresh.
+- Visible VS Code metadata is ToolRenderer-only. Cached ToolRenderer metadata powers hovers, completions, signature help, action/trigger search, highlighting, and static Shortpy diagnostics without blocking on the bridge after activation.
+- Static Shortpy diagnostics validate action/trigger names and top-level keyword parameters only.
+- Inline catalog expansion now goes through a binding-adapter boundary that can be replaced by native `WFParameterMetadataProvider.binding(...)` extraction; the current ToolKit-derived binding is an internal compile fallback only.
 - Selected proof reports are in `docs/reports/`.
 
 ## Next
 
 - Finish replacing legacy sidecar/ref UI paths with inline parameter-state metadata everywhere.
 - Generalize inline parameter-state metadata across all catalog-like action and trigger parameters.
-- Expand structured ToolRenderer metadata use in hovers, completions, signature help, snippets, and diagnostics.
+- Prove native `WFParameterMetadataProvider.binding(toolID:)` and `binding(triggerID:)` extraction, then remove the internal ToolKit fallback from inline catalog expansion.
+- Add richer snippet generation from ToolRenderer signatures.
 - Keep native retrieval/live entity lookup out of the compile path when inline metadata is available.
 - Tighten VS Code custom editor behavior so plist import/export feels native and does not expose debug-only flows.
 - Package a clean VSIX from this repository layout.
@@ -29,6 +32,7 @@
 ## Out Of Primary UI Scope
 
 - Roundtrip debug JSON commands should remain debug/log paths, not primary UI actions.
+- ToolKit sqlite should not appear as a user-facing VS Code metadata/documentation source.
 - `submit_answer` is not part of the editor tool surface.
 - Legacy custom trigger DSL should not be preserved.
 - Legacy pre-AEA signed shortcut variants beyond current AEA1 import should remain explicit follow-up work.

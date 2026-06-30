@@ -73,6 +73,12 @@ The host CLI unwraps AEA1 envelopes with the macOS `aea`, `aa`, and `openssl` to
 
 For iCloud links, the host CLI calls `https://www.icloud.com/shortcuts/api/records/<UUID>`, handles `{"error":true,"reason":"..."}` as an import diagnostic, downloads `fields.shortcut.value.downloadURL`, and sends those unsigned workflow plist bytes to the simulator bridge.
 
+## Metadata Boundary
+
+`toolrenderer-structured-metadata` is the visible IDE metadata surface. It returns ToolRenderer Python-interface actions, triggers, helpers, and types with raw ToolKit keys, host/key bindings, and ToolKit source labels stripped so old caches cannot leak internal catalog details into the UI.
+
+Inline catalog metadata compilation goes through a separate binding adapter. The adapter is shaped for native `WFParameterMetadataProvider.binding(toolID:)` / `binding(triggerID:)` extraction and currently falls back internally to ToolKit-derived host/key data only when no native binding has been proven. That fallback is not a VS Code documentation or completion source.
+
 ## Optional Live Injection
 
 ```sh

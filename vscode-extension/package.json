@@ -2,8 +2,13 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "local",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OwenPawl/Shortpy-IDE.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -26,10 +31,7 @@
     "onCommand:shortcutsRuntimeIDE.searchTriggers",
     "onCommand:shortcutsRuntimeIDE.resolveEntity",
     "onCommand:shortcutsRuntimeIDE.refreshToolMetadata",
-    "onCommand:shortcutsRuntimeIDE.refreshToolKitMetadata",
     "onCommand:shortcutsRuntimeIDE.refreshToolRendererInterface",
-    "onCommand:shortcutsRuntimeIDE.showToolKitStatus",
-    "onCommand:shortcutsRuntimeIDE.pointSimulatorToolKitToHost",
     "onCommand:shortcutsRuntimeIDE.status"
   ],
   "main": "./src/extension.js",
@@ -96,23 +98,11 @@
       },
       {
         "command": "shortcutsRuntimeIDE.refreshToolMetadata",
-        "title": "Shortcuts IDE: Refresh Tool Metadata"
-      },
-      {
-        "command": "shortcutsRuntimeIDE.refreshToolKitMetadata",
-        "title": "Shortcuts IDE: Refresh ToolKit Metadata"
+        "title": "Shortcuts IDE: Refresh ToolRenderer Metadata"
       },
       {
         "command": "shortcutsRuntimeIDE.refreshToolRendererInterface",
         "title": "Shortcuts IDE: Refresh Native ToolRenderer Interface"
-      },
-      {
-        "command": "shortcutsRuntimeIDE.showToolKitStatus",
-        "title": "Shortcuts IDE: Simulator ToolKit Status"
-      },
-      {
-        "command": "shortcutsRuntimeIDE.pointSimulatorToolKitToHost",
-        "title": "Shortcuts IDE: Point Simulator ToolKit To Host"
       },
       {
         "command": "shortcutsRuntimeIDE.status",
@@ -186,45 +176,25 @@
           "default": "",
           "description": "Path to bridgectl.py. Leave empty to use bridge/tools/bridgectl.py from the Shortpy IDE repository."
         },
-        "shortcutsRuntimeIDE.toolkitCtlPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to simulator toolkitctl.py. Leave empty to use bridge/tools/toolkitctl.py from the Shortpy IDE repository."
-        },
-        "shortcutsRuntimeIDE.simulatorDevice": {
-          "type": "string",
-          "default": "booted",
-          "description": "Simulator UDID for ToolKit commands, or booted."
-        },
-        "shortcutsRuntimeIDE.toolkitMetadataPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional path to cached ToolKit metadata JSON. Leave empty to use extension storage."
-        },
         "shortcutsRuntimeIDE.toolRendererMetadataPath": {
           "type": "string",
           "default": "",
           "description": "Optional path to cached native ToolRenderer interface metadata JSON. Leave empty to use extension storage."
         },
-        "shortcutsRuntimeIDE.refreshToolKitMetadataOnActivation": {
-          "type": "boolean",
-          "default": true,
-          "description": "Refresh simulator ToolKit Python-name metadata when the extension activates."
-        },
         "shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation": {
           "type": "boolean",
           "default": true,
-          "description": "Load cached Apple's native ToolRenderer Python interface metadata when the extension activates. Use the explicit native ToolRenderer refresh command for a live render."
+          "description": "Load cached ToolRenderer metadata at activation and refresh it from the simulator bridge in the background when available."
         },
         "shortcutsRuntimeIDE.highlightKnownCommands": {
           "type": "boolean",
           "default": true,
-          "description": "Highlight known Shortcuts action and trigger Python names from ToolKit metadata."
+          "description": "Highlight known Shortcuts action and trigger Python names from cached ToolRenderer metadata."
         },
         "shortcutsRuntimeIDE.writeToDebugConsole": {
           "type": "boolean",
           "default": true,
-          "description": "Mirror key bridge and ToolKit events into the VS Code Debug Console when available."
+          "description": "Mirror key bridge and Shortpy IDE events into the VS Code Debug Console when available."
         },
         "shortcutsRuntimeIDE.pythonPath": {
           "type": "string",

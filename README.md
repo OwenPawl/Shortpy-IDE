@@ -6,7 +6,7 @@ This repository is intentionally small. It contains the current working bridge a
 
 ## Layout
 
-- `bridge/`: injected iOS Simulator dylib, bridge control CLI, ToolKit helper, and build files.
+- `bridge/`: injected iOS Simulator dylib, bridge control CLI, internal catalog-binding helpers, and build files.
 - `vscode-extension/`: VS Code custom editor and Python tooling integration.
 - `docs/`: implementation notes, TODO, and selected proof reports.
 
@@ -26,6 +26,8 @@ ShortcutsLanguage.pythonToShortcut
 This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
 
 Editable Python should use inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge rewrites that representation internally for Apple's compiler.
+
+VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then refreshes that cache from the simulator bridge in the background when available. ToolKit sqlite data is not a user-facing documentation source; it remains only an internal bridge fallback for catalog host/key binding until native metadata-provider binding extraction is implemented.
 
 ## Quick Start
 
@@ -65,6 +67,7 @@ Run VS Code extension syntax checks:
 
 ```sh
 node --check vscode-extension/src/bridge.js
+node --check vscode-extension/src/toolrenderer.js
 node --check vscode-extension/src/extension.js
 node --check vscode-extension/test/smoke.js
 ```

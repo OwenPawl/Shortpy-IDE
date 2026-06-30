@@ -12,17 +12,12 @@ const {
   shortcutBufferFromResponse,
 } = require("../src/bridge");
 const {
-  indexToolkitMetadata,
-  loadToolkitMetadata,
-  refreshToolkitMetadata,
-} = require("../src/toolkit");
-const {
   indexToolRendererMetadata,
   loadToolRendererMetadata,
   refreshToolRendererMetadata,
   searchToolRendererMetadata,
 } = require("../src/toolrenderer");
-const { collectToolkitDiagnostics, parameterInfoAt } = require("../src/toolkitDiagnostics");
+const { collectToolRendererDiagnostics, parameterInfoAt } = require("../src/shortpyDiagnostics");
 
 const execFile = util.promisify(cp.execFile);
 
@@ -33,13 +28,6 @@ async function main() {
   const options = {
     bridgeCtlPath: path.join(root, "bridge", "tools", "bridgectl.py"),
   };
-  const toolkitOptions = {
-    toolkitCtlPath: path.join(root, "bridge", "tools", "toolkitctl.py"),
-  };
-  const metadataPath = path.join(logs, "vscode-extension-toolkit-metadata.json");
-  options.toolkitMetadataPath = metadataPath;
-  const metadataRefresh = await refreshToolkitMetadata(metadataPath, toolkitOptions);
-  const toolkit = indexToolkitMetadata(await loadToolkitMetadata(metadataPath));
   const toolRendererMetadataPath = path.join(logs, "vscode-extension-toolrenderer-interface.json");
   let toolRendererRefresh;
   try {
@@ -61,12 +49,12 @@ async function main() {
     "    com_apple_shortcuts_not_a_real_action()",
     "",
   ].join("\n");
-  const staticDiagnostics = collectToolkitDiagnostics(staticDiagnosticSource, [toolRenderer, toolkit]);
+  const staticDiagnostics = collectToolRendererDiagnostics(staticDiagnosticSource, toolRenderer);
   const staticDiagnosticLines = staticDiagnosticSource.split(/\r?\n/);
   const nestedParameterColumn = staticDiagnosticLines[1].indexOf("bogus_nested") + 4;
   const titleParameterColumn = staticDiagnosticLines[1].indexOf("title") + 2;
-  const nestedParameterHover = parameterInfoAt(staticDiagnosticSource, 1, nestedParameterColumn, [toolRenderer, toolkit]);
-  const titleParameterHover = parameterInfoAt(staticDiagnosticSource, 1, titleParameterColumn, [toolRenderer, toolkit]);
+  const nestedParameterHover = parameterInfoAt(staticDiagnosticSource, 1, nestedParameterColumn, [toolRenderer]);
+  const titleParameterHover = parameterInfoAt(staticDiagnosticSource, 1, titleParameterColumn, [toolRenderer]);
   const bridgeCtl = path.join(root, "bridge", "tools", "bridgectl.py");
   const cliActionSearch = JSON.parse((await execFile("python3", [
     bridgeCtl,
@@ -156,9 +144,13 @@ async function main() {
     invalidDiagnostic = error.message;
   }
   const status = await runBridgeStatus(options);
-  const showNotification = toolkit.byName.get("com_apple_shortcuts_show_notification");
+  const manifest = JSON.parse(await fs.readFile(path.join(root, "vscode-extension", "package.json"), "utf8"));
+  const manifestCommands = (manifest.contributes && manifest.contributes.commands || []).map((entry) => entry.command);
+  const showNotification = toolRenderer.byName.get("com_apple_shortcuts_show_notification");
   const showNotificationParameters = (showNotification && showNotification.parameters || [])
-    .map((parameter) => parameter.pythonName || parameter.key);
+    .map((parameter) => parameter.pythonName || parameter.name);
+  const showNotificationLeaksInternalMetadata = Boolean(showNotification && (showNotification.id || showNotification.nativeIdentifier || showNotification.toolkitDisplayName ||
+    (showNotification.parameters || []).some((parameter) => parameter.rawKey || parameter.key || parameter.binding || parameter.catalog || parameter.customDescription)));
   const summary = {
     ok: true,
     bridge_version: status.version,
@@ -200,18 +192,16 @@ async function main() {
         (triggerSignedReimported.python_code || "").includes("\"BundleIdentifier\": \"com.apple.shortcuts\""),
       signed_reimported_has_no_refs: !(triggerSignedReimported.python_code || "").includes("ref(0x"),
     },
-    toolkit_counts: metadataRefresh.counts,
     toolrenderer_counts: toolRendererRefresh.counts,
-    has_show_notification_metadata: toolkit.byName.has("com_apple_shortcuts_show_notification"),
     has_native_show_notification_metadata: toolRenderer.byName.has("com_apple_shortcuts_show_notification"),
     has_native_when_app_opened_metadata: toolRenderer.byName.has("when_app_opened"),
     has_native_when_focus_enable_metadata: toolRenderer.byName.has("when_focus_enable"),
     has_native_run_surface_type: toolRenderer.byName.has("RunSurface"),
     has_native_run_surface_case: toolRenderer.byName.has("RunSurface.SHARE_SHEET"),
     has_native_input_fallback_type: toolRenderer.byName.has("InputFallback"),
-    open_app_binding_key: (((toolRenderer.byName.get("com_apple_shortcuts_open_app") || {}).parameters || [])[0] || {}).rawKey,
-    when_app_opened_binding_key: (((toolRenderer.byName.get("when_app_opened") || {}).parameters || [])[0] || {}).rawKey,
+    show_notification_leaks_internal_metadata: showNotificationLeaksInternalMetadata,
     native_when_app_opened_parameters: ((toolRenderer.byName.get("when_app_opened") || {}).parameters || []).map((parameter) => parameter.pythonName),
+    package_exposes_toolkit_commands: manifestCommands.some((command) => /ToolKit/.test(command) || /toolkit/i.test(command)),
     native_tool_search_top: nativeToolSearch.map((item) => item.pythonName),
     native_trigger_search_top: nativeTriggerSearch.map((item) => item.pythonName),
     static_diagnostics: {
@@ -236,7 +226,6 @@ async function main() {
     show_notification_parameters: showNotificationParameters,
     has_show_notification_python_parameter_names:
       showNotificationParameters.includes("title") && showNotificationParameters.includes("body"),
-    has_when_app_opened_trigger_metadata: toolkit.byName.has("when_app_opened"),
     invalid_diagnostic_prefix: invalidDiagnostic.slice(0, 240),
   };
   if (!summary.has_show_notification_python_parameter_names) {
@@ -267,10 +256,10 @@ async function main() {
       InputFallback: summary.has_native_input_fallback_type,
     })}`);
   }
-  if (summary.open_app_binding_key !== "WFSelectedApp" || summary.when_app_opened_binding_key !== "WFSelectedApps") {
-    throw new Error(`native binding keys failed: ${JSON.stringify({
-      open_app: summary.open_app_binding_key,
-      when_app_opened: summary.when_app_opened_binding_key,
+  if (summary.show_notification_leaks_internal_metadata || summary.package_exposes_toolkit_commands) {
+    throw new Error(`ToolRenderer-only visible metadata failed: ${JSON.stringify({
+      internalMetadata: summary.show_notification_leaks_internal_metadata,
+      toolkitCommands: summary.package_exposes_toolkit_commands,
     })}`);
   }
   if (!summary.native_tool_search_top.includes("com_apple_shortcuts_show_notification") || !summary.native_trigger_search_top.includes("when_app_opened")) {
@@ -280,13 +269,13 @@ async function main() {
     })}`);
   }
   if (!summary.static_diagnostics.codes.includes("unknownShortcutsCommand") || !summary.static_diagnostics.codes.includes("unknownShortcutsParameter")) {
-    throw new Error(`static Toolkit diagnostics failed: ${JSON.stringify(summary.static_diagnostics)}`);
+    throw new Error(`static ToolRenderer diagnostics failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   if (summary.static_diagnostics.messages.some((message) => message.includes("bogus_nested"))) {
-    throw new Error(`static Toolkit diagnostics captured nested subparameter: ${JSON.stringify(summary.static_diagnostics)}`);
+    throw new Error(`static ToolRenderer diagnostics captured nested subparameter: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   if (summary.static_diagnostics.nested_parameter_hover || !summary.static_diagnostics.title_parameter_hover) {
-    throw new Error(`static Toolkit hover depth handling failed: ${JSON.stringify(summary.static_diagnostics)}`);
+    throw new Error(`static ToolRenderer hover depth handling failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   const resolveWrapperUsable = summary.cli_agent_wrappers.resolve_ok === true
     ? summary.cli_agent_wrappers.resolve_result_count > 0

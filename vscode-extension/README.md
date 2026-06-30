@@ -18,11 +18,8 @@ Commands:
 - `Shortcuts IDE: Retrieve Relevant Actions` searches Apple's native ToolRenderer action definitions.
 - `Shortcuts IDE: Retrieve Relevant Triggers` searches Apple's native ToolRenderer trigger decorators.
 - `Shortcuts IDE: Resolve Entity` remains a debug/research command. Editable Python should prefer inline parameter-state metadata; `ref(...)` is an internal compiler representation.
-- `Shortcuts IDE: Refresh Tool Metadata` refreshes both native ToolRenderer definitions and ToolKit fallback metadata.
+- `Shortcuts IDE: Refresh ToolRenderer Metadata` refreshes the cached ToolRenderer metadata used by hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics.
 - `Shortcuts IDE: Python To Plist Debug JSON` opens a diagnostic summary without embedding the binary plist payload.
-- `Shortcuts IDE: Simulator ToolKit Status` shows the booted simulator's `Library/Shortcuts/ToolKit/Tools-active` target.
-- `Shortcuts IDE: Point Simulator ToolKit To Host` points the booted simulator `Tools-active` symlink at the host mac ToolKit sqlite.
-- `Shortcuts IDE: Refresh ToolKit Metadata` extracts action, trigger, and type Python names for completions, hover text, signature help, and command highlighting. Parameter hints show Python-style names derived from localized parameter labels, with raw plist keys retained for bridge/debugging.
 
 Prerequisites:
 
@@ -37,14 +34,13 @@ Workflow triggers are represented with Apple's native ToolRenderer/ShortcutAgent
 Useful settings:
 
 - `shortcutsRuntimeIDE.autoConvertPlistOnOpen`: legacy behavior for opening an unmanaged Python document from a plist. The custom editor plus managed native Python sidecar is the primary plist UI.
-- `shortcutsRuntimeIDE.toolkitCtlPath`: path to `bridge/tools/toolkitctl.py`.
-- `shortcutsRuntimeIDE.simulatorDevice`: simulator UDID for ToolKit commands, or `booted`.
 - `shortcutsRuntimeIDE.signShortcutExports`: sign `.shortcut` exports with macOS `shortcuts sign`; enabled by default.
 - `shortcutsRuntimeIDE.shortcutSigningMode`: signing mode for `.shortcut` exports; default `anyone`.
 - `shortcutsRuntimeIDE.shortcutsCliPath`: path to the macOS `shortcuts` CLI; default `/usr/bin/shortcuts`.
-- `shortcutsRuntimeIDE.refreshToolKitMetadataOnActivation`: refresh Python-name metadata when the extension activates.
-- `shortcutsRuntimeIDE.highlightKnownCommands`: highlight ToolKit-known action and trigger Python names in Python editors.
-- `shortcutsRuntimeIDE.writeToDebugConsole`: mirror key bridge and ToolKit events into the VS Code Debug Console when available.
+- `shortcutsRuntimeIDE.toolRendererMetadataPath`: optional path to cached ToolRenderer metadata. The default is extension global storage.
+- `shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation`: load the cached ToolRenderer index immediately and refresh it from the simulator bridge in the background when available.
+- `shortcutsRuntimeIDE.highlightKnownCommands`: highlight ToolRenderer-known action and trigger Python names in Python editors.
+- `shortcutsRuntimeIDE.writeToDebugConsole`: mirror key bridge and Shortpy IDE events into the VS Code Debug Console when available.
 - `shortcutsRuntimeIDE.validateOnSave`: validate Python files on save and update Problems.
 - `shortcutsRuntimeIDE.validateOnType`: validate while typing after a debounce.
 - `shortcutsRuntimeIDE.overwriteSiblingShortcut`: allow sibling `.shortcut` writes without an overwrite prompt.
@@ -52,4 +48,6 @@ Useful settings:
 
 Compiler diagnostics from Apple are parsed for line/column, diagnostic id, hints, and fix-its. Known replacement fix-its are exposed as VS Code Quick Fixes. The extension also writes a `Shortcuts Runtime IDE` output channel and mirrors events into the Debug Console where VS Code exposes one.
 
-Native ToolRenderer definitions are the primary action/trigger signature source. ToolKit sqlite metadata remains the fallback source for live squiggles, parameter hover text, signature help, completions, and command highlighting. The static checker only validates action/trigger names and their top-level keyword parameters; nested payload fields are left to Apple's runtime diagnostics.
+ToolRenderer definitions are the visible action/trigger/type source. The extension uses the cached ToolRenderer index for hovers, completions, signature help, command highlighting, action/trigger search, and static Shortpy diagnostics without waiting on the bridge after activation. If no cache exists and the bridge is unavailable, refresh ToolRenderer metadata once while the simulator bridge is running.
+
+ToolKit sqlite data is not surfaced in VS Code hovers, completions, diagnostics, or settings. It remains an internal temporary bridge fallback for catalog host/key binding during inline parameter-state compilation until native ToolRenderer/metadata-provider binding extraction replaces it. The static checker only validates action/trigger names and their top-level keyword parameters; nested payload fields are left to Apple's runtime diagnostics.

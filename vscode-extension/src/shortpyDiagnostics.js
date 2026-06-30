@@ -139,10 +139,11 @@ function topLevelKeywordArguments(args) {
   return keywords;
 }
 
-function collectToolkitDiagnostics(source, indexes) {
+function collectToolRendererDiagnostics(source, index) {
   const diagnostics = [];
   const locals = localDefinitions(source);
   const lines = String(source || "").split(/\r?\n/);
+  const indexes = Array.isArray(index) ? index : [index];
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
     const line = lines[lineNumber];
     const code = line.replace(/#.*/, "");
@@ -288,6 +289,6 @@ function parameterInfoAt(source, lineNumber, character, indexes) {
 }
 
 module.exports = {
-  collectToolkitDiagnostics,
+  collectToolRendererDiagnostics,
   parameterInfoAt,
 };

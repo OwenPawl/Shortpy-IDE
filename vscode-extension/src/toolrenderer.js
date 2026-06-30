@@ -1,11 +1,24 @@
 "use strict";
 
 const fs = require("fs/promises");
-const path = require("path");
 const { runBridgeCli, runBridgeCommand } = require("./bridge");
 
 const QUERY_STOPWORDS = new Set(["a", "an", "and", "for", "i", "in", "me", "my", "of", "on", "the", "to"]);
-const DEFAULT_TOOLRENDERER_FRAMEWORK = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/ToolRenderer.framework";
+const VISIBLE_ITEM_DENYLIST = new Set([
+  "bindingSource",
+  "customDescription",
+  "id",
+  "nativeIdentifier",
+  "toolkitDisplayName",
+]);
+const VISIBLE_PARAMETER_DENYLIST = new Set([
+  "binding",
+  "catalog",
+  "customDescription",
+  "key",
+  "rawKey",
+  "sortOrder",
+]);
 
 function splitTopLevelCommas(value) {
   const parts = [];
@@ -219,11 +232,11 @@ function parseFunction(lines, startIndex, section) {
   const pythonName = nameMatch[1];
   const parameters = parseParametersFromSignature(signature).map((parameter) => {
     const doc = docs.parameterDocs[parameter.pythonName];
-    return {
-      ...parameter,
-      doc: parameter.doc || doc,
-      summary: parameter.summary || doc,
-    };
+      return {
+        ...parameter,
+        doc: parameter.doc || doc,
+        summary: parameter.summary || doc,
+      };
   });
   const kind = pythonName.startsWith("when_")
     ? "trigger"
@@ -246,7 +259,9 @@ function parseFunction(lines, startIndex, section) {
       documentation: docs.documentation,
       signature,
       returnType: parseReturnType(signature),
+      returnDocs: docs.returnDocs,
       parameters,
+      startLine: startIndex + 1,
       source: "ToolRenderer.pythonInterface",
     },
   };
@@ -268,6 +283,7 @@ function parseTypeAlias(line, priorComments) {
     aliasedTo: match[2].trim(),
     docString: priorComments.join("\n"),
     documentation: priorComments.join("\n"),
+    startLine: undefined,
     source: "ToolRenderer.pythonInterface",
   };
 }
@@ -327,6 +343,7 @@ function parseClass(lines, startIndex, priorComments) {
       members,
       docString: docs.documentation || priorComments.join("\n"),
       documentation: docs.documentation || priorComments.join("\n"),
+      startLine: startIndex + 1,
       source: "ToolRenderer.pythonInterface",
     },
   };
@@ -416,247 +433,6 @@ function parseToolRendererInterface(source) {
   };
 }
 
-function toolkitItemsFor(metadataOrIndex, kind) {
-  if (!metadataOrIndex) {
-    return [];
-  }
-  const key = kind === "trigger" ? "triggers" : kind === "type" ? "types" : "actions";
-  if (Array.isArray(metadataOrIndex[key])) {
-    return metadataOrIndex[key];
-  }
-  return [];
-}
-
-function preferredToolkitItem(items, kind) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return undefined;
-  }
-  if (kind === "action") {
-    return items.find((item) => typeof item.id === "string" && item.id.startsWith("is.workflow.actions.")) || items[0];
-  }
-  return items[0];
-}
-
-function preferredToolkitParameter(parameters, pythonName) {
-  const candidates = (Array.isArray(parameters) ? parameters : [])
-    .filter((parameter) => parameter && parameter.pythonName === pythonName && typeof parameter.key === "string");
-  return candidates.find((parameter) => parameter.key.startsWith("WF")) ||
-    candidates.find((parameter) => parameter.key !== pythonName) ||
-    candidates[0];
-}
-
-function triggerBindingFromIdentifier(identifier) {
-  if (typeof identifier !== "string") {
-    return undefined;
-  }
-  const prefix = "com.apple.shortcuts.";
-  const tail = identifier.startsWith(prefix) ? identifier.slice(prefix.length) : identifier;
-  const pieces = tail.split(".");
-  if (pieces.length < 2) {
-    return undefined;
-  }
-  const variant = pieces.pop();
-  const trigger = pieces.join(".");
-  if (!trigger || !variant) {
-    return undefined;
-  }
-  return { trigger: { identifier: trigger, variant } };
-}
-
-function isCatalogParameter(parameter) {
-  const type = String(parameter && parameter.type || "").replace(/\s+/g, "");
-  return type.includes("Resolved[") || type.includes("Picked[");
-}
-
-function catalogKind(parameter) {
-  const type = String(parameter && parameter.type || "").replace(/\s+/g, "");
-  if (type.includes("Picked[")) {
-    return "picked";
-  }
-  if (type.includes("Resolved[")) {
-    return "resolved";
-  }
-  return undefined;
-}
-
-function mergeParameter(nativeParameter, toolkitParameter, item, toolkitItem, customParameterDescriptions = {}) {
-  if (!toolkitParameter) {
-    return nativeParameter;
-  }
-  const rawKey = toolkitParameter.key || nativeParameter.rawKey || nativeParameter.key;
-  const customDoc = customParameterDescriptions[rawKey] || customParameterDescriptions[nativeParameter.pythonName] || customParameterDescriptions[toolkitParameter.pythonName];
-  const merged = {
-    ...nativeParameter,
-    displayName: nativeParameter.displayName || toolkitParameter.displayName,
-    doc: nativeParameter.doc || nativeParameter.summary || toolkitParameter.summary || customDoc || undefined,
-    summary: nativeParameter.summary || nativeParameter.doc || toolkitParameter.summary || customDoc || undefined,
-    rawKey,
-    key: rawKey,
-    sortOrder: toolkitParameter.sortOrder,
-  };
-  if (customDoc) {
-    merged.customDescription = {
-      source: "ToolRenderer CustomDescriptions_Tools.json",
-      text: customDoc,
-    };
-  }
-  if (rawKey && toolkitItem && toolkitItem.id) {
-    const handle = item.kind === "trigger"
-      ? triggerBindingFromIdentifier(toolkitItem.id)
-      : { action: { identifier: toolkitItem.id } };
-    if (handle) {
-      merged.binding = {
-        source: "ToolKit.SharedToolDatabaseProvider metadata",
-        hostAndKey: { handle, key: rawKey },
-      };
-    }
-  }
-  if (isCatalogParameter(merged)) {
-    merged.catalog = {
-      kind: catalogKind(merged),
-      representation: "inline parameterState JSON rewritten to ref(...) plus WFParameterStateCatalog",
-      bindingRequired: true,
-      supported: Boolean(merged.binding),
-    };
-  }
-  return merged;
-}
-
-function mergeOneItem(item, toolkitMetadata, customDescriptions) {
-  const key = item.kind === "trigger" ? "trigger" : item.kind === "action" ? "action" : item.kind === "type" ? "type" : "";
-  if (!key) {
-    return item;
-  }
-  const candidates = toolkitItemsFor(toolkitMetadata, key).filter((candidate) => candidate.pythonName === item.pythonName);
-  const toolkitItem = preferredToolkitItem(candidates, item.kind);
-  if (!toolkitItem) {
-    return item;
-  }
-  const identifier = item.nativeIdentifier || item.id || toolkitItem.id;
-  const custom = item.kind === "action" && identifier
-    ? customDescriptions && customDescriptions.tools && customDescriptions.tools[identifier]
-    : item.kind === "trigger" && identifier
-      ? customDescriptions && customDescriptions.triggers && customDescriptions.triggers[identifier]
-      : undefined;
-  const customParameterDescriptions = custom && custom.parameter_descriptions && typeof custom.parameter_descriptions === "object"
-    ? custom.parameter_descriptions
-    : {};
-  const parameters = (Array.isArray(item.parameters) ? item.parameters : [])
-    .map((parameter) => mergeParameter(parameter, preferredToolkitParameter(toolkitItem.parameters, parameter.pythonName), item, toolkitItem, customParameterDescriptions));
-  const merged = {
-    ...item,
-    nativeIdentifier: item.nativeIdentifier || identifier,
-    id: item.id || identifier,
-    toolkitDisplayName: toolkitItem.displayName,
-    displayName: item.displayName || toolkitItem.displayName || item.pythonName,
-    summary: item.summary || toolkitItem.summary || custom && custom.main_description || "",
-    parameters,
-    bindingSource: custom
-      ? "ToolRenderer.pythonInterface + ToolKit raw key metadata + ToolRenderer custom descriptions"
-      : "ToolRenderer.pythonInterface + ToolKit raw key metadata",
-  };
-  if (custom) {
-    merged.customDescription = {
-      source: path.join(customDescriptions.source, item.kind === "trigger" ? "CustomDescriptions_Triggers.json" : "CustomDescriptions_Tools.json"),
-      mainDescription: custom.main_description || "",
-      parameterDescriptions: customParameterDescriptions,
-    };
-    if (!merged.documentation && custom.main_description) {
-      merged.documentation = custom.main_description;
-    }
-    if (!merged.docString && custom.main_description) {
-      merged.docString = custom.main_description;
-    }
-  }
-  return merged;
-}
-
-function mergeToolRendererWithToolkit(metadata, toolkitMetadata, customDescriptions) {
-  if (!metadata || !toolkitMetadata) {
-    return metadata;
-  }
-  const actions = (metadata.actions || []).map((item) => mergeOneItem(item, toolkitMetadata, customDescriptions));
-  const triggers = (metadata.triggers || []).map((item) => mergeOneItem(item, toolkitMetadata, customDescriptions));
-  const helpers = metadata.helpers || [];
-  const types = metadata.types || [];
-  const items = [...helpers, ...actions, ...triggers];
-  const customDescriptionCounts = {
-    actions: actions.filter((item) => item.customDescription).length,
-    triggers: triggers.filter((item) => item.customDescription).length,
-    enumDescriptions: customDescriptions && customDescriptions.enumDescriptions ? Object.keys(customDescriptions.enumDescriptions).length : 0,
-  };
-  return {
-    ...metadata,
-    source: appendSource(
-      metadata.source,
-      customDescriptions
-        ? "enriched with ToolKit raw keys and ToolRenderer custom descriptions"
-        : "enriched with ToolKit raw keys"
-    ),
-    customDescriptionSource: customDescriptions ? customDescriptions.source : undefined,
-    customDescriptionCounts,
-    items,
-    actions,
-    triggers,
-    helpers,
-    types,
-    counts: {
-      ...(metadata.counts || {}),
-      actions: actions.length,
-      triggers: triggers.length,
-      helpers: helpers.length,
-      types: types.length,
-      items: items.length,
-    },
-  };
-}
-
-async function loadOptionalJson(path) {
-  if (!path) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(await fs.readFile(path, "utf8"));
-  } catch (_) {
-    return undefined;
-  }
-}
-
-function appendSource(source, suffix) {
-  const parts = String(source || "ToolRenderer.pythonInterface")
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  if (!parts.includes(suffix)) {
-    parts.push(suffix);
-  }
-  return [...new Set(parts)].join("; ");
-}
-
-async function loadToolRendererCustomDescriptions(toolRendererFrameworkPath) {
-  const frameworkPath = toolRendererFrameworkPath || process.env.SHORTCUTS_IDE_TOOLRENDERER_FRAMEWORK || DEFAULT_TOOLRENDERER_FRAMEWORK;
-  const read = async (name) => loadOptionalJson(path.join(frameworkPath, name));
-  const [tools, triggers, enumsIOS, enumsMacOS] = await Promise.all([
-    read("CustomDescriptions_Tools.json"),
-    read("CustomDescriptions_Triggers.json"),
-    read("CustomDescriptions_Enums_iOS.json"),
-    read("CustomDescriptions_Enums_macOS.json"),
-  ]);
-  const enumDescriptions = {
-    ...(enumsMacOS || {}),
-    ...(enumsIOS || {}),
-  };
-  if (!tools && !triggers && Object.keys(enumDescriptions).length === 0) {
-    return undefined;
-  }
-  return {
-    source: frameworkPath,
-    tools: tools || {},
-    triggers: triggers || {},
-    enumDescriptions,
-  };
-}
-
 async function fetchToolRendererResponse(options = {}) {
   if (options.live === true) {
     try {
@@ -688,6 +464,63 @@ async function fetchToolRendererResponse(options = {}) {
   }
 }
 
+function sanitizeToolRendererParameter(parameter) {
+  if (!parameter || typeof parameter !== "object") {
+    return parameter;
+  }
+  const clean = {};
+  for (const [key, value] of Object.entries(parameter)) {
+    if (!VISIBLE_PARAMETER_DENYLIST.has(key)) {
+      clean[key] = value;
+    }
+  }
+  return clean;
+}
+
+function sanitizeToolRendererItem(item) {
+  if (!item || typeof item !== "object") {
+    return item;
+  }
+  const clean = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (!VISIBLE_ITEM_DENYLIST.has(key)) {
+      clean[key] = value;
+    }
+  }
+  if (Array.isArray(clean.parameters)) {
+    clean.parameters = clean.parameters.map(sanitizeToolRendererParameter);
+  }
+  return clean;
+}
+
+function sanitizeToolRendererMetadata(metadata) {
+  const input = metadata || {};
+  const helpers = (Array.isArray(input.helpers) ? input.helpers : []).map(sanitizeToolRendererItem);
+  const actions = (Array.isArray(input.actions) ? input.actions : []).map(sanitizeToolRendererItem);
+  const triggers = (Array.isArray(input.triggers) ? input.triggers : []).map(sanitizeToolRendererItem);
+  const types = (Array.isArray(input.types) ? input.types : []).map(sanitizeToolRendererItem);
+  const items = [...helpers, ...actions, ...triggers];
+  return {
+    ...input,
+    source: "ToolRenderer.pythonInterface",
+    helpers,
+    actions,
+    triggers,
+    types,
+    items,
+    counts: {
+      ...(input.counts || {}),
+      helpers: helpers.length,
+      actions: actions.length,
+      triggers: triggers.length,
+      types: types.length,
+      items: items.length,
+    },
+    customDescriptionSource: undefined,
+    customDescriptionCounts: undefined,
+  };
+}
+
 async function refreshToolRendererMetadata(metadataPath, options = {}) {
   let response;
   let metadata;
@@ -709,27 +542,22 @@ async function refreshToolRendererMetadata(metadataPath, options = {}) {
     metadata = parseToolRendererInterface(response.python_interface || response.pythonInterface || "");
   }
   metadata.response = {
-    database_source: response.database_source,
-    database_provider_class: response.database_provider_class,
-    database_class: response.database_class,
     python_length: response.python_length,
     contains_trigger: response.contains_trigger,
     contains_shortcut: response.contains_shortcut,
-      structured_metadata_error: response.structured_metadata_error,
-      cached_metadata_error: response.cached_metadata_error,
-      cached: response.cached,
-      provider_symbols: response.provider_symbols,
-    };
-  const toolkitMetadata = await loadOptionalJson(options.toolkitMetadataPath);
-  const customDescriptions = await loadToolRendererCustomDescriptions(options.toolRendererFrameworkPath);
-  metadata = mergeToolRendererWithToolkit(metadata, toolkitMetadata, customDescriptions);
+    structured_metadata_error: response.structured_metadata_error,
+    cached_metadata_error: response.cached_metadata_error,
+    cached: response.cached,
+    provider_symbols: response.provider_symbols,
+  };
+  metadata = sanitizeToolRendererMetadata(metadata);
   await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   return metadata;
 }
 
 async function loadToolRendererMetadata(metadataPath) {
   const data = await fs.readFile(metadataPath, "utf8");
-  return JSON.parse(data);
+  return sanitizeToolRendererMetadata(JSON.parse(data));
 }
 
 function indexToolRendererMetadata(metadata) {
@@ -847,8 +675,8 @@ function searchToolRendererMetadata(indexOrMetadata, query, kind = "all", limit 
 module.exports = {
   indexToolRendererMetadata,
   loadToolRendererMetadata,
-  mergeToolRendererWithToolkit,
   parseToolRendererInterface,
   refreshToolRendererMetadata,
+  sanitizeToolRendererMetadata,
   searchToolRendererMetadata,
 };

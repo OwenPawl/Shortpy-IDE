@@ -13,36 +13,27 @@ const {
 } = require("./bridge");
 const { parseAppleDiagnostic } = require("./diagnostics");
 const {
-  defaultToolkitCtlPath,
-  indexToolkitMetadata,
-  loadToolkitMetadata,
-  refreshToolkitMetadata,
-  runToolkitCommand,
-} = require("./toolkit");
-const {
   indexToolRendererMetadata,
   loadToolRendererMetadata,
-  mergeToolRendererWithToolkit,
   refreshToolRendererMetadata,
   searchToolRendererMetadata,
 } = require("./toolrenderer");
 const {
-  collectToolkitDiagnostics,
+  collectToolRendererDiagnostics,
   parameterInfoAt,
-} = require("./toolkitDiagnostics");
+} = require("./shortpyDiagnostics");
 
 const COMMAND_NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
 const CUSTOM_EDITOR_VIEW_TYPE = "shortcutsRuntimeIDE.workflowEditor";
 
 let runtimeLog;
-let toolkitIndex = indexToolkitMetadata({});
 let toolRendererIndex = indexToolRendererMetadata({});
-let toolkitMetadataPath;
 let toolRendererMetadataPath;
 let actionDecoration;
 let triggerDecoration;
 let bridgeStatusBar;
-let toolkitDiagnosticsCollection;
+let shortpyDiagnosticsCollection;
+let missingToolRendererCacheReported = false;
 const workflowSessionsByWorkflowUri = new Map();
 const workflowSessionsByPythonUri = new Map();
 
@@ -50,11 +41,7 @@ function configOptions() {
   const config = vscode.workspace.getConfiguration("shortcutsRuntimeIDE");
   return {
     bridgeCtlPath: config.get("bridgeCtlPath") || undefined,
-    toolkitCtlPath: config.get("toolkitCtlPath") || undefined,
-    simulatorDevice: config.get("simulatorDevice") || "booted",
-    toolkitMetadataPath: config.get("toolkitMetadataPath") || undefined,
     toolRendererMetadataPath: config.get("toolRendererMetadataPath") || undefined,
-    refreshToolKitMetadataOnActivation: config.get("refreshToolKitMetadataOnActivation") !== false,
     refreshToolRendererInterfaceOnActivation: config.get("refreshToolRendererInterfaceOnActivation") !== false,
     highlightKnownCommands: config.get("highlightKnownCommands") !== false,
     writeToDebugConsole: config.get("writeToDebugConsole") !== false,
@@ -123,54 +110,94 @@ async function connectBridge() {
   }
 }
 
-function toolkitOptions() {
-  const options = configOptions();
-  return {
-    pythonPath: options.pythonPath,
-    toolkitCtlPath: options.toolkitCtlPath || defaultToolkitCtlPath(),
-    device: options.simulatorDevice,
-  };
-}
-
-function defaultMetadataPath(context) {
-  return path.join(context.globalStorageUri.fsPath, "toolkit-metadata.json");
-}
-
 function defaultToolRendererMetadataPath(context) {
   return path.join(context.globalStorageUri.fsPath, "toolrenderer-interface.json");
+}
+
+const STABLE_ENUMS_WITH_CASES = new Set([
+  "RunSurface",
+  "InputFallback",
+  "QUERY_OPERATOR",
+  "QUERY_SORT_ORDER",
+]);
+
+function itemKindLabel(item) {
+  if (!item) {
+    return "ToolRenderer Entry";
+  }
+  if (item.kind === "trigger") {
+    return "Trigger";
+  }
+  if (item.kind === "enum") {
+    return "Enum";
+  }
+  if (item.kind === "enumCase") {
+    return "Enum Case";
+  }
+  if (item.kind === "typeAlias") {
+    return "Type Alias";
+  }
+  if (item.kind === "class") {
+    return "Type";
+  }
+  if (item.kind === "decorator") {
+    return "Decorator";
+  }
+  if (item.kind === "helper") {
+    return "Helper";
+  }
+  return "Action";
+}
+
+function environmentSpecificEnum(item) {
+  const name = String(item && item.pythonName || "");
+  const lower = name.toLowerCase();
+  if (STABLE_ENUMS_WITH_CASES.has(name)) {
+    return false;
+  }
+  return lower.includes("dynamic") ||
+    lower.startsWith("com_") ||
+    lower.startsWith("query_com_") ||
+    lower.startsWith("org_") ||
+    lower.startsWith("net_") ||
+    lower.startsWith("io_") ||
+    lower.startsWith("app_");
 }
 
 function commandMetadata(item) {
   const lines = [];
   lines.push(`**${item.pythonName}**`);
   lines.push("");
-  lines.push(item.kind === "trigger" ? "Trigger" : item.kind === "enum" ? "Enum" : item.kind === "enumCase" ? "Enum Case" : item.kind === "typeAlias" ? "Type Alias" : item.kind === "class" ? "Type" : item.kind === "decorator" ? "Decorator" : item.kind === "helper" ? "Helper" : "Action");
+  lines.push(itemKindLabel(item));
   if (item.source) {
     lines.push(`Source: ${item.source}`);
   }
   if (item.displayName) {
     lines.push(`Display: ${item.displayName}`);
   }
-  const nativeIdentifier = item.nativeIdentifier || item.id;
-  if (nativeIdentifier) {
-    lines.push(`Native ID: \`${nativeIdentifier}\``);
+  if (item.startLine) {
+    lines.push(`Source line: ${item.startLine}`);
   }
   if (item.returnType) {
     lines.push(`Returns: \`${item.returnType}\``);
   }
+  if (item.returnDocs) {
+    lines.push(item.returnDocs);
+  }
   if (item.aliasedTo) {
     lines.push(`Alias: \`${item.aliasedTo}\``);
+  }
+  if (Array.isArray(item.bases) && item.bases.length > 0) {
+    lines.push(`Bases: ${item.bases.map((base) => `\`${base}\``).join(", ")}`);
   }
   if (item.summary) {
     lines.push("");
     lines.push(item.summary);
   }
-  if (item.customDescription && item.customDescription.mainDescription && item.customDescription.mainDescription !== item.summary) {
+  const fullDocs = item.documentation || item.docString;
+  if (fullDocs && fullDocs !== item.summary && fullDocs !== item.displayName) {
     lines.push("");
-    lines.push(item.customDescription.mainDescription);
-  }
-  if (item.customDescription && item.customDescription.source) {
-    lines.push(`Description Source: \`${item.customDescription.source}\``);
+    lines.push(fullDocs);
   }
   if (item.signature) {
     lines.push("");
@@ -182,23 +209,27 @@ function commandMetadata(item) {
     lines.push("");
     lines.push("Parameters:");
     for (const parameter of item.parameters.slice(0, 20)) {
-      const parameterName = parameter.pythonName || parameter.key;
+      const parameterName = parameter.pythonName || parameter.name;
       const label = parameter.displayName ? ` - ${parameter.displayName}` : "";
-      const rawKey = parameter.rawKey || parameter.key;
-      const raw = rawKey && rawKey !== parameterName ? ` (\`${rawKey}\`)` : "";
       const type = parameter.type ? `: \`${parameter.type}\`` : "";
-      lines.push(`- \`${parameterName}\`${type}${raw}${label}`);
-      if (parameter.catalog) {
-        lines.push(`  Catalog: ${parameter.catalog.kind || "catalog"} inline parameterState${parameter.catalog.supported === false ? " (binding unavailable)" : ""}`);
+      const defaultValue = parameter.defaultValue ? ` = \`${parameter.defaultValue}\`` : "";
+      lines.push(`- \`${parameterName}\`${type}${defaultValue}${label}`);
+      const doc = parameter.doc || parameter.summary;
+      if (doc) {
+        lines.push(`  ${doc}`);
       }
     }
   }
   if (Array.isArray(item.cases) && item.cases.length > 0) {
     lines.push("");
-    lines.push("Cases:");
-    for (const entry of item.cases.slice(0, 24)) {
-      const doc = entry.summary || entry.doc || entry.description;
-      lines.push(`- \`${item.pythonName}.${entry.name}\` = ${entry.value}${doc ? ` - ${doc}` : ""}`);
+    if (environmentSpecificEnum(item)) {
+      lines.push("Cases are environment-specific and are resolved from the active Shortcuts runtime.");
+    } else {
+      lines.push("Cases:");
+      for (const entry of item.cases.slice(0, 80)) {
+        const doc = entry.summary || entry.doc || entry.description;
+        lines.push(`- \`${item.pythonName}.${entry.name}\` = ${entry.value}${doc ? ` - ${doc}` : ""}`);
+      }
     }
   }
   if (Array.isArray(item.members) && item.members.length > 0) {
@@ -213,7 +244,7 @@ function commandMetadata(item) {
 
 function commandSignatureLabel(item) {
   const params = Array.isArray(item.parameters) ? item.parameters : [];
-  return `${item.pythonName}(${params.map((param) => `${param.pythonName || param.key}=`).join(", ")})`;
+  return `${item.pythonName}(${params.map((param) => `${param.pythonName || param.name}=`).join(", ")})`;
 }
 
 function snippetPlaceholder(index, value) {
@@ -273,7 +304,7 @@ function plainArgumentValue(parameter) {
 
 function nativeToolPlainText(item) {
   const args = (Array.isArray(item.parameters) ? item.parameters : [])
-    .map((parameter) => `${parameter.pythonName || parameter.key}=${plainArgumentValue(parameter)}`)
+    .map((parameter) => `${parameter.pythonName || parameter.name}=${plainArgumentValue(parameter)}`)
     .join(", ");
   if (item.kind === "trigger" || item.searchKind === "trigger") {
     return `@${item.pythonName}(${args})\n`;
@@ -287,75 +318,53 @@ function signaturePreview(item) {
   return firstLine ? firstLine.trim() : commandSignatureLabel(item);
 }
 
-async function refreshToolKitMetadata(context, announce = true) {
-  const options = configOptions();
-  toolkitMetadataPath = options.toolkitMetadataPath || defaultMetadataPath(context);
-  await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(toolkitMetadataPath)));
-  const refresh = await refreshToolkitMetadata(toolkitMetadataPath, toolkitOptions());
-  const metadata = await loadToolkitMetadata(toolkitMetadataPath);
-  toolkitIndex = indexToolkitMetadata(metadata);
-  updateCommandDecorations();
-  refreshToolkitDiagnosticsForOpenDocuments(toolkitDiagnosticsCollection);
-  logRuntime("ToolKit metadata refreshed", refresh);
-  if (announce) {
-    const counts = refresh.counts || metadata.counts || {};
-    vscode.window.showInformationMessage(
-      `Loaded ToolKit metadata (${counts.actions || 0} actions, ${counts.triggers || 0} triggers).`
-    );
-  }
-  return metadata;
-}
-
 async function refreshNativeToolRendererInterface(context, announce = true, refreshOptions = {}) {
   const options = configOptions();
   toolRendererMetadataPath = options.toolRendererMetadataPath || defaultToolRendererMetadataPath(context);
-  toolkitMetadataPath = options.toolkitMetadataPath || defaultMetadataPath(context);
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(toolRendererMetadataPath)));
   const metadata = await refreshToolRendererMetadata(toolRendererMetadataPath, {
     ...options,
-    toolkitMetadataPath,
     live: refreshOptions.live === true,
     allowLiveFallback: refreshOptions.allowLiveFallback,
   });
   toolRendererIndex = indexToolRendererMetadata(metadata);
   updateCommandDecorations();
-  refreshToolkitDiagnosticsForOpenDocuments(toolkitDiagnosticsCollection);
+  refreshShortpyDiagnosticsForOpenDocuments(shortpyDiagnosticsCollection);
   logRuntime("ToolRenderer interface refreshed", metadata.counts);
   if (announce) {
     const counts = metadata.counts || {};
-    const source = metadata.response && metadata.response.cached ? "cached native" : "live native";
+    const source = metadata.response && metadata.response.cached ? "cached" : "live";
     vscode.window.showInformationMessage(
-      `Loaded ${source} ToolRenderer interface (${counts.actions || 0} actions, ${counts.triggers || 0} triggers).`
+      `Loaded ${source} ToolRenderer metadata (${counts.actions || 0} actions, ${counts.triggers || 0} triggers).`
     );
   }
   return metadata;
 }
 
-async function refreshAllToolMetadata(context, announce = true) {
-  const toolkit = await refreshToolKitMetadata(context, false);
-  const native = await refreshNativeToolRendererInterface(context, false);
+async function refreshToolMetadata(context, announce = true) {
+  const native = await refreshNativeToolRendererInterface(context, false, { live: true });
   if (announce) {
     const nativeCounts = native.counts || {};
-    const toolkitCounts = toolkit.counts || {};
     vscode.window.showInformationMessage(
-      `Refreshed tool metadata (${nativeCounts.actions || 0} native actions, ${nativeCounts.triggers || 0} native triggers; ${toolkitCounts.actions || 0} ToolKit actions).`
+      `Refreshed ToolRenderer metadata (${nativeCounts.actions || 0} actions, ${nativeCounts.triggers || 0} triggers).`
     );
   }
-  return { native, toolkit };
+  return native;
 }
 
-async function ensureToolKitMetadata(context) {
-  if (toolkitIndex.byName.size > 0) {
-    return;
-  }
+async function loadCachedToolRendererMetadata(context) {
   const options = configOptions();
-  toolkitMetadataPath = options.toolkitMetadataPath || defaultMetadataPath(context);
+  toolRendererMetadataPath = options.toolRendererMetadataPath || defaultToolRendererMetadataPath(context);
   try {
-    toolkitIndex = indexToolkitMetadata(await loadToolkitMetadata(toolkitMetadataPath));
-  } catch (_) {
-    if (options.refreshToolKitMetadataOnActivation) {
-      await refreshToolKitMetadata(context, false);
-    }
+    const metadata = await loadToolRendererMetadata(toolRendererMetadataPath);
+    toolRendererIndex = indexToolRendererMetadata(metadata);
+    updateCommandDecorations();
+    refreshShortpyDiagnosticsForOpenDocuments(shortpyDiagnosticsCollection);
+    logRuntime("Cached ToolRenderer metadata loaded", metadata.counts || {});
+    return metadata;
+  } catch (error) {
+    logRuntime("Cached ToolRenderer metadata unavailable", error && error.message ? error.message : String(error));
+    return undefined;
   }
 }
 
@@ -364,21 +373,52 @@ async function ensureToolRendererMetadata(context) {
     return;
   }
   const options = configOptions();
-  toolRendererMetadataPath = options.toolRendererMetadataPath || defaultToolRendererMetadataPath(context);
-  try {
-    let metadata = await loadToolRendererMetadata(toolRendererMetadataPath);
-    try {
-      const toolkitMetadata = await loadToolkitMetadata(options.toolkitMetadataPath || defaultMetadataPath(context));
-      metadata = mergeToolRendererWithToolkit(metadata, toolkitMetadata);
-    } catch (_) {
-      // ToolRenderer metadata is still useful without raw ToolKit key enrichment.
-    }
-    toolRendererIndex = indexToolRendererMetadata(metadata);
-  } catch (_) {
-    if (options.refreshToolRendererInterfaceOnActivation) {
-      await refreshNativeToolRendererInterface(context, false, { live: false, allowLiveFallback: false });
-    }
+  const cached = await loadCachedToolRendererMetadata(context);
+  if (cached) {
+    return;
   }
+  if (options.refreshToolRendererInterfaceOnActivation) {
+    await refreshNativeToolRendererInterface(context, false, { live: true, allowLiveFallback: false });
+    return;
+  }
+  throw new Error("ToolRenderer metadata is not cached. Run Shortcuts IDE: Refresh Native ToolRenderer Interface once while the simulator bridge is available.");
+}
+
+async function primeToolRendererMetadata(context) {
+  const options = configOptions();
+  const cached = await loadCachedToolRendererMetadata(context);
+  if (!options.refreshToolRendererInterfaceOnActivation) {
+    if (!cached && !missingToolRendererCacheReported) {
+      missingToolRendererCacheReported = true;
+      vscode.window.showWarningMessage("Shortcuts ToolRenderer metadata is not cached. Run Shortcuts IDE: Refresh Native ToolRenderer Interface once while the simulator bridge is available.");
+    }
+    return;
+  }
+  refreshNativeToolRendererInterface(context, false, { live: true, allowLiveFallback: false }).then((metadata) => {
+    logRuntime("Background ToolRenderer metadata refresh completed", metadata.counts || {});
+  }).catch((error) => {
+    logRuntime("Background ToolRenderer metadata refresh failed", error && error.message ? error.message : String(error));
+    if (!cached && !missingToolRendererCacheReported) {
+      missingToolRendererCacheReported = true;
+      vscode.window.showWarningMessage("Shortcuts ToolRenderer metadata must be refreshed once before hovers, completions, and Shortpy diagnostics are available offline.");
+    }
+  });
+}
+
+function toolRendererOnlyIndex() {
+  return toolRendererIndex;
+}
+
+function toolRendererParameterInfoAt(source, line, character) {
+  return parameterInfoAt(source, line, character, [toolRendererOnlyIndex()]);
+}
+
+function collectShortpyDiagnostics(source) {
+  return collectToolRendererDiagnostics(source, toolRendererOnlyIndex());
+}
+
+function findToolRendererItem(name) {
+  return name ? toolRendererIndex.byName.get(name) : undefined;
 }
 
 function activeEditorOrThrow() {
@@ -538,7 +578,7 @@ async function showWorkflowPythonEditor(session, options = {}) {
       preview: false,
       preserveFocus: Boolean(options.preserveFocus),
     });
-    setToolkitDiagnostics(toolkitDiagnosticsCollection, document);
+    setShortpyDiagnostics(shortpyDiagnosticsCollection, document);
     updateCommandDecorationsForEditor(editor);
     return editor;
   }
@@ -547,7 +587,7 @@ async function showWorkflowPythonEditor(session, options = {}) {
     preview: false,
     preserveFocus: Boolean(options.preserveFocus),
   });
-  setToolkitDiagnostics(toolkitDiagnosticsCollection, document);
+  setShortpyDiagnostics(shortpyDiagnosticsCollection, document);
   updateCommandDecorationsForEditor(editor);
   return editor;
 }
@@ -643,7 +683,7 @@ function setSuccessDiagnostics(collection, document, source, response) {
   collection.delete(document.uri);
 }
 
-function severityFromToolkitDiagnostic(item) {
+function severityFromShortpyDiagnostic(item) {
   if (item.severity === "warning") {
     return vscode.DiagnosticSeverity.Warning;
   }
@@ -653,11 +693,11 @@ function severityFromToolkitDiagnostic(item) {
   return vscode.DiagnosticSeverity.Error;
 }
 
-function setToolkitDiagnostics(collection, document) {
+function setShortpyDiagnostics(collection, document) {
   if (!collection || document.languageId !== "python") {
     return [];
   }
-  const rawDiagnostics = collectToolkitDiagnostics(document.getText(), [toolRendererIndex, toolkitIndex]);
+  const rawDiagnostics = collectShortpyDiagnostics(document.getText());
   const diagnostics = rawDiagnostics.map((item) => {
     const line = Math.min(Math.max(0, item.line), Math.max(0, document.lineCount - 1));
     const text = document.lineAt(line).text;
@@ -666,9 +706,9 @@ function setToolkitDiagnostics(collection, document) {
     const diagnostic = new vscode.Diagnostic(
       new vscode.Range(line, start, line, end),
       item.message,
-      severityFromToolkitDiagnostic(item)
+      severityFromShortpyDiagnostic(item)
     );
-    diagnostic.source = "Shortcuts Tool Metadata";
+    diagnostic.source = "Shortcuts ToolRenderer";
     diagnostic.code = item.code;
     return diagnostic;
   });
@@ -676,9 +716,9 @@ function setToolkitDiagnostics(collection, document) {
   return rawDiagnostics;
 }
 
-function refreshToolkitDiagnosticsForOpenDocuments(collection) {
+function refreshShortpyDiagnosticsForOpenDocuments(collection) {
   for (const document of vscode.workspace.textDocuments) {
-    setToolkitDiagnostics(collection, document);
+    setShortpyDiagnostics(collection, document);
   }
 }
 
@@ -1173,14 +1213,12 @@ function commandAtPosition(document, position) {
     return undefined;
   }
   const name = document.getText(range);
-  const item = toolRendererIndex.byName.get(name) || toolkitIndex.byName.get(name);
+  const item = findToolRendererItem(name);
   return item ? { item, range } : undefined;
 }
 
 function provideShortcutCompletions() {
   const items = [];
-  const nativeActionNames = new Set();
-  const nativeTriggerNames = new Set();
   for (const helper of toolRendererIndex.helpers || []) {
     const item = new vscode.CompletionItem(helper.pythonName, vscode.CompletionItemKind.Function);
     item.detail = helper.displayName ? `Shortcuts helper: ${helper.displayName}` : "Shortcuts helper";
@@ -1190,43 +1228,19 @@ function provideShortcutCompletions() {
     items.push(item);
   }
   for (const trigger of toolRendererIndex.triggers || []) {
-    nativeTriggerNames.add(trigger.pythonName);
     const item = new vscode.CompletionItem(trigger.pythonName, vscode.CompletionItemKind.Event);
-    item.detail = trigger.displayName ? `Native Shortcuts trigger: ${trigger.displayName}` : "Native Shortcuts trigger";
+    item.detail = trigger.displayName ? `Shortcuts trigger: ${trigger.displayName}` : "Shortcuts trigger";
     item.documentation = commandMetadata(trigger);
     item.insertText = new vscode.SnippetString(`@${trigger.pythonName}($0)`);
-    item.sortText = `0_native_${trigger.pythonName}`;
+    item.sortText = `0_toolrenderer_${trigger.pythonName}`;
     items.push(item);
   }
   for (const action of toolRendererIndex.actions || []) {
-    nativeActionNames.add(action.pythonName);
-    const item = new vscode.CompletionItem(action.pythonName, vscode.CompletionItemKind.Function);
-    item.detail = action.displayName ? `Native Shortcuts action: ${action.displayName}` : "Native Shortcuts action";
-    item.documentation = commandMetadata(action);
-    item.insertText = new vscode.SnippetString(`${action.pythonName}($0)`);
-    item.sortText = `1_native_${action.pythonName}`;
-    items.push(item);
-  }
-  for (const trigger of toolkitIndex.triggers || []) {
-    if (nativeTriggerNames.has(trigger.pythonName)) {
-      continue;
-    }
-    const item = new vscode.CompletionItem(trigger.pythonName, vscode.CompletionItemKind.Event);
-    item.detail = trigger.displayName ? `Shortcuts trigger: ${trigger.displayName}` : "Shortcuts trigger";
-    item.documentation = commandMetadata({ ...trigger, kind: "trigger" });
-    item.insertText = new vscode.SnippetString(`@${trigger.pythonName}($0)`);
-    item.sortText = `0_toolkit_${trigger.pythonName}`;
-    items.push(item);
-  }
-  for (const action of toolkitIndex.actions || []) {
-    if (nativeActionNames.has(action.pythonName)) {
-      continue;
-    }
     const item = new vscode.CompletionItem(action.pythonName, vscode.CompletionItemKind.Function);
     item.detail = action.displayName ? `Shortcuts action: ${action.displayName}` : "Shortcuts action";
-    item.documentation = commandMetadata({ ...action, kind: "action" });
+    item.documentation = commandMetadata(action);
     item.insertText = new vscode.SnippetString(`${action.pythonName}($0)`);
-    item.sortText = `1_toolkit_${action.pythonName}`;
+    item.sortText = `1_toolrenderer_${action.pythonName}`;
     items.push(item);
   }
   for (const type of (toolRendererIndex.types || []).slice(0, 2000)) {
@@ -1236,52 +1250,35 @@ function provideShortcutCompletions() {
         ? vscode.CompletionItemKind.TypeParameter
         : vscode.CompletionItemKind.Class;
     const item = new vscode.CompletionItem(type.pythonName, kind);
-    item.detail = type.kind === "enum" ? "Native Shortcuts enum" : "Native Shortcuts type";
+    item.detail = type.kind === "enum" ? "Shortcuts enum" : "Shortcuts type";
     item.documentation = commandMetadata(type);
-    item.sortText = `2_native_${type.pythonName}`;
+    item.sortText = `2_toolrenderer_${type.pythonName}`;
     items.push(item);
-    for (const enumCase of (type.cases || []).slice(0, 80)) {
-      const caseItem = new vscode.CompletionItem(enumCase.pythonName, vscode.CompletionItemKind.EnumMember);
-      caseItem.detail = `Native Shortcuts enum case: ${type.pythonName}`;
-      caseItem.documentation = commandMetadata({ ...enumCase, kind: "enumCase", displayName: enumCase.name });
-      caseItem.sortText = `2_case_${enumCase.pythonName}`;
-      items.push(caseItem);
+    if (!environmentSpecificEnum(type)) {
+      for (const enumCase of (type.cases || []).slice(0, 80)) {
+        const caseItem = new vscode.CompletionItem(enumCase.pythonName, vscode.CompletionItemKind.EnumMember);
+        caseItem.detail = `Shortcuts enum case: ${type.pythonName}`;
+        caseItem.documentation = commandMetadata({ ...enumCase, kind: "enumCase", displayName: enumCase.name });
+        caseItem.sortText = `2_case_${enumCase.pythonName}`;
+        items.push(caseItem);
+      }
     }
-  }
-  for (const type of (toolkitIndex.types || []).slice(0, 1500)) {
-    if (toolRendererIndex.byName.has(type.pythonName)) {
-      continue;
-    }
-    const item = new vscode.CompletionItem(type.pythonName, vscode.CompletionItemKind.Class);
-    item.detail = "Shortcuts type";
-    item.documentation = commandMetadata({ ...type, kind: "type" });
-    item.sortText = `2_${type.pythonName}`;
-    items.push(item);
   }
   return items;
 }
 
 function provideShortcutHover(document, position) {
-  const parameter = parameterInfoAt(document.getText(), position.line, position.character, [toolRendererIndex, toolkitIndex]);
+  const parameter = toolRendererParameterInfoAt(document.getText(), position.line, position.character);
   if (parameter) {
-    const rawKey = parameter.parameter.rawKey || parameter.parameter.key;
-    const binding = parameter.parameter.binding && parameter.parameter.binding.hostAndKey
-      ? JSON.stringify(parameter.parameter.binding.hostAndKey)
-      : "";
     const markdown = new vscode.MarkdownString([
       `**${parameter.name}**`,
       "",
-      rawKey && rawKey !== parameter.name
-        ? `Raw plist key: \`${rawKey}\``
-        : "",
       parameter.parameter.displayName ? `Display: ${parameter.parameter.displayName}` : "",
       parameter.parameter.type ? `Type: \`${parameter.parameter.type}\`` : "",
       parameter.parameter.defaultValue ? `Default: \`${parameter.parameter.defaultValue}\`` : "",
-      parameter.parameter.catalog ? `Catalog: ${parameter.parameter.catalog.kind || "catalog"} inline parameterState${parameter.parameter.catalog.supported === false ? " (binding unavailable)" : ""}` : "",
-      binding ? `Binding: \`${binding}\`` : "",
       parameter.parameter.doc || parameter.parameter.summary || "",
       "",
-      `Action: \`${parameter.item.pythonName}\``,
+      `${itemKindLabel(parameter.item)}: \`${parameter.item.pythonName}\``,
     ].filter(Boolean).join("\n\n"));
     return new vscode.Hover(
       markdown,
@@ -1337,21 +1334,18 @@ function activeParameterIndex(document, position) {
 
 function provideShortcutSignatureHelp(document, position) {
   const name = functionNameBeforePosition(document, position);
-  const item = name ? (toolRendererIndex.byName.get(name) || toolkitIndex.byName.get(name)) : undefined;
+  const item = findToolRendererItem(name);
   if (!item || !Array.isArray(item.parameters)) {
     return undefined;
   }
   const signature = new vscode.SignatureInformation(commandSignatureLabel(item), commandMetadata(item));
   signature.parameters = item.parameters.map((parameter) => {
-    const parameterName = parameter.pythonName || parameter.key;
-    const rawKey = parameter.rawKey || parameter.key;
+    const parameterName = parameter.pythonName || parameter.name;
     const markdown = new vscode.MarkdownString([
       `\`${parameterName}\``,
-      rawKey && rawKey !== parameterName ? `Raw plist key: \`${rawKey}\`` : "",
       parameter.displayName ? `Display: ${parameter.displayName}` : "",
       parameter.type ? `Type: \`${parameter.type}\`` : "",
       parameter.defaultValue ? `Default: \`${parameter.defaultValue}\`` : "",
-      parameter.catalog ? `Catalog: ${parameter.catalog.kind || "catalog"} inline parameterState${parameter.catalog.supported === false ? " (binding unavailable)" : ""}` : "",
       parameter.doc || parameter.summary || "",
     ].filter(Boolean).join("\n\n"));
     return new vscode.ParameterInformation(`${parameterName}=`, markdown);
@@ -1370,7 +1364,7 @@ function commandRanges(document, kind) {
     COMMAND_NAME_RE.lastIndex = 0;
     let match;
     while ((match = COMMAND_NAME_RE.exec(text)) !== null) {
-      const item = toolRendererIndex.byName.get(match[0]) || toolkitIndex.byName.get(match[0]);
+      const item = findToolRendererItem(match[0]);
       if (!item || item.kind !== kind) {
         continue;
       }
@@ -1441,9 +1435,9 @@ function htmlEscape(value) {
 }
 
 function customEditorDiagnostics(source) {
-  return collectToolkitDiagnostics(source, [toolRendererIndex, toolkitIndex]).map((item) => ({
+  return collectShortpyDiagnostics(source).map((item) => ({
     ...item,
-    source: "Shortcuts Tool Metadata",
+    source: "Shortcuts ToolRenderer",
   }));
 }
 
@@ -1735,11 +1729,11 @@ class WorkflowPythonCustomEditorProvider {
           await showWorkflowPythonEditor(session);
           await resolveEntity(this.context, { documentUri: session.pythonUri });
         } else if (commandName === "refreshMetadata") {
-          await refreshAllToolMetadata(this.context, false);
+          await refreshToolMetadata(this.context, false);
           const pyDocument = await pythonDocument();
-          setToolkitDiagnostics(toolkitDiagnosticsCollection, pyDocument);
+          setShortpyDiagnostics(shortpyDiagnosticsCollection, pyDocument);
           updateCommandDecorations();
-          postWorkflowSessionStatus(session, "Refreshed ToolRenderer and ToolKit metadata");
+          postWorkflowSessionStatus(session, "Refreshed ToolRenderer metadata");
         }
       } catch (error) {
         const text = error && error.message ? error.message : String(error);
@@ -1765,7 +1759,7 @@ function activate(context) {
     textDecoration: "underline dotted",
   });
   const diagnostics = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDE");
-  toolkitDiagnosticsCollection = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDEToolkit");
+  shortpyDiagnosticsCollection = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDEToolRenderer");
   const handledPlists = new Set();
   const validateTimers = new Map();
   context.subscriptions.push(
@@ -1774,7 +1768,7 @@ function activate(context) {
     actionDecoration,
     triggerDecoration,
     diagnostics,
-    toolkitDiagnosticsCollection,
+    shortpyDiagnosticsCollection,
     vscode.window.registerCustomEditorProvider(
       CUSTOM_EDITOR_VIEW_TYPE,
       new WorkflowPythonCustomEditorProvider(context, diagnostics),
@@ -1794,8 +1788,7 @@ function activate(context) {
     vscode.commands.registerCommand("shortcutsRuntimeIDE.searchTriggers", command(() => searchNativeAgentTools(context, "trigger"))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.resolveEntity", command(() => resolveEntity(context))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.status", command(showStatus)),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolMetadata", command(() => refreshAllToolMetadata(context, true))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolKitMetadata", command(() => refreshToolKitMetadata(context, true))),
+    vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolMetadata", command(() => refreshToolMetadata(context, true))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolRendererInterface", command(async () => {
       const metadata = await refreshNativeToolRendererInterface(context, true, { live: true });
       logRuntime("Live ToolRenderer refresh completed; relaunch bridge before compile if runtime calls start timing out.", {
@@ -1803,18 +1796,6 @@ function activate(context) {
         source: metadata.source,
       });
       vscode.window.showWarningMessage("Live ToolRenderer refresh can leave the simulator bridge unable to compile until Shortcuts is relaunched.");
-    })),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.showToolKitStatus", command(async () => {
-      const status = await runToolkitCommand(["show"], toolkitOptions());
-      logRuntime("ToolKit status", status);
-      await openText(JSON.stringify(status, null, 2), "json", "Simulator ToolKit status");
-    })),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.pointSimulatorToolKitToHost", command(async () => {
-      const result = await runToolkitCommand(["point-host"], toolkitOptions());
-      logRuntime("Pointed simulator ToolKit to host", result);
-      await refreshToolKitMetadata(context, false);
-      await openText(JSON.stringify(result, null, 2), "json", "Pointed simulator ToolKit to host");
-      vscode.window.showInformationMessage("Simulator ToolKit now points to the host sqlite. Relaunch the simulator bridge for runtime changes.");
     })),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.copyDiagnostic", command(async (message) => {
       await vscode.env.clipboard.writeText(String(message || ""));
@@ -1841,22 +1822,7 @@ function activate(context) {
       ","
     )
   );
-  ensureToolKitMetadata(context).then(() => {
-    logRuntime("ToolKit metadata ready", { commands: toolkitIndex.byName.size });
-    updateCommandDecorations();
-    refreshToolkitDiagnosticsForOpenDocuments(toolkitDiagnosticsCollection);
-  }).catch((error) => {
-    logRuntime("ToolKit metadata unavailable", error && error.message ? error.message : String(error));
-  });
-  ensureToolRendererMetadata(context).then(() => {
-    logRuntime("ToolRenderer metadata ready", {
-      actions: toolRendererIndex.actions.length,
-      triggers: toolRendererIndex.triggers.length,
-      helpers: toolRendererIndex.helpers.length,
-    });
-    updateCommandDecorations();
-    refreshToolkitDiagnosticsForOpenDocuments(toolkitDiagnosticsCollection);
-  }).catch((error) => {
+  primeToolRendererMetadata(context).catch((error) => {
     logRuntime("ToolRenderer metadata unavailable", error && error.message ? error.message : String(error));
   });
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
@@ -1867,7 +1833,7 @@ function activate(context) {
   }));
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
     const options = configOptions();
-    setToolkitDiagnostics(toolkitDiagnosticsCollection, event.document);
+    setShortpyDiagnostics(shortpyDiagnosticsCollection, event.document);
     updateCommandDecorationsForEditor(vscode.window.visibleTextEditors.find((editor) => editor.document === event.document));
     if (!options.validateOnType || event.document.languageId !== "python") {
       return;
@@ -1883,12 +1849,12 @@ function activate(context) {
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(updateCommandDecorationsForEditor));
   context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((document) => {
     maybeAutoConvertPlist(document, handledPlists).catch(() => {});
-    setToolkitDiagnostics(toolkitDiagnosticsCollection, document);
+    setShortpyDiagnostics(shortpyDiagnosticsCollection, document);
     updateCommandDecorations();
   }));
   for (const document of vscode.workspace.textDocuments) {
     maybeAutoConvertPlist(document, handledPlists).catch(() => {});
-    setToolkitDiagnostics(toolkitDiagnosticsCollection, document);
+    setShortpyDiagnostics(shortpyDiagnosticsCollection, document);
   }
   updateCommandDecorations();
 }

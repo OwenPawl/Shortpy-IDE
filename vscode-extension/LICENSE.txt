@@ -1,0 +1,3 @@
+UNLICENSED
+
+This VS Code extension is not distributed under an open source license.
