@@ -293,6 +293,13 @@ function appendTypeMaterial(lines, type, options = {}) {
   }
   lines.push("");
   lines.push(options.heading || `Referenced ${itemKindLabel(type)}: \`${type.pythonName}\``);
+  if (type.definitionBlock && !isEnvironmentSpecificEnum(type)) {
+    lines.push("");
+    lines.push("```python");
+    lines.push(type.definitionBlock);
+    lines.push("```");
+    return;
+  }
   if (type.signature) {
     lines.push(`\`${type.signature}\``);
   }
@@ -321,12 +328,6 @@ function appendTypeMaterial(lines, type, options = {}) {
     for (const entry of type.members.slice(0, 24)) {
       lines.push(`- \`${entry.name}\`${entry.returnType ? ` -> \`${entry.returnType}\`` : ""}`);
     }
-  }
-  if (type.definitionBlock && !isEnvironmentSpecificEnum(type)) {
-    lines.push("");
-    lines.push("```python");
-    lines.push(type.definitionBlock);
-    lines.push("```");
   }
 }
 
