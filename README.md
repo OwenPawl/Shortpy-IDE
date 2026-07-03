@@ -122,3 +122,11 @@ node --check vscode-extension/test/smoke.js
 - The bridge uses private Apple frameworks and is a local RE/development tool.
 - Signed `.shortcut`/AEA1 envelope import is handled host-side before the simulator plist-to-Python bridge call.
 - Launch-time dylib loading is the supported simulator path; live injection is retained as a debug fallback.
+
+## License
+
+Shortpy IDE is MIT licensed. The license includes an interoperability notice:
+this is an independent VS Code and bridge implementation, is not affiliated
+with Apple or Microsoft, does not license or include Apple or Microsoft
+software, and does not warrant that private Apple runtime surfaces will continue
+to work. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

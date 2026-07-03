@@ -2,9 +2,9 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "publisher": "local",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/OwenPawl/Shortpy-IDE.git"
