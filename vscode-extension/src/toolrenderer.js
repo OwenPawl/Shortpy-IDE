@@ -126,10 +126,12 @@ function parseParameter(text) {
   const comment = hash >= 0 ? clean.slice(hash + 1).trim() : "";
   const inlineMatch = /^:\s*([^=]+?)(?:\s*=\s*(.+))?$/.exec(body);
   if (inlineMatch) {
+    const inlineType = inlineMatch[1] ? inlineMatch[1].trim() : "";
+    const preferredName = /^query_/.test(inlineType) ? "query" : "";
     return {
-      pythonName: "",
+      pythonName: preferredName,
       name: "",
-      type: inlineMatch[1] ? inlineMatch[1].trim() : "",
+      type: inlineType,
       defaultValue: inlineMatch[2] ? inlineMatch[2].trim() : undefined,
       doc: comment || undefined,
       summary: comment || undefined,
@@ -294,7 +296,7 @@ function parseFunction(lines, startIndex, section) {
   const docs = parseDocstring(lines, index + 1);
   const pythonName = nameMatch[1];
   const parameters = parseParametersFromSignature(signature).map((parameter) => {
-    const doc = docs.parameterDocs[parameter.pythonName];
+    const doc = docs.parameterDocs[parameter.pythonName] || (parameter.inline ? docs.parameterDocs[""] : undefined);
       return {
         ...parameter,
         doc: parameter.doc || doc,

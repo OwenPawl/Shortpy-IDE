@@ -78,10 +78,11 @@ assert((index.directDependencies.get("runnable") || []).includes("RunSurface"), 
 const findConversation = index.byName.get("messages_find_conversation");
 assert(findConversation, "inline-argument action should be parsed");
 assert.strictEqual(findConversation.parameters.length, 3, "inline parameter should be preserved");
-assert.strictEqual(findConversation.parameters[0].pythonName, "");
+assert.strictEqual(findConversation.parameters[0].pythonName, "query");
 assert.strictEqual(findConversation.parameters[0].inline, true);
 assert.strictEqual(findConversation.parameters[0].type, "query_com_apple_mobile_sms_conversation_entity");
 assert.strictEqual(findConversation.parameters[0].doc, "(query_com_apple_mobile_sms_conversation_entity)");
+assert(index.parameterByItemAndName.has("messages_find_conversation.query"), "inline query parameter should be indexed under query=");
 assert((index.directDependencies.get("messages_find_conversation") || []).includes("query_com_apple_mobile_sms_conversation_entity"), "inline parameter type should be indexed as a dependency");
 
 const runSurface = index.byName.get("RunSurface");

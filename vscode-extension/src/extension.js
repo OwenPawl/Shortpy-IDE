@@ -446,7 +446,7 @@ function parameterMetadata(parameterInfo) {
 }
 
 function isInlineParameter(parameter) {
-  return Boolean(parameter && (parameter.inline || parameter.positional || !(parameter.pythonName || parameter.name || parameter.key)));
+  return Boolean(parameter && ((parameter.inline || parameter.positional) && !(parameter.pythonName || parameter.name || parameter.key)));
 }
 
 function parameterLabel(parameter, index = 0, fallback = "") {

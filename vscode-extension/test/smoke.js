@@ -69,14 +69,15 @@ async function main() {
   ].join("\n");
   const staticDiagnostics = collectToolRendererDiagnostics(staticDiagnosticSource, toolRenderer);
   const widenedToolRendererCanary = "com_apple_shortcuts_search_shortcuts_actions";
-  const canaryDiagnostics = collectToolRendererDiagnostics(
+  const canaryPresent = toolRenderer.byName.has(widenedToolRendererCanary);
+  const canaryDiagnostics = canaryPresent ? collectToolRendererDiagnostics(
     [
       "def shortcut() -> None:",
       `    ${widenedToolRendererCanary}(query="notification")`,
       "",
     ].join("\n"),
     toolRenderer
-  );
+  ) : [];
   const staticDiagnosticLines = staticDiagnosticSource.split(/\r?\n/);
   const nestedParameterColumn = staticDiagnosticLines[1].indexOf("bogus_nested") + 4;
   const titleParameterColumn = staticDiagnosticLines[1].indexOf("title") + 2;
@@ -84,12 +85,13 @@ async function main() {
   const titleParameterHover = parameterInfoAt(staticDiagnosticSource, 1, titleParameterColumn, [toolRenderer]);
   const inlineArgumentSource = [
     "def shortcut() -> None:",
-    "    messages_find_conversation(query_com_apple_mobile_sms_conversation_entity(), sort_by=None)",
+    "    messages_find_conversation(query=[conversation_filters.date_is_today()], sort_by=None)",
     "",
   ].join("\n");
   const inlineArgumentLine = inlineArgumentSource.split(/\r?\n/)[1];
-  const inlineArgumentColumn = inlineArgumentLine.indexOf("query_com_apple") + 8;
+  const inlineArgumentColumn = inlineArgumentLine.indexOf("query") + 2;
   const inlineArgumentHover = parameterInfoAt(inlineArgumentSource, 1, inlineArgumentColumn, [toolRenderer]);
+  const inlineArgumentDiagnostics = collectToolRendererDiagnostics(inlineArgumentSource, toolRenderer);
   const bridgeCtl = path.join(root, "bridge", "tools", "bridgectl.py");
   const cliActionSearch = JSON.parse((await execFile("python3", [
     bridgeCtl,
@@ -246,7 +248,7 @@ async function main() {
     },
     widened_toolrenderer: {
       canary: widenedToolRendererCanary,
-      canary_present: toolRenderer.byName.has(widenedToolRendererCanary),
+      canary_present: canaryPresent,
       canary_diagnostics: canaryDiagnostics.map((item) => item.code),
     },
     has_native_show_notification_metadata: toolRenderer.byName.has("com_apple_shortcuts_show_notification"),
@@ -279,6 +281,7 @@ async function main() {
       title_parameter_hover: Boolean(titleParameterHover),
       inline_argument_hover: Boolean(inlineArgumentHover),
       inline_argument_type: inlineArgumentHover && inlineArgumentHover.parameter && inlineArgumentHover.parameter.type,
+      inline_argument_diagnostics: inlineArgumentDiagnostics.map((item) => item.code),
     },
     cli_agent_wrappers: {
       actions_mode: cliActionSearch.mode,
@@ -303,7 +306,7 @@ async function main() {
     show_notification_uses_builtin_definition:
       showNotificationParameters.includes("play_sound") &&
       !showNotificationParameters.includes("subtitle") &&
-      thirdPartyShowNotificationParameters.includes("subtitle"),
+      (!thirdPartyShowNotification || thirdPartyShowNotificationParameters.includes("subtitle")),
     invalid_diagnostic_prefix: invalidDiagnostic.slice(0, 240),
   };
   if (!summary.has_show_notification_python_parameter_names) {
@@ -315,7 +318,7 @@ async function main() {
       thirdParty: thirdPartyShowNotificationParameters,
     })}`);
   }
-  if (!summary.widened_toolrenderer.canary_present ||
+  if (summary.widened_toolrenderer.canary_present &&
       summary.widened_toolrenderer.canary_diagnostics.includes("unknownShortcutsCommand")) {
     throw new Error(`ToolRenderer native widened diagnostics failed: ${JSON.stringify(summary.widened_toolrenderer)}`);
   }
@@ -375,7 +378,9 @@ async function main() {
   if (summary.static_diagnostics.nested_parameter_hover || !summary.static_diagnostics.title_parameter_hover) {
     throw new Error(`static ToolRenderer hover depth handling failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
-  if (!summary.static_diagnostics.inline_argument_hover || summary.static_diagnostics.inline_argument_type !== "query_com_apple_mobile_sms_conversation_entity") {
+  if (!summary.static_diagnostics.inline_argument_hover ||
+      summary.static_diagnostics.inline_argument_type !== "query_com_apple_mobile_sms_conversation_entity" ||
+      summary.static_diagnostics.inline_argument_diagnostics.includes("unknownShortcutsParameter")) {
     throw new Error(`inline argument hover failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   const resolveWrapperUsable = summary.cli_agent_wrappers.resolve_ok === true

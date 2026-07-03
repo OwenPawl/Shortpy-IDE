@@ -47,7 +47,7 @@ const toolRenderer = indexToolRendererMetadata({
       pythonName: "messages_find_conversation",
       parameters: [
         {
-          pythonName: "",
+          pythonName: "query",
           type: "query_com_apple_mobile_sms_conversation_entity",
           inline: true,
           positional: true,
@@ -75,17 +75,20 @@ assert(widenedDiagnostics.some((diagnostic) =>
 
 const inlineSource = [
   "def shortcut() -> None:",
-  "    messages_find_conversation(query_com_apple_mobile_sms_conversation_entity(), sort_by=None)",
+  "    messages_find_conversation(query=[conversation_filters.date_is_today()], sort_by=None)",
   "",
 ].join("\n");
-const inlineColumn = inlineSource.split(/\r?\n/)[1].indexOf("query_com_apple") + 8;
+const inlineColumn = inlineSource.split(/\r?\n/)[1].indexOf("query") + 2;
 const inlineInfo = parameterInfoAt(inlineSource, 1, inlineColumn, [toolRenderer]);
-assert(inlineInfo, "inline positional argument should resolve to a parameter hover");
-assert.strictEqual(inlineInfo.name, "inline argument");
+assert(inlineInfo, "inline query keyword should resolve to a parameter hover");
+assert.strictEqual(inlineInfo.name, "query");
 assert.strictEqual(inlineInfo.parameter.type, "query_com_apple_mobile_sms_conversation_entity");
 const sortByColumn = inlineSource.split(/\r?\n/)[1].indexOf("sort_by") + 2;
 const sortByInfo = parameterInfoAt(inlineSource, 1, sortByColumn, [toolRenderer]);
 assert(sortByInfo, "keyword argument should still resolve to a parameter hover");
 assert.strictEqual(sortByInfo.name, "sort_by");
+assert(!collectToolRendererDiagnostics(inlineSource, toolRenderer).some((diagnostic) =>
+  diagnostic.code === "unknownShortcutsParameter" && /query/.test(diagnostic.message)
+), "query= should be accepted for ToolRenderer inline query parameters");
 
 console.log("diagnostics-ok");

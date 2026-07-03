@@ -266,10 +266,12 @@ def parse_signature_parameters(signature: str) -> list[dict]:
             continue
         inline_match = re.match(r"^:\s*([^=]+?)(?:\s*=\s*(.+))?$", part)
         if inline_match:
+            inline_type = (inline_match.group(1) or "").strip()
+            preferred_name = "query" if inline_type.startswith("query_") else ""
             parameters.append({
-                "pythonName": "",
+                "pythonName": preferred_name,
                 "name": "",
-                "type": (inline_match.group(1) or "").strip(),
+                "type": inline_type,
                 "defaultValue": (inline_match.group(2) or "").strip() or None,
                 "positional": True,
                 "inline": True,
@@ -467,6 +469,8 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
         parameters = parse_signature_parameters(signature)
         for parameter in parameters:
             doc = doc_sections["parameterDocs"].get(parameter.get("pythonName", ""))
+            if not doc and parameter.get("inline"):
+                doc = doc_sections["parameterDocs"].get("")
             if doc:
                 parameter["doc"] = doc
                 parameter["summary"] = doc
