@@ -171,9 +171,15 @@ async function connectBridge(options = {}) {
     title: "Connecting Shortcuts bridge",
     cancellable: false,
   }, async (progress) => {
-    const launched = await ensureBridgeLaunched({
+    const bridgeOptions = {
       ...configOptions(),
       forceBridgeLaunch: Boolean(options.forceLaunch),
+    };
+    if (options.toolkitSqlitePath) {
+      bridgeOptions.toolkitSqlitePath = options.toolkitSqlitePath;
+    }
+    const launched = await ensureBridgeLaunched({
+      ...bridgeOptions,
     }, (event) => {
       applyBridgeProgress(event);
       progress.report({ message: event && event.message ? event.message : "Connecting" });
@@ -613,7 +619,10 @@ async function loadToolkitSqlite(context) {
   await context.globalState.update(TOOLKIT_SQLITE_STATE_KEY, activeToolkitSqlitePath);
   setBridgeStatus("toolkit", `Loading ToolKit sqlite ${activeToolkitSqlitePath}`);
   logRuntime("ToolKit sqlite selected", activeToolkitSqlitePath);
-  const status = await connectBridge({ forceLaunch: true });
+  const status = await connectBridge({
+    forceLaunch: true,
+    toolkitSqlitePath: activeToolkitSqlitePath,
+  });
   try {
     await refreshToolMetadata(context, false);
   } catch (error) {
