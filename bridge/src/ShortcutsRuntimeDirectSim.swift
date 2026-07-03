@@ -425,8 +425,8 @@ private func bridgeMakeErrorConfigurationEmpty(
     _ result: UnsafeMutablePointer<ErrorConfigurationStorage>
 )
 
-@_silgen_name("bridge_make_tool_visibility_filter_visible_for_shortcuts")
-private func bridgeMakeToolVisibilityFilterVisibleForShortcuts(
+@_silgen_name("bridge_make_tool_visibility_filter_any")
+private func bridgeMakeToolVisibilityFilterAny(
     _ result: UnsafeMutablePointer<ToolVisibilityFilterStorage>
 )
 
@@ -1604,7 +1604,7 @@ private func compileSource(
     var compiled = CompiledShortcut()
 
     bridgeMakeErrorConfigurationEmpty(&errorConfiguration)
-    bridgeMakeToolVisibilityFilterVisibleForShortcuts(&toolVisibility)
+    bridgeMakeToolVisibilityFilterAny(&toolVisibility)
     bridgeMakeFlags(
         &flagsStorage,
         &strictness,
@@ -2547,7 +2547,7 @@ public func bridge_swift_direct_run(
                 "drop_comments": true,
                 "validate_catalog_keys_only": false,
                 "error_configuration_prefix": shortHexPrefix(of: run.errorConfiguration),
-                "tool_visibility_mode": "visibleForShortcuts",
+                "tool_visibility_mode": "any",
                 "tool_visibility_filter_prefix": shortHexPrefix(of: run.toolVisibility),
                 "flags_storage_size": MemoryLayout<FlagsStorage>.size,
                 "flags_storage_prefix": shortHexPrefix(of: run.flagsStorage),

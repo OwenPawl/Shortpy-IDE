@@ -10,17 +10,13 @@ _bridge_make_error_configuration_empty:
     ldp x29, x30, [sp], #16
     ret
 
-.globl _bridge_make_tool_visibility_filter_visible_for_shortcuts
-_bridge_make_tool_visibility_filter_visible_for_shortcuts:
-    stp x29, x30, [sp, #-32]!
+.globl _bridge_make_tool_visibility_filter_any
+_bridge_make_tool_visibility_filter_any:
+    stp x29, x30, [sp, #-16]!
     mov x29, sp
-    str x0, [sp, #16]
-    add x8, sp, #24
-    bl _$s7ToolKit0A14VisibilityFlagV19visibleForShortcutsACvgZ
-    add x0, sp, #24
-    ldr x8, [sp, #16]
-    bl _$s7ToolKit0A16VisibilityFilterV2isyAcA0aC4FlagVFZ
-    ldp x29, x30, [sp], #32
+    mov x8, x0
+    bl _$s7ToolKit0A16VisibilityFilterV3anyACvgZ
+    ldp x29, x30, [sp], #16
     ret
 
 .globl _bridge_make_toolrenderer_compatibility_shims_default_none

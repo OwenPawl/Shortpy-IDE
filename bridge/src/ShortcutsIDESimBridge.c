@@ -402,7 +402,7 @@ static void status_json(char *response, size_t cap) {
            "\"log_path\":\"%s\","
            "\"swift_linkage\":\"direct cdecl exports in same dylib\","
            "\"visibility_source\":\"active-toolkit-sqlite\","
-           "\"tool_visibility_filter\":\"visibleForShortcuts\","
+           "\"tool_visibility_filter\":\"any\","
            "\"address_resolution\":\"none\","
            "\"hooks_installed\":false,"
            "\"command_count\":%llu,"
