@@ -174,6 +174,7 @@ async function main() {
   const manifest = JSON.parse(await fs.readFile(path.join(root, "vscode-extension", "package.json"), "utf8"));
   const manifestCommands = (manifest.contributes && manifest.contributes.commands || []).map((entry) => entry.command);
   const showNotification = toolRenderer.byName.get("com_apple_shortcuts_show_notification");
+  const thirdPartyShowNotification = toolRenderer.byName.get("com_sindresorhus_actions_show_notification");
   const openApp = toolRenderer.actions.find((item) =>
     item.displayName === "Open App" &&
     (item.parameters || []).some((parameter) => (parameter.pythonName || parameter.name) === "app"));
@@ -182,6 +183,8 @@ async function main() {
     ? toolRenderer.parameterByItemAndName.get(`${openApp.pythonName}.app`)
     : undefined;
   const showNotificationParameters = (showNotification && showNotification.parameters || [])
+    .map((parameter) => parameter.pythonName || parameter.name);
+  const thirdPartyShowNotificationParameters = (thirdPartyShowNotification && thirdPartyShowNotification.parameters || [])
     .map((parameter) => parameter.pythonName || parameter.name);
   const showNotificationLeaksInternalMetadata = Boolean(showNotification && (showNotification.id || showNotification.nativeIdentifier || showNotification.toolkitDisplayName ||
     (showNotification.parameters || []).some((parameter) => parameter.rawKey || parameter.key || parameter.binding || parameter.catalog || parameter.customDescription)));
@@ -284,12 +287,23 @@ async function main() {
       resolve_blocker_present: Boolean(cliResolveEntity.blocker),
     },
     show_notification_parameters: showNotificationParameters,
+    third_party_show_notification_parameters: thirdPartyShowNotificationParameters,
     has_show_notification_python_parameter_names:
       showNotificationParameters.includes("title") && showNotificationParameters.includes("body"),
+    show_notification_uses_builtin_definition:
+      showNotificationParameters.includes("play_sound") &&
+      !showNotificationParameters.includes("subtitle") &&
+      thirdPartyShowNotificationParameters.includes("subtitle"),
     invalid_diagnostic_prefix: invalidDiagnostic.slice(0, 240),
   };
   if (!summary.has_show_notification_python_parameter_names) {
     throw new Error(`missing show_notification python parameter names: ${showNotificationParameters.join(", ")}`);
+  }
+  if (!summary.show_notification_uses_builtin_definition) {
+    throw new Error(`Show Notification metadata was paired with the wrong ToolRenderer definition: ${JSON.stringify({
+      builtin: showNotificationParameters,
+      thirdParty: thirdPartyShowNotificationParameters,
+    })}`);
   }
   if (!summary.widened_toolrenderer.canary_present ||
       summary.widened_toolrenderer.canary_diagnostics.includes("unknownShortcutsCommand")) {

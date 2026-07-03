@@ -660,20 +660,38 @@ def parameter_name_set(item: dict) -> set[str]:
     return names
 
 
-def toolrenderer_template_score(toolkit_item: dict, candidate: dict) -> tuple[int, int, int]:
+def canonical_identifier_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^0-9a-z]+", "_", value.lower()).strip("_")
+
+
+def toolrenderer_template_score(toolkit_item: dict, candidate: dict) -> tuple[int, int, int, int, int]:
+    toolkit_name = toolkit_item.get("pythonName")
+    candidate_name = candidate.get("pythonName")
+    name_match = int(
+        isinstance(toolkit_name, str)
+        and isinstance(candidate_name, str)
+        and toolkit_name == candidate_name
+    )
+    toolkit_identifier = canonical_identifier_text(toolkit_item.get("id"))
+    candidate_identifier = canonical_identifier_text(candidate.get("nativeIdentifier"))
+    identifier_match = int(
+        bool(toolkit_identifier)
+        and bool(candidate_identifier)
+        and toolkit_identifier == candidate_identifier
+    )
     toolkit_params = parameter_name_set(toolkit_item)
     candidate_params = parameter_name_set(candidate)
     overlap = len(toolkit_params & candidate_params)
     exact = int(bool(toolkit_params) and toolkit_params == candidate_params)
     count_delta = -abs(len(toolkit_params) - len(candidate_params))
-    return (exact, overlap, count_delta)
+    return (name_match, identifier_match, exact, overlap, count_delta)
 
 
 def ordered_templates_for_toolkit_group(toolkit_group: list[dict], candidates: list[dict]) -> list[dict]:
     if not candidates:
         return []
-    if len(toolkit_group) == len(candidates):
-        return candidates
     output: list[dict] = []
     unused = set(range(len(candidates)))
     for toolkit_item in toolkit_group:
@@ -718,17 +736,46 @@ def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[
         if not db_names:
             output.extend(candidates)
             continue
-        templates = ordered_templates_for_toolkit_group(toolkit_group, candidates)
-        if not templates:
+        db_name_set = set(db_names)
+        matched_names: set[str] = set()
+        matched_candidate_indexes: set[int] = set()
+        clones: list[dict] = []
+        for index, candidate in enumerate(candidates):
+            candidate_name = candidate.get("pythonName")
+            if not isinstance(candidate_name, str) or candidate_name not in db_name_set:
+                continue
+            if candidate_name in matched_names:
+                continue
+            matched_names.add(candidate_name)
+            matched_candidate_indexes.add(index)
+            clones.append(candidate)
+
+        remaining_toolkit_group = [
+            toolkit_item
+            for toolkit_item in toolkit_group
+            if toolkit_item.get("pythonName") in db_name_set - matched_names
+        ]
+        remaining_candidates = [
+            candidate
+            for index, candidate in enumerate(candidates)
+            if index not in matched_candidate_indexes
+        ]
+        templates = ordered_templates_for_toolkit_group(remaining_toolkit_group, remaining_candidates)
+        for index, toolkit_item in enumerate(remaining_toolkit_group):
+            name = toolkit_item.get("pythonName")
+            if not isinstance(name, str) or not name:
+                continue
+            if templates:
+                template = templates[min(index, len(templates) - 1)]
+            elif candidates:
+                template = candidates[0]
+            else:
+                continue
+            clones.append(clone_toolrenderer_item_with_python_name(template, name))
+
+        if not clones:
             output.extend(candidates)
             continue
-        clones = [
-            clone_toolrenderer_item_with_python_name(
-                templates[min(index, len(templates) - 1)],
-                name,
-            )
-            for index, name in enumerate(db_names)
-        ]
         changed = len(candidates) != len(clones) or any(
             candidate.get("pythonName") != clone.get("pythonName")
             for candidate, clone in zip(candidates, clones)
