@@ -31,8 +31,14 @@ VS Code visible metadata comes from Apple's ToolRenderer Python interface. The e
 
 ## Quick Start
 
-For the VS Code extension, install/package from `vscode-extension/` and run
-`Shortcuts IDE: Connect To Bridge`, or click the Shortcuts status bar item.
+Install the VS Code extension from a fresh checkout with one command:
+
+```sh
+npm run install-extension
+```
+
+Then open VS Code and run `Shortcuts IDE: Connect To Bridge`, or click the
+Shortcuts status bar item.
 The packaged extension bundles the bridge source, stages it into extension
 global storage on first connect, builds the simulator dylib if needed, boots
 Simulator if needed, launches Shortcuts with the bridge, and keeps bridge
@@ -82,30 +88,27 @@ bridge/tools/bridgectl.py --raw plist-data-to-python --text 'https://www.icloud.
 
 Signed import unwraps either `anyone` or `people-who-know-me` AEA1 envelopes host-side. iCloud import resolves `fields.shortcut.value.downloadURL` from the public record API. Both paths send the resulting unsigned `Shortcut.wflow` plist to the simulator edit-mode converter.
 
-Run VS Code extension syntax checks:
+Run VS Code extension tests and syntax checks:
 
 ```sh
-cd vscode-extension
-npm test
 npm run check
 ```
 
-Package the extension from `vscode-extension/` with `vsce` when needed. The
-prepublish step syncs VS Code command contributions from
-`src/commandRegistry.js` and stages the bundled bridge source:
+Package the extension without installing it:
 
 ```sh
-cd vscode-extension
-npx --yes @vscode/vsce package --no-dependencies
+npm run package-extension
 ```
 
-Install the local VSIX with the repo helper. It uses `code` from PATH when
-available and falls back to the standard macOS VS Code app bundle CLI:
+Install an already-packaged VSIX for the current extension version:
 
 ```sh
-cd vscode-extension
-npm run install:local
+npm run install-extension -- --install-only
 ```
+
+The installer uses `code` from PATH when available and falls back to the
+standard macOS VS Code app bundle CLI. Set `VSCODE_CLI=/path/to/code` if VS Code
+is installed somewhere else.
 
 Low-level checks can also be run directly:
 

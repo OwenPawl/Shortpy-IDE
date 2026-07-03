@@ -31,7 +31,7 @@ The signed `.shortcut` output is produced by the macOS Shortcuts CLI. The simula
 
 Workflow triggers are represented with Apple's native ToolRenderer/ShortcutAgent decorators such as `@when_app_opened`. The workflow controller keeps that Python visible as the editing source and sends it directly to the runtime compiler.
 
-For local development installs, run `npm run install:local` from this directory after packaging. The helper uses `code` from PATH when present and falls back to the standard macOS VS Code app bundle CLI.
+For local development installs, run `npm run install-extension` from the repository root. That command packages the VSIX and installs it into VS Code. Use `npm run package-extension` to build only, or `npm run install-extension -- --install-only` to install an already-built VSIX. The installer uses `code` from PATH when present and falls back to the standard macOS VS Code app bundle CLI.
 
 Useful settings:
 

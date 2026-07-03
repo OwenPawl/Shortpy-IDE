@@ -1,0 +1,14 @@
+{
+  "name": "shortpy-ide-repo",
+  "private": true,
+  "version": "0.1.33",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "install-extension": "node scripts/install-extension.js",
+    "package-extension": "node scripts/install-extension.js --package-only",
+    "check": "npm --prefix vscode-extension test && npm --prefix vscode-extension run check"
+  }
+}
