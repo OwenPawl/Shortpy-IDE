@@ -8,6 +8,7 @@ Commands:
 
 - Opening a raw `.shortcut` or workflow `.plist` uses the `Shortcuts Workflow Python` custom editor as a controller. It imports plist bytes into a native Python editor sidecar when the bridge is available. If the bridge is disconnected, the controller still opens and shows a Connect button instead of failing the editor.
 - `Shortcuts IDE: Connect To Bridge` verifies an existing bridge or builds the bundled simulator bridge, boots Simulator if needed, launches Shortcuts with the bridge, and updates the status bar. Clicking the Shortcuts status bar item also runs this command.
+- Connect runs headlessly by default: it does not open `Simulator.app`, quits the visible Simulator app if it is already running, and keeps only the selected iOS simulator booted. Use `shortcutsRuntimeIDE.openSimulatorOnConnect` or `shortcutsRuntimeIDE.singleSimulatorOnConnect` to opt out.
 - `Shortcuts IDE: Export Python To Shortcut` writes a signed `.shortcut` by default, or raw workflow plist bytes when saving as `.plist`.
 - `Shortcuts IDE: Write Sibling Shortcut` writes `<current-file-name>.shortcut` next to the active Python file.
 - `Shortcuts IDE: Validate With Apple Runtime` compiles the active Python through the runtime bridge and surfaces compiler errors in VS Code Problems.
@@ -44,6 +45,9 @@ Useful settings:
 - `shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation`: rebuild the visible metadata cache from the cached ToolRenderer interface at activation. Live native ToolRenderer refresh is explicit because it can occupy the simulator bridge for a long time.
 - `shortcutsRuntimeIDE.bridgeCommandTimeoutMs`, `shortcutsRuntimeIDE.bridgeMetadataTimeoutMs`, `shortcutsRuntimeIDE.bridgeStatusTimeoutMs`: bound bridge subprocesses so validation/import/status failures return to the UI instead of hanging indefinitely. Metadata refresh defaults to a longer timeout because native ToolRenderer output is large after widening visibility.
 - `shortcutsRuntimeIDE.bridgeLaunchTimeoutMs`: bound Connect To Bridge bootstrap work including build, simulator boot, Shortcuts launch, and status verification.
+- `shortcutsRuntimeIDE.openSimulatorOnConnect`: open the visible Simulator app during Connect; disabled by default for lower memory use.
+- `shortcutsRuntimeIDE.quitSimulatorAppOnHeadlessConnect`: quit the visible Simulator app during headless Connect if it is already running.
+- `shortcutsRuntimeIDE.singleSimulatorOnConnect`: shut down other booted iOS simulators during Connect so the bridge uses one simulator device.
 - `shortcutsRuntimeIDE.highlightKnownCommands`: highlight ToolRenderer-known action and trigger Python names in Python editors.
 - `shortcutsRuntimeIDE.writeToDebugConsole`: mirror key bridge and Shortpy IDE events into the VS Code Debug Console when available.
 - `shortcutsRuntimeIDE.validateOnSave`: validate Python files on save and update Problems.

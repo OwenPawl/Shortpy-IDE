@@ -41,8 +41,11 @@ Then open VS Code and run `Shortcuts IDE: Connect To Bridge`, or click the
 Shortcuts status bar item.
 The packaged extension bundles the bridge source, stages it into extension
 global storage on first connect, builds the simulator dylib if needed, boots
-Simulator if needed, launches Shortcuts with the bridge, and keeps bridge
-status visible in the status bar.
+an iOS simulator if needed, launches Shortcuts with the bridge, and keeps
+bridge status visible in the status bar. Connect runs headlessly by default:
+it does not open `Simulator.app`, quits the visible Simulator app if it is
+already running, and keeps only the selected iOS simulator booted by shutting
+down other booted iOS simulators.
 The bridge build discovers the installed iOS Simulator runtime at build time
 and prefers iOS 27.0 when present.
 By default the launcher uses `~/Library/Shortcuts/ToolKit/Tools-active` as the
@@ -53,6 +56,9 @@ Shortcuts at that same sqlite, and refreshes bridge metadata.
 Use `Shortcuts IDE: Load ToolKit SQLite` to select a different sqlite; that
 command applies the same in-place name and visibility adjustments and relaunches
 the bridge.
+Set `shortcutsRuntimeIDE.openSimulatorOnConnect` when you intentionally want the
+visible Simulator UI, or disable `shortcutsRuntimeIDE.singleSimulatorOnConnect`
+when another booted iOS simulator must stay running.
 
 The direct CLI development path is still available:
 

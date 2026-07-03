@@ -45,6 +45,29 @@ fi
 
 pick_booted_simulator() {
   xcrun simctl list devices booted -j | /usr/bin/python3 -c '
+import json, re, sys
+data = json.load(sys.stdin)
+candidates = []
+for runtime, devices in data.get("devices", {}).items():
+    if ".iOS-" not in runtime:
+        continue
+    version_text = runtime.rsplit(".iOS-", 1)[-1].replace("-", ".")
+    version = tuple(int(part) for part in re.findall(r"\d+", version_text))
+    preferred_runtime = 1 if version and version[0] == 27 else 0
+    for index, device in enumerate(devices):
+        if device.get("isAvailable", True) and device.get("state") == "Booted":
+            name = device.get("name", "")
+            preferred_device = 1 if "iPhone" in name else 0
+            candidates.append((preferred_runtime, version, preferred_device, -index, device.get("udid", ""), name, version_text))
+if not candidates:
+    raise SystemExit(1)
+candidates.sort(reverse=True)
+print(candidates[0][4])
+'
+}
+
+list_booted_ios_simulators() {
+  xcrun simctl list devices booted -j | /usr/bin/python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for runtime, devices in data.get("devices", {}).items():
@@ -52,9 +75,23 @@ for runtime, devices in data.get("devices", {}).items():
         continue
     for device in devices:
         if device.get("isAvailable", True) and device.get("state") == "Booted":
-            print(device.get("udid", ""))
-            raise SystemExit(0)
+            udid = device.get("udid", "")
+            if udid:
+                print(udid)
 '
+}
+
+shutdown_other_booted_ios_simulators() {
+  local keep_udid="$1"
+  if [[ -z "${keep_udid}" || "${SHORTPY_IDE_SINGLE_SIMULATOR:-1}" != "1" ]]; then
+    return
+  fi
+  while IFS= read -r booted_udid; do
+    if [[ -n "${booted_udid}" && "${booted_udid}" != "${keep_udid}" ]]; then
+      echo "shortpy-bridge-stage: shutting down extra booted simulator ${booted_udid}"
+      xcrun simctl shutdown "${booted_udid}" >/dev/null 2>&1 || true
+    fi
+  done < <(list_booted_ios_simulators || true)
 }
 
 pick_available_simulator() {
@@ -101,6 +138,7 @@ if [[ -z "${SIM_UDID}" ]]; then
 else
   echo "shortpy-bridge-stage: booting using booted simulator ${SIM_UDID}"
 fi
+shutdown_other_booted_ios_simulators "${SIM_UDID}"
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 toolkit_source="${SHORTPY_TOOLKIT_SQLITE:-}"
@@ -127,7 +165,15 @@ else
   echo "shortpy-bridge-stage: toolkit skipped; default host Tools-active not found"
 fi
 
-open -a Simulator >/dev/null 2>&1 || true
+if [[ "${SHORTPY_IDE_OPEN_SIMULATOR:-0}" == "1" ]]; then
+  echo "shortpy-bridge-stage: opening Simulator app"
+  open -a Simulator >/dev/null 2>&1 || true
+elif [[ "${SHORTPY_IDE_QUIT_SIMULATOR_APP:-1}" == "1" ]]; then
+  echo "shortpy-bridge-stage: closing Simulator app for headless launch"
+  osascript -e 'if application "Simulator" is running then tell application "Simulator" to quit' >/dev/null 2>&1 || true
+else
+  echo "shortpy-bridge-stage: keeping Simulator app state unchanged"
+fi
 
 rm -f "${SOCKET}"
 launch_log="${LOG_DIR}/sim-launch-dyldloader-${stamp}.out"

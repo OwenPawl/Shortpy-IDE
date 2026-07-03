@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -254,6 +254,21 @@
           "type": "number",
           "default": 300000,
           "description": "Maximum time in milliseconds for Connect To Bridge to build the bridge, boot Simulator, launch Shortcuts, and verify status."
+        },
+        "shortcutsRuntimeIDE.openSimulatorOnConnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the visible Simulator app during Connect To Bridge. Disabled by default so the bridge runs headlessly."
+        },
+        "shortcutsRuntimeIDE.quitSimulatorAppOnHeadlessConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Quit the visible Simulator app during headless Connect To Bridge if it is already running."
+        },
+        "shortcutsRuntimeIDE.singleSimulatorOnConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep only the selected iOS simulator booted during Connect To Bridge by shutting down other booted iOS simulators."
         },
         "shortcutsRuntimeIDE.autoConvertPlistOnOpen": {
           "type": "boolean",

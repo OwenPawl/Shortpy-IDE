@@ -37,6 +37,7 @@ function execFile(command, args, options = {}) {
 async function makeFakeBridge(root, initiallyRunning) {
   const state = path.join(root, "running");
   const toolkitEnv = path.join(root, "toolkit-env");
+  const launchEnv = path.join(root, "launch-env.json");
   await fs.mkdir(root, { recursive: true });
   if (initiallyRunning) {
     await fs.writeFile(state, "1", "utf8");
@@ -56,10 +57,20 @@ await writeExecutable(path.join(root, "tools", "launch_shortcuts_sim_bridge.sh")
 set -euo pipefail
 echo "shortpy-bridge-stage: booting fake"
 printf '%s' "\${SHORTPY_TOOLKIT_SQLITE:-}" > ${JSON.stringify(toolkitEnv)}
+python3 - <<'PY'
+import json, os
+keys = [
+    "SHORTPY_IDE_BOOT_SIMULATOR",
+    "SHORTPY_IDE_OPEN_SIMULATOR",
+    "SHORTPY_IDE_QUIT_SIMULATOR_APP",
+    "SHORTPY_IDE_SINGLE_SIMULATOR",
+]
+open(${JSON.stringify(launchEnv)}, "w").write(json.dumps({key: os.environ.get(key, "") for key in keys}))
+PY
 echo "shortpy-bridge-stage: launching fake"
 printf 1 > ${JSON.stringify(state)}
 `);
-  return { state, toolkitEnv };
+  return { state, toolkitEnv, launchEnv };
 }
 
 async function exists(file) {
@@ -209,6 +220,9 @@ async function main() {
     assert.strictEqual(normalizeOptions({ bridgeCtlPath: explicitCtl }).bridgeCtlPath, explicitCtl);
     const configured = await resolveBridgeRuntime({ bridgeCtlPath: explicitCtl });
     assert.strictEqual(configured.source, "configured");
+    assert.strictEqual(normalizeOptions({}).openSimulatorOnConnect, false);
+    assert.strictEqual(normalizeOptions({}).quitSimulatorAppOnHeadlessConnect, true);
+    assert.strictEqual(normalizeOptions({}).singleSimulatorOnConnect, true);
 
     const storageRoot = versionedStorageBridgeRoot(path.join(temp, "storage"), "0.1.test");
     await makeFakeBridge(storageRoot, true);
@@ -248,13 +262,21 @@ async function main() {
     });
     assert.strictEqual(forced.alreadyRunning, false);
     assert.strictEqual(await fs.readFile(explicit.toolkitEnv, "utf8"), "/tmp/custom-tools.sqlite");
+    const defaultLaunchEnv = JSON.parse(await fs.readFile(explicit.launchEnv, "utf8"));
+    assert.strictEqual(defaultLaunchEnv.SHORTPY_IDE_BOOT_SIMULATOR, "1");
+    assert.strictEqual(defaultLaunchEnv.SHORTPY_IDE_OPEN_SIMULATOR, "0");
+    assert.strictEqual(defaultLaunchEnv.SHORTPY_IDE_QUIT_SIMULATOR_APP, "1");
+    assert.strictEqual(defaultLaunchEnv.SHORTPY_IDE_SINGLE_SIMULATOR, "1");
 
     const launchRoot = path.join(temp, "launch");
-    await makeFakeBridge(launchRoot, false);
+    const launch = await makeFakeBridge(launchRoot, false);
     const progressKinds = [];
     const launched = await ensureBridgeLaunched({
       bridgeCtlPath: bridgeCtlPathForRoot(launchRoot),
       pythonPath: "python3",
+      openSimulatorOnConnect: true,
+      quitSimulatorAppOnHeadlessConnect: false,
+      singleSimulatorOnConnect: false,
       bridgeStatusTimeoutMs: 1000,
       bridgeLaunchTimeoutMs: 1000,
     }, (event) => progressKinds.push(event.kind));
@@ -262,6 +284,10 @@ async function main() {
     assert.strictEqual(launched.status.version, "fake");
     assert(progressKinds.includes("booting"), "launch should report booting progress");
     assert(progressKinds.includes("launching"), "launch should report launching progress");
+    const overriddenLaunchEnv = JSON.parse(await fs.readFile(launch.launchEnv, "utf8"));
+    assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_OPEN_SIMULATOR, "1");
+    assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_QUIT_SIMULATOR_APP, "0");
+    assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_SINGLE_SIMULATOR, "0");
 
     await testToolkitDuplicateRewrite(temp);
     await testValidationBridgeArgs(temp);

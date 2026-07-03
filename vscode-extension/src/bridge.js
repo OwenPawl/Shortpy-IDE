@@ -134,6 +134,9 @@ function normalizeOptions(options = {}) {
     bridgeStatusTimeoutMs: Number(options.bridgeStatusTimeoutMs) || 10000,
     bridgeLaunchTimeoutMs: Number(options.bridgeLaunchTimeoutMs) || 300000,
     forceBridgeLaunch: Boolean(options.forceBridgeLaunch),
+    openSimulatorOnConnect: Boolean(options.openSimulatorOnConnect),
+    quitSimulatorAppOnHeadlessConnect: options.quitSimulatorAppOnHeadlessConnect !== false,
+    singleSimulatorOnConnect: options.singleSimulatorOnConnect !== false,
   };
 }
 
@@ -441,11 +444,14 @@ async function launchBridgeRuntime(runtime, options = {}, onProgress) {
     throw new Error(`Missing simulator bridge launcher: ${launcher}`);
   }
   if (onProgress) {
-    onProgress({ kind: "booting", message: "Booting or opening iOS Simulator if needed", bridgeRoot: runtime.bridgeRoot });
+    onProgress({ kind: "booting", message: "Booting iOS Simulator if needed", bridgeRoot: runtime.bridgeRoot });
   }
   const env = {
     ...process.env,
     SHORTPY_IDE_BOOT_SIMULATOR: "1",
+    SHORTPY_IDE_OPEN_SIMULATOR: config.openSimulatorOnConnect ? "1" : "0",
+    SHORTPY_IDE_QUIT_SIMULATOR_APP: config.quitSimulatorAppOnHeadlessConnect ? "1" : "0",
+    SHORTPY_IDE_SINGLE_SIMULATOR: config.singleSimulatorOnConnect ? "1" : "0",
   };
   if (config.toolkitSqlitePath) {
     env.SHORTPY_TOOLKIT_SQLITE = config.toolkitSqlitePath;
