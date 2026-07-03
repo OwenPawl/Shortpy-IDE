@@ -7,18 +7,30 @@
 static NSString *const kBridgeLogicalGeneratorAssetRoot =
     @"/System/Library/AssetsV2/"
      "com_apple_MobileAsset_UAF_Shortcuts_Generator/";
-static NSString *const kBridgeHostGeneratorAssetRoot =
-    @"/Volumes/reSSD/MacMoved/Developer/CoreSimulator/Devices/"
-     "9B1C6AA3-3917-418B-95F9-A14D24411062/data/private/var/"
-     "MobileAsset/AssetsV2/com_apple_MobileAsset_UAF_Shortcuts_Generator/";
+
+static NSString *BridgeHostGeneratorAssetRoot(void) {
+  const char *override = getenv("SHORTPY_GENERATOR_ASSET_ROOT");
+  if (!override || !override[0]) {
+    return nil;
+  }
+  NSString *root = [NSString stringWithUTF8String:override];
+  if (![root hasSuffix:@"/"]) {
+    root = [root stringByAppendingString:@"/"];
+  }
+  return root;
+}
 
 static NSString *BridgeMappedGeneratorAssetPath(NSString *path) {
   if (![path isKindOfClass:[NSString class]] ||
       ![path hasPrefix:kBridgeLogicalGeneratorAssetRoot]) {
     return path;
   }
+  NSString *hostRoot = BridgeHostGeneratorAssetRoot();
+  if (!hostRoot.length) {
+    return path;
+  }
   NSString *suffix = [path substringFromIndex:kBridgeLogicalGeneratorAssetRoot.length];
-  return [kBridgeHostGeneratorAssetRoot stringByAppendingString:suffix];
+  return [hostRoot stringByAppendingString:suffix];
 }
 
 static NSURL *BridgeMappedGeneratorAssetURL(NSURL *url) {
@@ -39,10 +51,11 @@ static void BridgeLogAssetPathHookInstall(void) {
   if (!file) {
     return;
   }
+  NSString *hostRoot = BridgeHostGeneratorAssetRoot();
   fprintf(file,
           "[asset-path-bridge] installed logical=%s host=%s\n",
           kBridgeLogicalGeneratorAssetRoot.UTF8String,
-          kBridgeHostGeneratorAssetRoot.UTF8String);
+          hostRoot.length ? hostRoot.UTF8String : "(disabled)");
   fclose(file);
 }
 

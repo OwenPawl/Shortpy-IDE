@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DYLIB="${ROOT}/build-sim/libShortcutsIDESimBridge-v019.dylib"
-DYLIBLOAD="${DYLIBLOAD:-/Users/owenpawling/Documents/Playground/dylibload-frida-core-20260616-062836/build/dylibload}"
+DYLIBLOAD="${DYLIBLOAD:-dylibload}"
 SOCKET="/tmp/shortcuts-ide-bridge-sim.sock"
 LOG_DIR="${ROOT}/logs"
 mkdir -p "${LOG_DIR}"

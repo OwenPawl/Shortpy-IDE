@@ -137,7 +137,22 @@ echo "shortpy-bridge-stage: launching Shortcuts on ${SIM_UDID}" | tee "${launch_
 echo "Runtime build: ${runtime_build}" | tee -a "${launch_log}"
 echo "Runtime root: ${runtime_root}" | tee -a "${launch_log}"
 echo "Launching iOS Simulator Shortcuts with ${DYLIB}" | tee -a "${launch_log}"
+sim_data_path="$(SIM_UDID_FOR_PATH="${SIM_UDID}" xcrun simctl list devices -j | /usr/bin/python3 -c '
+import json, os, sys
+target = os.environ.get("SIM_UDID_FOR_PATH")
+data = json.load(sys.stdin)
+for devices in data.get("devices", {}).values():
+    for device in devices:
+        if device.get("udid") == target:
+            print(device.get("dataPath") or "")
+            raise SystemExit(0)
+' || true)"
+if [[ -z "${sim_data_path}" ]]; then
+  sim_data_path="$("${ROOT}/tools/toolkitctl.py" --device "${SIM_UDID}" show 2>/dev/null | /usr/bin/python3 -c 'import json,sys; data=json.load(sys.stdin); active=data.get("active",{}).get("path",""); marker="/Library/Shortcuts/ToolKit/Tools-active"; print(active.rsplit(marker,1)[0] if marker in active else "")' || true)"
+fi
+generator_asset_root="${sim_data_path%/}/private/var/MobileAsset/AssetsV2/com_apple_MobileAsset_UAF_Shortcuts_Generator"
 SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="${DYLIB}" \
+SIMCTL_CHILD_SHORTPY_GENERATOR_ASSET_ROOT="${generator_asset_root}" \
   xcrun simctl launch --terminate-running-process "${SIM_UDID}" com.apple.shortcuts 2>&1 | tee -a "${launch_log}"
 
 for _ in {1..50}; do
