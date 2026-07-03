@@ -2,6 +2,8 @@
 
 const assert = require("assert");
 const { parseAppleDiagnostic } = require("../src/diagnostics");
+const { collectToolRendererDiagnostics } = require("../src/shortpyDiagnostics");
+const { indexToolRendererMetadata } = require("../src/toolrenderer");
 
 const message = `Error at Line 2, Column 5
 
@@ -27,5 +29,35 @@ assert.deepStrictEqual(parsed.hints, ["Did you mean 'com_apple_shortcuts_nothing
 assert.strictEqual(parsed.fixIts.length, 1);
 assert.strictEqual(parsed.fixIts[0].kind, "replace-word");
 assert.strictEqual(parsed.fixIts[0].replacement, "com_apple_shortcuts_nothing");
+
+const toolRenderer = indexToolRendererMetadata({
+  actions: [
+    {
+      kind: "action",
+      pythonName: "com_visible_action",
+      parameters: [{ pythonName: "title" }],
+    },
+    {
+      kind: "action",
+      pythonName: "com_native_widened_action",
+      parameters: [{ pythonName: "message" }],
+    },
+  ],
+});
+const widenedDiagnostics = collectToolRendererDiagnostics(
+  [
+    "def shortcut() -> None:",
+    "    com_native_widened_action(message=\"ok\")",
+    "    com_native_widened_action(bogus=True)",
+    "",
+  ].join("\n"),
+  toolRenderer
+);
+assert(!widenedDiagnostics.some((diagnostic) => diagnostic.code === "unknownShortcutsCommand"));
+assert(widenedDiagnostics.some((diagnostic) =>
+  diagnostic.code === "unknownShortcutsParameter" &&
+  diagnostic.commandName === "com_native_widened_action" &&
+  /bogus/.test(diagnostic.message)
+));
 
 console.log("diagnostics-ok");

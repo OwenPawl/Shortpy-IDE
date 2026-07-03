@@ -10,22 +10,96 @@ _bridge_make_error_configuration_empty:
     ldp x29, x30, [sp], #16
     ret
 
-.globl _bridge_make_tool_visibility_filter_any
-_bridge_make_tool_visibility_filter_any:
+.globl _bridge_make_tool_visibility_filter_visible_for_shortcuts
+_bridge_make_tool_visibility_filter_visible_for_shortcuts:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    str x0, [sp, #16]
+    add x8, sp, #24
+    bl _$s7ToolKit0A14VisibilityFlagV19visibleForShortcutsACvgZ
+    add x0, sp, #24
+    ldr x8, [sp, #16]
+    bl _$s7ToolKit0A16VisibilityFilterV2isyAcA0aC4FlagVFZ
+    ldp x29, x30, [sp], #32
+    ret
+
+.globl _bridge_make_toolrenderer_compatibility_shims_default_none
+_bridge_make_toolrenderer_compatibility_shims_default_none:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
     mov x8, x0
-    bl _$s7ToolKit0A16VisibilityFilterV3anyACvgZ
+    bl _$s12ToolRenderer18CompatibilityShimsV11defaultNoneACvgZ
     ldp x29, x30, [sp], #16
     ret
 
-.globl _bridge_make_toolrenderer_compatibility_shims_default
-_bridge_make_toolrenderer_compatibility_shims_default:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    mov x8, x0
-    bl _$s12ToolRenderer18CompatibilityShimsV7defaultACvgZ
-    ldp x29, x30, [sp], #16
+.section __DATA,__data
+.p2align 3
+L_toolrenderer_python_interface_target:
+    .quad 0
+L_toolrenderer_filter_provider_default_target:
+    .quad 0
+
+.p2align 3
+L_null_filter_provider_witness_table:
+    .quad 0
+    .quad _bridge_null_filter_provider_surrogate
+
+.text
+.p2align 2
+
+.globl _bridge_set_toolrenderer_python_interface_target
+_bridge_set_toolrenderer_python_interface_target:
+    adrp x8, L_toolrenderer_python_interface_target@PAGE
+    str x0, [x8, L_toolrenderer_python_interface_target@PAGEOFF]
+    ret
+
+.globl _bridge_toolrenderer_python_interface_selected
+_bridge_toolrenderer_python_interface_selected:
+    adrp x16, L_toolrenderer_python_interface_target@PAGE
+    ldr x16, [x16, L_toolrenderer_python_interface_target@PAGEOFF]
+    br x16
+
+.section __TEXT,__const
+.p2align 3
+.globl _bridge_toolrenderer_python_interface_selectedTu
+_bridge_toolrenderer_python_interface_selectedTu:
+    .long _bridge_toolrenderer_python_interface_selected - _bridge_toolrenderer_python_interface_selectedTu
+    .long 0x160
+
+.text
+.p2align 2
+
+.globl _bridge_set_toolrenderer_filter_provider_default_target
+_bridge_set_toolrenderer_filter_provider_default_target:
+    adrp x8, L_toolrenderer_filter_provider_default_target@PAGE
+    str x0, [x8, L_toolrenderer_filter_provider_default_target@PAGEOFF]
+    ret
+
+.globl _bridge_toolrenderer_filter_provider_default_selected
+_bridge_toolrenderer_filter_provider_default_selected:
+    adrp x16, L_toolrenderer_filter_provider_default_target@PAGE
+    ldr x16, [x16, L_toolrenderer_filter_provider_default_target@PAGEOFF]
+    br x16
+
+.globl _bridge_null_filter_provider_witness_table_ptr
+_bridge_null_filter_provider_witness_table_ptr:
+    adrp x0, L_null_filter_provider_witness_table@PAGE
+    add x0, x0, L_null_filter_provider_witness_table@PAGEOFF
+    ret
+
+.globl _bridge_null_filter_provider_surrogate
+_bridge_null_filter_provider_surrogate:
+    cbz x8, 2f
+    mov x9, #0
+    str x9, [x8]
+    str x9, [x8, #8]
+    str x9, [x8, #16]
+    str x9, [x8, #24]
+    str x9, [x8, #32]
+    str x9, [x8, #40]
+    str x9, [x8, #48]
+    str x9, [x8, #56]
+2:
     ret
 
 .globl _bridge_shared_tool_database_provider_database

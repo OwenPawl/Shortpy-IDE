@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -12,6 +14,12 @@ from pathlib import Path
 
 DEFAULT_DEVICE = "booted"
 HOST_TOOLKIT_ACTIVE = Path.home() / "Library/Shortcuts/ToolKit/Tools-active"
+ADJUSTABLE_PYTHON_NAME_TABLES = ("Tools", "Triggers")
+TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS = 0x1
+TOOL_VISIBILITY_APPROVED = 0x4
+REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS = (
+    TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS | TOOL_VISIBILITY_APPROVED
+)
 
 
 def run_json(command: list[str]) -> dict:
@@ -72,6 +80,326 @@ def target_description(path: Path) -> dict:
     return payload
 
 
+def canonical_python_name(identifier: str, fallback: str) -> str:
+    source = str(identifier or fallback or "").strip()
+    name = re.sub(r"[^0-9A-Za-z_]+", "_", source).strip("_")
+    if not name:
+        name = re.sub(r"[^0-9A-Za-z_]+", "_", str(fallback or "item")).strip("_") or "item"
+    if name[0].isdigit():
+        name = f"_{name}"
+    return name
+
+
+def identifier_text(value: object) -> str:
+    if isinstance(value, bytes):
+        try:
+            decoded = value.decode("utf-8")
+            if decoded:
+                return decoded
+        except UnicodeDecodeError:
+            pass
+        return value.hex()
+    if value is None:
+        return ""
+    return str(value)
+
+
+def unique_python_name(base: str, used: set[str], row_id: object) -> str:
+    candidate = base
+    if not candidate:
+        candidate = canonical_python_name("", str(row_id))
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    suffix_base = canonical_python_name(str(row_id), "row")
+    candidate = f"{base}_{suffix_base}"
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    counter = 2
+    while f"{candidate}_{counter}" in used:
+        counter += 1
+    final = f"{candidate}_{counter}"
+    used.add(final)
+    return final
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.DatabaseError:
+        return set()
+
+
+def adjustable_table(conn: sqlite3.Connection, table: str) -> bool:
+    return {"rowId", "id", "pythonName"}.issubset(table_columns(conn, table))
+
+
+def duplicate_python_name_rows(conn: sqlite3.Connection, table: str) -> list[dict]:
+    conn.row_factory = sqlite3.Row
+    query = f"""
+        SELECT rowId, id, pythonName
+        FROM {table}
+        WHERE pythonName IN (
+            SELECT pythonName
+            FROM {table}
+            WHERE pythonName IS NOT NULL AND pythonName != ''
+            GROUP BY pythonName
+            HAVING COUNT(*) > 1
+        )
+        ORDER BY pythonName, id, rowId
+    """
+    return [dict(row) for row in conn.execute(query)]
+
+
+def attach_sqlite(conn: sqlite3.Connection, alias: str, sqlite_path: Path) -> None:
+    conn.execute(f"ATTACH DATABASE ? AS {alias}", (str(sqlite_path.expanduser().resolve(strict=True)),))
+
+
+def overlay_python_names(conn: sqlite3.Connection, source_sqlite: Path) -> dict:
+    report = {
+        "source": str(source_sqlite.expanduser().resolve(strict=True)),
+        "tables": {},
+        "change_count": 0,
+    }
+    attach_sqlite(conn, "source_toolkit", source_sqlite)
+    for table in ADJUSTABLE_PYTHON_NAME_TABLES:
+        if not adjustable_table(conn, table):
+            continue
+        source_columns = {
+            row[1]
+            for row in conn.execute(f"PRAGMA source_toolkit.table_info({table})")
+        }
+        if not {"id", "pythonName"}.issubset(source_columns):
+            continue
+        conn.row_factory = sqlite3.Row
+        candidates = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT main.rowId AS rowId, main.id AS id, main.pythonName AS oldPythonName, source.pythonName AS newPythonName
+                FROM {table} main
+                JOIN source_toolkit.{table} source ON source.id = main.id
+                WHERE source.pythonName IS NOT NULL AND source.pythonName != ''
+                  AND (main.pythonName IS NULL OR main.pythonName != source.pythonName)
+                ORDER BY main.rowId
+                """
+            )
+        ]
+        changes = []
+        for row in candidates:
+            conn.execute(
+                f"UPDATE {table} SET pythonName = ? WHERE rowId = ?",
+                (row["newPythonName"], row["rowId"]),
+            )
+            changes.append({
+                "rowId": row["rowId"],
+                "id": identifier_text(row["id"]),
+                "oldPythonName": row["oldPythonName"],
+                "newPythonName": row["newPythonName"],
+            })
+        report["tables"][table] = {
+            "changed_count": len(changes),
+            "changes": changes,
+        }
+        report["change_count"] += len(changes)
+    return report
+
+
+def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
+    report = {
+        "tables": {},
+        "change_count": 0,
+    }
+    for table in ADJUSTABLE_PYTHON_NAME_TABLES:
+        if not adjustable_table(conn, table):
+            continue
+        conn.row_factory = sqlite3.Row
+        used = {
+            row[0]
+            for row in conn.execute(f"SELECT pythonName FROM {table} WHERE pythonName IS NOT NULL AND pythonName != ''")
+        }
+        duplicate_rows = duplicate_python_name_rows(conn, table)
+        duplicate_ids = {row["rowId"] for row in duplicate_rows}
+        for row in duplicate_rows:
+            used.discard(row["pythonName"])
+        changes = []
+        for row in duplicate_rows:
+            old_name = row["pythonName"]
+            identifier = identifier_text(row["id"])
+            new_name = unique_python_name(canonical_python_name(identifier, old_name), used, row["rowId"])
+            if new_name != old_name:
+                conn.execute(
+                    f"UPDATE {table} SET pythonName = ? WHERE rowId = ?",
+                    (new_name, row["rowId"]),
+                )
+                changes.append({
+                    "rowId": row["rowId"],
+                    "id": identifier,
+                    "oldPythonName": old_name,
+                    "newPythonName": new_name,
+                })
+        report["tables"][table] = {
+            "duplicate_row_count": len(duplicate_rows),
+            "changed_count": len(changes),
+            "duplicate_row_ids": sorted(duplicate_ids),
+            "changes": changes,
+        }
+        report["change_count"] += len(changes)
+    return report
+
+
+def toolrenderer_visibility_rows(conn: sqlite3.Connection) -> list[dict]:
+    if "visibilityFlags" not in table_columns(conn, "Tools"):
+        return []
+    conn.row_factory = sqlite3.Row
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT rowId, id, pythonName, visibilityFlags
+            FROM Tools
+            WHERE (visibilityFlags & ?) != ?
+            ORDER BY rowId
+            """,
+            (REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS, REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS),
+        )
+    ]
+
+
+def adjust_toolrenderer_visibility(conn: sqlite3.Connection) -> dict:
+    report = {
+        "table": "Tools",
+        "requiredBits": {
+            "visibleForShortcuts": TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS,
+            "approved": TOOL_VISIBILITY_APPROVED,
+        },
+        "requiredMask": REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS,
+        "predicate": "(visibilityFlags & 0x5) != 0x5",
+        "changed_count": 0,
+        "changes": [],
+    }
+    rows_to_change = toolrenderer_visibility_rows(conn)
+    for row in rows_to_change:
+        old_flags = int(row["visibilityFlags"])
+        new_flags = old_flags | REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS
+        conn.execute(
+            "UPDATE Tools SET visibilityFlags = ? WHERE rowId = ?",
+            (new_flags, row["rowId"]),
+        )
+        report["changes"].append({
+            "rowId": row["rowId"],
+            "id": identifier_text(row["id"]),
+            "pythonName": row["pythonName"],
+            "oldVisibilityFlags": old_flags,
+            "newVisibilityFlags": new_flags,
+        })
+    report["changed_count"] = len(report["changes"])
+    return report
+
+
+def default_adjusted_path(source: Path, out_dir: Path) -> Path:
+    resolved = source.expanduser().resolve(strict=True)
+    stat = resolved.stat()
+    digest = hashlib.sha256(f"{resolved}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")).hexdigest()[:16]
+    stem = resolved.name
+    if stem.endswith(".sqlite"):
+        stem = stem[:-7]
+    clean = re.sub(r"[^0-9A-Za-z_.-]+", "_", stem).strip("._") or "Tools-active"
+    return out_dir / f"{clean}.shortpy-adjusted-{digest}.sqlite"
+
+
+def copy_sqlite_database(source: Path, destination: Path) -> None:
+    resolved = source.expanduser().resolve(strict=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm", ".lock"):
+        target = Path(f"{destination}{suffix}")
+        if target.exists() or target.is_symlink():
+            target.unlink()
+    shutil.copy2(resolved, destination)
+    for suffix in ("-wal", "-shm", ".lock"):
+        sidecar = Path(f"{resolved}{suffix}")
+        if sidecar.exists() and sidecar.stat().st_size > 0:
+            shutil.copy2(sidecar, Path(f"{destination}{suffix}"))
+
+
+def backup_sqlite_database(source: Path, label: str = "shortpy-backup") -> Path:
+    resolved = source.expanduser().resolve(strict=True)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = resolved.with_name(f"{resolved.name}.{label}-{suffix}")
+    counter = 1
+    while backup.exists() or backup.is_symlink():
+        backup = resolved.with_name(f"{resolved.name}.{label}-{suffix}-{counter}")
+        counter += 1
+    copy_sqlite_database(resolved, backup)
+    return backup
+
+
+def has_duplicate_python_names(conn: sqlite3.Connection) -> bool:
+    for table in ADJUSTABLE_PYTHON_NAME_TABLES:
+        if adjustable_table(conn, table) and duplicate_python_name_rows(conn, table):
+            return True
+    return False
+
+
+def needs_toolrenderer_visibility_adjustment(conn: sqlite3.Connection) -> bool:
+    return bool(toolrenderer_visibility_rows(conn))
+
+
+def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True) -> dict:
+    source = sqlite_path.expanduser().resolve(strict=True)
+    created_backup: Path | None = None
+    conn = sqlite3.connect(str(source))
+    try:
+        needs_adjustment = has_duplicate_python_names(conn) or needs_toolrenderer_visibility_adjustment(conn)
+    finally:
+        conn.close()
+    if needs_adjustment and backup:
+        created_backup = backup_sqlite_database(source)
+    conn = sqlite3.connect(str(source))
+    try:
+        adjustment = adjust_duplicate_python_names(conn)
+        visibility_adjustment = adjust_toolrenderer_visibility(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "action": "adjust",
+        "source": target_description(source),
+        "backup": target_description(created_backup) if created_backup else None,
+        "duplicate_adjustment": adjustment,
+        "toolrenderer_visibility_adjustment": visibility_adjustment,
+        "restart_required": adjustment.get("change_count", 0) > 0 or visibility_adjustment.get("changed_count", 0) > 0,
+    }
+
+
+def prepare_adjusted_sqlite(sqlite_path: Path, out: Path | None, out_dir: Path | None, base: Path | None = None) -> dict:
+    source = sqlite_path.expanduser().resolve(strict=True)
+    copy_source = base.expanduser().resolve(strict=True) if base else source
+    destination = out.expanduser() if out else default_adjusted_path(source, (out_dir or source.parent).expanduser())
+    destination = destination.resolve(strict=False)
+    copy_sqlite_database(copy_source, destination)
+    conn = sqlite3.connect(str(destination))
+    try:
+        overlay = overlay_python_names(conn, source) if base else None
+        adjustment = adjust_duplicate_python_names(conn)
+        visibility_adjustment = adjust_toolrenderer_visibility(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "action": "prepare",
+        "source": target_description(source),
+        "base": target_description(copy_source) if base else None,
+        "prepared": target_description(destination),
+        "python_name_overlay": overlay,
+        "duplicate_adjustment": adjustment,
+        "toolrenderer_visibility_adjustment": visibility_adjustment,
+    }
+
+
 def backup_active(active: Path) -> Path | None:
     if not active.exists() and not active.is_symlink():
         return None
@@ -111,6 +439,73 @@ def point_active(device: str, sqlite_path: Path, resolve_target: bool) -> dict:
         "active": target_description(active),
         "target": target_description(target),
         "backup": target_description(backup) if backup else None,
+        "restart_required": True,
+    }
+
+
+def adjusted_sqlite_path(path: Path) -> bool:
+    text = str(path)
+    return ".shortpy-adjusted-" in path.name or "/toolkit-adjusted/" in text
+
+
+def simulator_base_sqlite(device: str) -> Path | None:
+    active = active_path(device)
+    candidates: list[Path] = []
+    if active.exists() or active.is_symlink():
+        candidates.append(active)
+    candidates.extend(sorted(active.parent.glob("Tools-active.backup-*"), key=lambda item: item.name, reverse=True))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if adjusted_sqlite_path(resolved):
+            continue
+        if resolved == HOST_TOOLKIT_ACTIVE or str(resolved).startswith(str(HOST_TOOLKIT_ACTIVE.parent)):
+            continue
+        if resolved.is_file():
+            return resolved
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not adjusted_sqlite_path(resolved) and resolved.is_file():
+            return resolved
+    return None
+
+
+def activate_adjusted(device: str, sqlite_path: Path, out_dir: Path | None, out: Path | None, base: Path | None = None) -> dict:
+    if out or out_dir or base:
+        selected_base = base or simulator_base_sqlite(device)
+        prepared = prepare_adjusted_sqlite(sqlite_path, out, out_dir, selected_base)
+        point = point_active(device, Path(prepared["prepared"]["path"]), True)
+        return {
+            "ok": True,
+            "action": "activate",
+            "mode": "prepared-copy",
+            "device": point["device"],
+            "source": prepared["source"],
+            "base": prepared["base"],
+            "prepared": prepared["prepared"],
+            "python_name_overlay": prepared["python_name_overlay"],
+            "duplicate_adjustment": prepared["duplicate_adjustment"],
+            "toolrenderer_visibility_adjustment": prepared["toolrenderer_visibility_adjustment"],
+            "point": point,
+            "restart_required": True,
+        }
+    adjusted = adjust_sqlite_in_place(sqlite_path)
+    point = point_active(device, Path(adjusted["source"]["path"]), True)
+    return {
+        "ok": True,
+        "action": "activate",
+        "mode": "source-of-truth",
+        "device": point["device"],
+        "source": adjusted["source"],
+        "backup": adjusted["backup"],
+        "duplicate_adjustment": adjusted["duplicate_adjustment"],
+        "toolrenderer_visibility_adjustment": adjusted["toolrenderer_visibility_adjustment"],
+        "point": point,
         "restart_required": True,
     }
 
@@ -323,6 +718,22 @@ def main() -> int:
     point_host = sub.add_parser("point-host", help="Point simulator Tools-active at the host mac Tools-active target.")
     point_host.add_argument("--no-resolve", action="store_true", help="Keep the host Tools-active symlink path instead of resolving it.")
 
+    prepare = sub.add_parser("prepare", help="Copy a ToolKit sqlite and rewrite duplicate Python names in the copy.")
+    prepare.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
+    prepare.add_argument("--base", type=Path, help="Base sqlite to copy before overlaying Python names from --sqlite.")
+    prepare.add_argument("--out", type=Path, help="Adjusted sqlite output path.")
+    prepare.add_argument("--out-dir", type=Path, help="Directory for a generated adjusted sqlite name.")
+
+    adjust = sub.add_parser("adjust", help="Rewrite duplicate Python names in a ToolKit sqlite in place.")
+    adjust.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
+    adjust.add_argument("--no-backup", action="store_true", help="Do not create a sqlite backup before making changes.")
+
+    activate = sub.add_parser("activate", help="Adjust a sqlite in place and point simulator Tools-active at it.")
+    activate.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
+    activate.add_argument("--base", type=Path, help="Debug only: base sqlite to copy before overlaying Python names from --sqlite.")
+    activate.add_argument("--out", type=Path, help="Debug only: adjusted sqlite output path.")
+    activate.add_argument("--out-dir", type=Path, help="Debug only: directory for a generated adjusted sqlite name.")
+
     restore = sub.add_parser("restore", help="Restore simulator Tools-active from the latest or specified backup.")
     restore.add_argument("--backup", type=Path)
 
@@ -338,6 +749,12 @@ def main() -> int:
             payload = point_active(args.device, args.sqlite, not args.no_resolve)
         elif args.command == "point-host":
             payload = point_active(args.device, HOST_TOOLKIT_ACTIVE, not args.no_resolve)
+        elif args.command == "prepare":
+            payload = prepare_adjusted_sqlite(args.sqlite, args.out, args.out_dir, args.base)
+        elif args.command == "adjust":
+            payload = adjust_sqlite_in_place(args.sqlite, not args.no_backup)
+        elif args.command == "activate":
+            payload = activate_adjusted(args.device, args.sqlite, args.out_dir, args.out, args.base)
         elif args.command == "restore":
             payload = restore_active(args.device, args.backup)
         elif args.command == "metadata":

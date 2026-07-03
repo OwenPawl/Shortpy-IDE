@@ -1,0 +1,20 @@
+settings set target.process.thread.step-avoid-regexp ^$
+settings set target.process.stop-on-sharedlibrary-events false
+
+breakpoint set --name bridge_toolrenderer_python_interface_selected
+breakpoint command add 1
+register read pc x0 x1 x2 x3 x8 x22
+memory read --format x --size 8 --count 8 $x1
+memory read --format x --size 8 --count 8 $x2
+continue
+DONE
+
+breakpoint set --name $s12ToolRenderer15pythonInterface8database14filterProvider017parameterMetadataG05shimsSS0A3Kit0A8DatabaseC_AA21FilterActionSurrogateV0G0_pAA09ParameteriG0_pAA18CompatibilityShimsVtYaKF
+breakpoint command add 2
+register read pc x0 x1 x2 x3 x8 x22
+memory read --format x --size 8 --count 8 $x1
+memory read --format x --size 8 --count 8 $x2
+continue
+DONE
+
+process continue

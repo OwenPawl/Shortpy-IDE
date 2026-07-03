@@ -284,6 +284,45 @@ def parse_return_type(signature: str) -> str:
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
+def parse_doc_sections(doc_lines: list[str]) -> dict:
+    narrative: list[str] = []
+    parameter_docs: dict[str, str] = {}
+    return_docs: list[str] = []
+    section = "narrative"
+    active_param = ""
+    for raw_line in doc_lines:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if line == "Args:":
+            section = "args"
+            active_param = ""
+            continue
+        if line == "Returns:":
+            section = "returns"
+            active_param = ""
+            continue
+        if section == "args":
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
+            if match:
+                active_param = match.group(1)
+                parameter_docs[active_param] = match.group(2).strip()
+            elif active_param:
+                parameter_docs[active_param] = f"{parameter_docs[active_param]} {line}".strip()
+            continue
+        if section == "returns":
+            return_docs.append(line)
+            continue
+        narrative.append(line)
+    return {
+        "displayName": narrative[0] if narrative else "",
+        "summary": "\n".join(narrative[1:]),
+        "narrative": narrative,
+        "parameterDocs": parameter_docs,
+        "returnDocs": "\n".join(return_docs),
+    }
+
+
 def parse_toolrenderer_structured_from_source(source: str) -> dict:
     lines = str(source or "").splitlines()
     actions: list[dict] = []
@@ -319,6 +358,7 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
             index += 1
             continue
         if line.startswith("class "):
+            start = index
             match = re.match(r"class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\(([^)]*)\))?:", stripped)
             if match:
                 name = match.group(1)
@@ -334,6 +374,7 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
                             "value": case_match.group(2).strip(),
                         })
                     cursor += 1
+                definition_block = "\n".join(lines[start:cursor]).rstrip()
                 types.append({
                     "kind": "enum" if "Enum" in bases else "class",
                     "pythonName": name,
@@ -342,7 +383,11 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
                     "bases": bases,
                     "cases": cases,
                     "docString": "\n".join(comments),
+                    "documentation": "\n".join(comments),
+                    "docSections": parse_doc_sections(comments),
+                    "definitionBlock": definition_block,
                     "source": "ToolRenderer.pythonInterface",
+                    "startLine": start + 1,
                 })
                 comments = []
                 index = max(index + 1, cursor)
@@ -356,7 +401,11 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
                 "signature": stripped,
                 "aliasedTo": alias_match.group(2).strip(),
                 "docString": "\n".join(comments),
+                "documentation": "\n".join(comments),
+                "docSections": parse_doc_sections(comments),
+                "definitionBlock": "\n".join([*(f"# {comment}" for comment in comments), stripped]).strip(),
                 "source": "ToolRenderer.pythonInterface",
+                "startLine": index + 1,
             })
             comments = []
             index += 1
@@ -401,20 +450,31 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
                     doc_lines.append(current.strip())
                     doc_index += 1
         docs = [item for item in (line.strip() for line in doc_lines) if item]
+        doc_sections = parse_doc_sections(docs)
+        parameters = parse_signature_parameters(signature)
+        for parameter in parameters:
+            doc = doc_sections["parameterDocs"].get(parameter.get("pythonName", ""))
+            if doc:
+                parameter["doc"] = doc
+                parameter["summary"] = doc
         kind = "trigger" if section == "trigger" or name.startswith("when_") else section
         if name in {"runnable", "input_fallback"}:
             kind = "decorator"
+        end = max(index + 1, doc_index)
         item = {
             "kind": kind,
             "pythonName": name,
             "nativeIdentifier": None,
-            "displayName": docs[0] if docs else name,
+            "displayName": doc_sections["displayName"] if docs else name,
             "docString": "\n".join(docs),
             "documentation": "\n".join(docs),
-            "summary": "\n".join(docs[1:]),
+            "summary": doc_sections["summary"],
             "signature": signature,
             "returnType": parse_return_type(signature),
-            "parameters": parse_signature_parameters(signature),
+            "returnDocs": doc_sections["returnDocs"],
+            "parameters": parameters,
+            "docSections": doc_sections,
+            "definitionBlock": "\n".join(lines[start:end]).rstrip(),
             "source": "ToolRenderer.pythonInterface",
             "startLine": start + 1,
         }
@@ -425,7 +485,7 @@ def parse_toolrenderer_structured_from_source(source: str) -> dict:
         else:
             helpers.append(item)
         comments = []
-        index = max(index + 1, doc_index)
+        index = end
     items = helpers + actions + triggers
     return {
         "ok": True,
@@ -453,7 +513,7 @@ def cached_toolrenderer_items() -> tuple[list[dict], str] | tuple[None, None]:
     logs = root / "logs"
     metadata_path = logs / "vscode-extension-toolrenderer-interface.json"
     if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text())
+        metadata = visible_toolrenderer_metadata(json.loads(metadata_path.read_text()))
         items = []
         for source_kind, output_kind, key in [
             ("helper", "helper", "helpers"),
@@ -482,6 +542,8 @@ def cached_toolrenderer_items() -> tuple[list[dict], str] | tuple[None, None]:
 
 VISIBLE_TOOLKIT_ITEM_KEYS = {
     "bindingSource",
+    "canonicalizedFrom",
+    "canonicalizationSource",
     "customDescription",
     "id",
     "nativeIdentifier",
@@ -521,7 +583,194 @@ def visible_toolrenderer_item(item: object) -> object:
     return output
 
 
+def item_display_key(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    display = item.get("displayName") or item.get("documentation") or item.get("pythonName") or ""
+    return re.sub(r"\s+", " ", str(display).strip()).lower()
+
+
+def rewrite_def_name(text: object, old_name: str, new_name: str) -> object:
+    if not isinstance(text, str) or not old_name or not new_name or old_name == new_name:
+        return text
+    return re.sub(
+        rf"(\bdef\s+){re.escape(old_name)}(\s*\()",
+        rf"\1{new_name}\2",
+        text,
+        count=1,
+    )
+
+
+def clone_toolrenderer_item_with_python_name(item: dict, python_name: str) -> dict:
+    old_name = str(item.get("pythonName") or "")
+    if not python_name or old_name == python_name:
+        return item
+    clone = dict(item)
+    clone["pythonName"] = python_name
+    clone["canonicalizedFrom"] = old_name
+    clone["canonicalizationSource"] = "sqlite-pythonName"
+    clone["signature"] = rewrite_def_name(clone.get("signature"), old_name, python_name)
+    clone["definitionBlock"] = rewrite_def_name(clone.get("definitionBlock"), old_name, python_name)
+    return clone
+
+
+def current_toolkit_metadata() -> dict:
+    try:
+        return load_toolkit_metadata()
+    except Exception:
+        return {}
+
+
+def toolkit_groups_by_display(kind: str) -> dict[str, list[dict]]:
+    metadata = current_toolkit_metadata()
+    items = metadata.get(kind, [])
+    if not isinstance(items, list):
+        return {}
+    by_display: dict[str, list[dict]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = item_display_key(item)
+        if not key:
+            continue
+        by_display.setdefault(key, []).append(item)
+    return by_display
+
+
+def db_python_names_for_group(group: list[dict]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in group:
+        name = item.get("pythonName")
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def parameter_name_set(item: dict) -> set[str]:
+    names: set[str] = set()
+    for parameter in item.get("parameters", []) or []:
+        if not isinstance(parameter, dict):
+            continue
+        name = parameter.get("pythonName") or parameter.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def toolrenderer_template_score(toolkit_item: dict, candidate: dict) -> tuple[int, int, int]:
+    toolkit_params = parameter_name_set(toolkit_item)
+    candidate_params = parameter_name_set(candidate)
+    overlap = len(toolkit_params & candidate_params)
+    exact = int(bool(toolkit_params) and toolkit_params == candidate_params)
+    count_delta = -abs(len(toolkit_params) - len(candidate_params))
+    return (exact, overlap, count_delta)
+
+
+def ordered_templates_for_toolkit_group(toolkit_group: list[dict], candidates: list[dict]) -> list[dict]:
+    if not candidates:
+        return []
+    if len(toolkit_group) == len(candidates):
+        return candidates
+    output: list[dict] = []
+    unused = set(range(len(candidates)))
+    for toolkit_item in toolkit_group:
+        ranked = sorted(
+            (
+                (toolrenderer_template_score(toolkit_item, candidates[index]), index)
+                for index in unused
+            ),
+            reverse=True,
+        )
+        if ranked:
+            index = ranked[0][1]
+            unused.discard(index)
+            output.append(candidates[index])
+        else:
+            output.append(candidates[0])
+    return output
+
+
+def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[dict], dict]:
+    by_display: dict[str, list[dict]] = {}
+    for item in items:
+        by_display.setdefault(item_display_key(item), []).append(item)
+
+    toolkit_by_display = toolkit_groups_by_display(kind)
+    output: list[dict] = []
+    processed_keys: set[str] = set()
+    changed_groups = 0
+    aliases = 0
+
+    for item in items:
+        key = item_display_key(item)
+        if not key:
+            output.append(item)
+            continue
+        if key in processed_keys:
+            continue
+        processed_keys.add(key)
+        toolkit_group = toolkit_by_display.get(key, [])
+        db_names = db_python_names_for_group(toolkit_group)
+        candidates = by_display.get(key, [])
+        if not db_names:
+            output.extend(candidates)
+            continue
+        templates = ordered_templates_for_toolkit_group(toolkit_group, candidates)
+        if not templates:
+            output.extend(candidates)
+            continue
+        clones = [
+            clone_toolrenderer_item_with_python_name(
+                templates[min(index, len(templates) - 1)],
+                name,
+            )
+            for index, name in enumerate(db_names)
+        ]
+        changed = len(candidates) != len(clones) or any(
+            candidate.get("pythonName") != clone.get("pythonName")
+            for candidate, clone in zip(candidates, clones)
+        )
+        if changed:
+            changed_groups += 1
+            aliases += len(clones)
+        output.extend(clones)
+
+    return output, {
+        "source": "sqlite-pythonName",
+        "groups": changed_groups,
+        "aliases": aliases,
+        "skippedAmbiguousGroups": 0,
+    }
+
+
+def canonicalize_toolrenderer_metadata(metadata: dict) -> dict:
+    actions = [item for item in metadata.get("actions", []) or [] if isinstance(item, dict)]
+    triggers = [item for item in metadata.get("triggers", []) or [] if isinstance(item, dict)]
+    canonical_actions, action_summary = canonicalize_toolrenderer_items(actions, "actions")
+    canonical_triggers, trigger_summary = canonicalize_toolrenderer_items(triggers, "triggers")
+    summary = {
+        "source": "sqlite-pythonName",
+        "actionGroups": action_summary["groups"],
+        "actionAliases": action_summary["aliases"],
+        "triggerGroups": trigger_summary["groups"],
+        "triggerAliases": trigger_summary["aliases"],
+        "skippedAmbiguousActionGroups": action_summary["skippedAmbiguousGroups"],
+        "skippedAmbiguousTriggerGroups": trigger_summary["skippedAmbiguousGroups"],
+    }
+    output = {
+        **metadata,
+        "actions": canonical_actions,
+        "triggers": canonical_triggers,
+        "nameCanonicalization": summary,
+    }
+    return output
+
+
 def visible_toolrenderer_metadata(metadata: dict) -> dict:
+    metadata = canonicalize_toolrenderer_metadata(metadata)
     output = {
         key: value
         for key, value in metadata.items()
@@ -550,13 +799,73 @@ def visible_toolrenderer_metadata(metadata: dict) -> dict:
     return output
 
 
+def enrich_toolrenderer_metadata_from_source(metadata: dict, source: str) -> dict:
+    if not source:
+        return metadata
+    parsed = parse_toolrenderer_structured_from_source(source)
+    parsed_by_name = {
+        item.get("pythonName"): item
+        for item in [
+            *(parsed.get("helpers") or []),
+            *(parsed.get("actions") or []),
+            *(parsed.get("triggers") or []),
+            *(parsed.get("types") or []),
+        ]
+        if item.get("pythonName")
+    }
+
+    def merge_items(items: object) -> list[dict]:
+        merged: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            parsed_item = parsed_by_name.get(item.get("pythonName"))
+            if parsed_item:
+                output = {**parsed_item, **item}
+                output["definitionBlock"] = item.get("definitionBlock") or parsed_item.get("definitionBlock", "")
+                output["docSections"] = item.get("docSections") or parsed_item.get("docSections", {})
+                if not output.get("returnDocs"):
+                    output["returnDocs"] = parsed_item.get("returnDocs", "")
+                if isinstance(output.get("parameters"), list) and isinstance(parsed_item.get("parameters"), list):
+                    parsed_params = {
+                        parameter.get("pythonName"): parameter
+                        for parameter in parsed_item["parameters"]
+                        if isinstance(parameter, dict) and parameter.get("pythonName")
+                    }
+                    fixed_params = []
+                    for parameter in output["parameters"]:
+                        if not isinstance(parameter, dict):
+                            fixed_params.append(parameter)
+                            continue
+                        parsed_param = parsed_params.get(parameter.get("pythonName"))
+                        fixed_params.append({**(parsed_param or {}), **parameter})
+                    output["parameters"] = fixed_params
+                merged.append(output)
+            else:
+                merged.append(item)
+        return merged
+
+    return {
+        **metadata,
+        "helpers": merge_items(metadata.get("helpers")),
+        "actions": merge_items(metadata.get("actions")),
+        "triggers": merge_items(metadata.get("triggers")),
+        "types": merge_items(metadata.get("types")),
+    }
+
+
 def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
     response = None
     if refresh:
         raw = send_command(socket_path, "toolrenderer-structured-metadata")
         response = json.loads(raw)
         if response.get("ok") and response.get("items"):
-            return visible_toolrenderer_metadata(response)
+            return visible_toolrenderer_metadata(
+                enrich_toolrenderer_metadata_from_source(
+                    response,
+                    response.get("python_interface") or response.get("pythonInterface") or "",
+                )
+            )
         if response.get("ok"):
             structured = parse_toolrenderer_structured_from_source(
                 response.get("python_interface") or response.get("pythonInterface") or ""
@@ -576,10 +885,6 @@ def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> 
     raw_path = Path(__file__).resolve().parents[1] / "logs" / "toolrenderer-python-interface.py"
     if metadata_path.exists():
         cached = json.loads(metadata_path.read_text())
-        if raw_path.exists() and not cached.get("types"):
-            structured = parse_toolrenderer_structured_from_source(raw_path.read_text())
-            structured["source"] = f"cached raw {raw_path}; replaced stale no-types metadata {metadata_path}"
-            return visible_toolrenderer_metadata(structured)
         cached["ok"] = True
         cached.setdefault("mode", "toolrenderer-structured-metadata")
         cached.setdefault("source", f"cached {metadata_path}")
@@ -625,6 +930,29 @@ def score_toolrenderer_item(item: dict, terms: list[str]) -> int:
     return score
 
 
+def dedupe_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[dict], dict]:
+    merged: dict[tuple[str, str], dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_kind = item.get("kind")
+        python_name = item.get("pythonName")
+        if not isinstance(item_kind, str) or not isinstance(python_name, str) or not python_name:
+            continue
+        normalized_kind = "tool" if item_kind == "action" else item_kind
+        if kind == "tool" and normalized_kind != "tool":
+            continue
+        if kind == "trigger" and normalized_kind != "trigger":
+            continue
+        result = dict(item)
+        if not result.get("sourceKind"):
+            result["sourceKind"] = item.get("sourceKind") or "ToolRenderer.pythonInterface"
+        merged[(normalized_kind, python_name)] = result
+    return list(merged.values()), {
+        "toolrenderer_items": len(merged),
+    }
+
+
 def load_toolrenderer_items(socket_path: str, refresh: bool) -> tuple[list[dict], str, dict | None]:
     if not refresh:
         cached, source = cached_toolrenderer_items()
@@ -650,15 +978,20 @@ def load_toolrenderer_items(socket_path: str, refresh: bool) -> tuple[list[dict]
 
 def safe_toolrenderer_search(socket_path: str, query: str, kind: str, limit: int, refresh: bool = False) -> dict:
     items, source, refresh_error = load_toolrenderer_items(socket_path, refresh)
+    index_notes: dict = {}
+    try:
+        items, index_notes = dedupe_toolrenderer_items(items, kind)
+    except Exception as exc:
+        index_notes = {"toolrenderer_index_error": str(exc)}
     if refresh_error is not None and not items:
         return refresh_error
     terms = query_terms(query)
     if kind == "tool":
-        allowed = {"tool"}
+        allowed = {"tool", "action"}
     elif kind == "trigger":
         allowed = {"trigger"}
     else:
-        allowed = {"tool", "trigger", "helper"}
+        allowed = {"tool", "action", "trigger", "helper"}
     ranked = []
     for item in items:
         if item["kind"] not in allowed:
@@ -674,14 +1007,17 @@ def safe_toolrenderer_search(socket_path: str, query: str, kind: str, limit: int
         "query": query,
         "kind": kind,
         "limit": max(1, limit),
+        "tool_visibility_source": "active-toolkit-sqlite",
         "native_agent_toolbox_status": "guarded behind --native",
         "notes": [
-            "Search is over Apple's ToolRenderer.pythonInterface, which is the native agent-visible Python tool surface.",
+            "Search uses Apple's ToolRenderer.pythonInterface from the active simulator ToolKit database.",
+            "The active ToolKit sqlite is adjusted before bridge launch so rows have visibleForShortcuts and approved visibility bits.",
             "Native AgentToolbox.query remains guarded because ToolKit dispatch-precondition evidence shows a null queue crash in this bridge context.",
         ],
         "counts": {
             "items": len(items),
             "matched": len(ranked),
+            **index_notes,
         },
         "results": ranked[: max(1, limit)],
     }
@@ -798,24 +1134,34 @@ def load_toolkit_metadata() -> dict:
     if TOOLKIT_METADATA_CACHE is not None:
         return TOOLKIT_METADATA_CACHE
     metadata_path = Path(__file__).resolve().parents[1] / "logs" / "vscode-extension-toolkit-metadata.json"
-    if not metadata_path.exists():
-        try:
-            metadata_path.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).with_name("toolkitctl.py")),
-                    "--quiet",
-                    "metadata",
-                    "--out",
-                    str(metadata_path),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+    selection_path = Path(__file__).resolve().parents[1] / "logs" / "shortpy-toolkit-selection.json"
+    selected_sqlite = None
+    try:
+        selection = json.loads(selection_path.read_text())
+        if isinstance(selection, dict):
+            for key in ("source", "prepared"):
+                section = selection.get(key)
+                path_value = section.get("path") if isinstance(section, dict) else None
+                if isinstance(path_value, str) and path_value:
+                    selected_sqlite = path_value
+                    break
+    except Exception:
+        selected_sqlite = None
+    try:
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            sys.executable,
+            str(Path(__file__).with_name("toolkitctl.py")),
+            "--quiet",
+            "metadata",
+            "--out",
+            str(metadata_path),
+        ]
+        if selected_sqlite:
+            command.extend(["--sqlite", selected_sqlite])
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
     try:
         parsed = json.loads(metadata_path.read_text())
         if isinstance(parsed, dict):
@@ -1643,6 +1989,127 @@ def replace_refs_with_inline_metadata(source: str, metadata_by_tag: dict[str, ob
     return re.sub(r"ref\((0x[0-9a-fA-F]+)\)", repl, source), replacements
 
 
+def action_identifiers_from_plist_object(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    actions = value.get("WFWorkflowActions")
+    if not isinstance(actions, list):
+        return []
+    identifiers = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        identifier = action.get("WFWorkflowActionIdentifier")
+        if isinstance(identifier, str) and identifier:
+            identifiers.append(identifier)
+    return identifiers
+
+
+def action_identifiers_from_plist_data(data: bytes) -> list[str]:
+    try:
+        return action_identifiers_from_plist_object(plistlib.loads(data))
+    except Exception:
+        return []
+
+
+def action_identifiers_from_plist_json(data: bytes) -> list[str]:
+    try:
+        return action_identifiers_from_plist_object(json.loads(data.decode("utf-8")))
+    except Exception:
+        return []
+
+
+def toolkit_action_python_names_by_identifier() -> dict[str, str]:
+    metadata = current_toolkit_metadata()
+    output: dict[str, str] = {}
+    for item in metadata.get("actions", []) or []:
+        if not isinstance(item, dict):
+            continue
+        identifier = item.get("id")
+        python_name = item.get("pythonName")
+        if isinstance(identifier, str) and isinstance(python_name, str) and identifier and python_name:
+            output[identifier] = python_name
+    return output
+
+
+def local_function_names(tree: ast.AST) -> set[str]:
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and isinstance(node.name, str)
+    }
+
+
+def imported_action_call_candidates(tree: ast.AST, locals_: set[str]) -> list[ast.Name]:
+    candidates: list[ast.Name] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        name = node.func.id
+        if name in locals_ or name in {"ref", "dict", "list", "set", "tuple", "str", "int", "float", "bool"}:
+            continue
+        if name in {"runnable", "input_fallback"} or name.startswith("when_"):
+            continue
+        if "_" not in name:
+            continue
+        candidates.append(node.func)
+    return sorted(candidates, key=lambda item: (item.lineno, item.col_offset))
+
+
+def canonicalize_imported_action_names(source: str, action_identifiers: list[str]) -> tuple[str, list[dict]]:
+    if not source or not action_identifiers:
+        return source, []
+    by_identifier = toolkit_action_python_names_by_identifier()
+    canonical_names = [
+        by_identifier[identifier]
+        for identifier in action_identifiers
+        if identifier in by_identifier
+    ]
+    if not canonical_names:
+        return source, []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source, []
+    calls = imported_action_call_candidates(tree, local_function_names(tree))
+    if not calls:
+        return source, []
+    line_offsets = line_offsets_for(source)
+    replacements: list[tuple[int, int, str, str]] = []
+    for func_node, canonical_name in zip(calls, canonical_names):
+        old_name = func_node.id
+        if old_name == canonical_name:
+            continue
+        start, end = node_span(func_node, line_offsets)
+        replacements.append((start, end, old_name, canonical_name))
+    rewritten = source
+    details: list[dict] = []
+    for start, end, old_name, canonical_name in sorted(replacements, key=lambda item: item[0], reverse=True):
+        rewritten = rewritten[:start] + canonical_name + rewritten[end:]
+        details.append({"from": old_name, "to": canonical_name})
+    details.reverse()
+    return rewritten, details
+
+
+def canonicalize_import_response(response: dict, action_identifiers: list[str]) -> dict:
+    source = response.get("python_code")
+    if not isinstance(source, str):
+        return response
+    rewritten, replacements = canonicalize_imported_action_names(source, action_identifiers)
+    if not replacements:
+        return response
+    response.setdefault("raw_python_code_before_name_canonicalization", source)
+    response["python_code"] = rewritten
+    response["python_length"] = len(rewritten.encode("utf-8"))
+    response["name_canonicalization"] = {
+        "present": True,
+        "source": "workflow action identifiers",
+        "replacement_count": len(replacements),
+        "replacements": replacements,
+    }
+    return response
+
+
 def inline_catalog_import_response(socket_path: str, response: dict) -> dict:
     source = response.get("python_code")
     if not isinstance(source, str) or "ref(0x" not in source:
@@ -2008,18 +2475,22 @@ def main() -> int:
 
     if args.command == "plist-to-python":
         plist_json = read_source(args)
+        action_identifiers = action_identifiers_from_plist_json(plist_json)
         payload = base64.b64encode(plist_json).decode("ascii")
         response = json.loads(send_command(args.socket, f"plist-to-python-b64 {payload}"))
         response = inline_catalog_import_response(args.socket, response)
+        response = canonicalize_import_response(response, action_identifiers)
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0
 
     if args.command == "plist-data-to-python":
         try:
             plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
+            action_identifiers = action_identifiers_from_plist_data(plist_data)
             payload = base64.b64encode(plist_data).decode("ascii")
             response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
             response = inline_catalog_import_response(args.socket, response)
+            response = canonicalize_import_response(response, action_identifiers)
             if signed_import is not None:
                 response["signed_shortcut_import"] = signed_import
             if icloud_import is not None:

@@ -286,18 +286,40 @@ private func sharedToolDatabaseProvider() -> AnyObject
 @_silgen_name("bridge_shared_tool_database_provider_database")
 private func bridgeSharedToolDatabaseProviderDatabase(_ provider: AnyObject) throws -> AnyObject
 
-@_silgen_name("bridge_make_toolrenderer_compatibility_shims_default")
-private func bridgeMakeToolRendererCompatibilityShimsDefault(
+@_silgen_name("bridge_make_toolrenderer_compatibility_shims_default_none")
+private func bridgeMakeToolRendererCompatibilityShimsDefaultNone(
     _ result: UnsafeMutablePointer<CompatibilityShimsStorage>
 )
 
-@_silgen_name("$s12ToolRenderer15pythonInterface8database14filterProvider017parameterMetadataG05shimsSS0A3Kit0A8DatabaseC_AA21FilterActionSurrogateV0G0_pSgAA09ParameteriG0_pAA18CompatibilityShimsVtYaKF")
-private func toolRendererPythonInterface(
+private struct ToolRendererPythonInterfaceResult {
+    let interface: String
+    let symbol: String
+    let defaultArgumentSymbol: String?
+    let filterProvider: ProtocolExistentialStorage
+}
+
+private let toolRendererPythonInterfaceRequiredFilterSymbol = "$s12ToolRenderer15pythonInterface8database14filterProvider017parameterMetadataG05shimsSS0A3Kit0A8DatabaseC_AA21FilterActionSurrogateV0G0_pAA09ParameteriG0_pAA18CompatibilityShimsVtYaKF"
+private let toolRendererPythonInterfaceOptionalFilterSymbol = "$s12ToolRenderer15pythonInterface8database14filterProvider017parameterMetadataG05shimsSS0A3Kit0A8DatabaseC_AA21FilterActionSurrogateV0G0_pSgAA09ParameteriG0_pAA18CompatibilityShimsVtYaKF"
+
+@_silgen_name("bridge_set_toolrenderer_python_interface_target")
+private func bridgeSetToolRendererPythonInterfaceTarget(_ target: UnsafeRawPointer)
+
+@_silgen_name("bridge_toolrenderer_python_interface_selected")
+private func bridgeToolRendererPythonInterfaceSelected(
     _ database: AnyObject,
     _ filterProvider: ProtocolExistentialStorage,
     _ parameterMetadataProvider: ProtocolExistentialStorage,
     _ shims: UnsafePointer<CompatibilityShimsStorage>
 ) async throws -> String
+
+@_silgen_name("bridge_set_toolrenderer_filter_provider_default_target")
+private func bridgeSetToolRendererFilterProviderDefaultTarget(_ target: UnsafeRawPointer)
+
+@_silgen_name("bridge_toolrenderer_filter_provider_default_selected")
+private func bridgeToolRendererFilterProviderDefaultSelected() -> ProtocolExistentialStorage
+
+@_silgen_name("bridge_null_filter_provider_witness_table_ptr")
+private func bridgeNullFilterProviderWitnessTablePointer() -> UnsafeRawPointer
 
 @_silgen_name("$s11WorkflowKit27WFParameterMetadataProviderVMa")
 private func wfParameterMetadataProviderMetadata(_ request: Int) -> UnsafeRawPointer
@@ -403,8 +425,8 @@ private func bridgeMakeErrorConfigurationEmpty(
     _ result: UnsafeMutablePointer<ErrorConfigurationStorage>
 )
 
-@_silgen_name("bridge_make_tool_visibility_filter_any")
-private func bridgeMakeToolVisibilityFilterAny(
+@_silgen_name("bridge_make_tool_visibility_filter_visible_for_shortcuts")
+private func bridgeMakeToolVisibilityFilterVisibleForShortcuts(
     _ result: UnsafeMutablePointer<ToolVisibilityFilterStorage>
 )
 
@@ -1582,7 +1604,7 @@ private func compileSource(
     var compiled = CompiledShortcut()
 
     bridgeMakeErrorConfigurationEmpty(&errorConfiguration)
-    bridgeMakeToolVisibilityFilterAny(&toolVisibility)
+    bridgeMakeToolVisibilityFilterVisibleForShortcuts(&toolVisibility)
     bridgeMakeFlags(
         &flagsStorage,
         &strictness,
@@ -2242,26 +2264,34 @@ private func resolveEntityPayloadJson(from request: ResolveEntityRequestInput) a
 private func toolRendererPythonInterfacePayload() async throws -> [String: Any] {
     let databaseProvider = sharedToolDatabaseProvider()
     let database = try bridgeSharedToolDatabaseProviderDatabase(databaseProvider)
-    let filterProvider = ProtocolExistentialStorage()
     let parameterMetadataProvider = try wfParameterMetadataProviderExistential()
     var shims = CompatibilityShimsStorage()
-    bridgeMakeToolRendererCompatibilityShimsDefault(&shims)
-    let interface = try await toolRendererPythonInterface(
-        database,
-        filterProvider,
-        parameterMetadataProvider,
-        &shims
+    bridgeMakeToolRendererCompatibilityShimsDefaultNone(&shims)
+    let rendered = try await callToolRendererPythonInterface(
+        database: database,
+        parameterMetadataProvider: parameterMetadataProvider,
+        shims: &shims
     )
+    let interface = rendered.interface
 
     return [
         "ok": true,
         "mode": "toolrenderer-python-interface",
         "source": "ToolRenderer.pythonInterface(database:filterProvider:parameterMetadataProvider:shims)",
+        "toolrenderer_python_interface_symbol": rendered.symbol,
+        "toolrenderer_filter_provider_default_symbol": rendered.defaultArgumentSymbol as Any,
         "database_source": "ToolKit.SharedToolDatabaseProvider.shared.database() via x20 thunk shim",
         "database_provider_class": objectClassName(databaseProvider),
         "database_provider_pointer": objectPointerString(databaseProvider),
         "database_class": objectClassName(database),
         "database_pointer": objectPointerString(database),
+        "filter_provider_words": [
+            pointerString(rendered.filterProvider.buffer0),
+            pointerString(rendered.filterProvider.buffer1),
+            pointerString(rendered.filterProvider.buffer2),
+            pointerString(rendered.filterProvider.type),
+            pointerString(rendered.filterProvider.witness),
+        ],
         "parameter_metadata_provider_words": [
             pointerString(parameterMetadataProvider.buffer0),
             pointerString(parameterMetadataProvider.buffer1),
@@ -2277,6 +2307,7 @@ private func toolRendererPythonInterfacePayload() async throws -> [String: Any] 
     ]
 }
 
+
 private func toolRendererStructuredMetadataPayload() async throws -> [String: Any] {
     var payload = try await toolRendererPythonInterfacePayload()
     payload["mode"] = "toolrenderer-structured-metadata"
@@ -2286,7 +2317,7 @@ private func toolRendererStructuredMetadataPayload() async throws -> [String: An
     payload["types"] = []
     payload["diagnostics"] = [[
         "code": "hostStructuredParser",
-        "message": "Native ToolRenderer returned the authoritative Python interface. Host parser merges it with ToolKit raw keys/bindings; direct WFParameterMetadataProvider value-return inspection remains LLDB-gated.",
+        "message": "Native ToolRenderer returned the authoritative Python interface. Host parsing structures the Python definitions for IDE hovers, completions, signatures, and diagnostics.",
     ]]
     payload["provider_symbols"] = [
         "binding_toolID": symbolAddress("$s12ToolRenderer25ParameterMetadataProviderPAAE7binding6toolIDAA0cD0VSS_tF") == nil ? "missing" : "present",
@@ -2303,6 +2334,66 @@ private func symbolAddress(_ name: String) -> UnsafeRawPointer? {
         }
         return UnsafeRawPointer(pointer)
     }
+}
+
+private func callToolRendererPythonInterface(
+    database: AnyObject,
+    parameterMetadataProvider: ProtocolExistentialStorage,
+    shims: UnsafePointer<CompatibilityShimsStorage>
+) async throws -> ToolRendererPythonInterfaceResult {
+    if let pointer = symbolAddress(toolRendererPythonInterfaceRequiredFilterSymbol) {
+        appendRecordFileProbeStage("toolrenderer select required function=\(pointerString(pointer))")
+        bridgeSetToolRendererPythonInterfaceTarget(pointer)
+        let filterProvider = nullFilterProviderExistential()
+        appendRecordFileProbeStage("toolrenderer required null provider type=\(pointerString(filterProvider.type)) witness=\(pointerString(filterProvider.witness))")
+        appendRecordFileProbeStage("toolrenderer required native call before")
+        let interface = try await bridgeToolRendererPythonInterfaceSelected(
+            database,
+            filterProvider,
+            parameterMetadataProvider,
+            shims
+        )
+        appendRecordFileProbeStage("toolrenderer required native call after length=\(interface.utf8.count)")
+        return ToolRendererPythonInterfaceResult(
+            interface: interface,
+            symbol: toolRendererPythonInterfaceRequiredFilterSymbol,
+            defaultArgumentSymbol: "bridge-null-filter-provider",
+            filterProvider: filterProvider
+        )
+    }
+    if let pointer = symbolAddress(toolRendererPythonInterfaceOptionalFilterSymbol) {
+        appendRecordFileProbeStage("toolrenderer select optional function=\(pointerString(pointer))")
+        bridgeSetToolRendererPythonInterfaceTarget(pointer)
+        let filterProvider = ProtocolExistentialStorage()
+        appendRecordFileProbeStage("toolrenderer optional nil provider")
+        appendRecordFileProbeStage("toolrenderer optional native call before")
+        let interface = try await bridgeToolRendererPythonInterfaceSelected(
+            database,
+            filterProvider,
+            parameterMetadataProvider,
+            shims
+        )
+        appendRecordFileProbeStage("toolrenderer optional native call after length=\(interface.utf8.count)")
+        return ToolRendererPythonInterfaceResult(
+            interface: interface,
+            symbol: toolRendererPythonInterfaceOptionalFilterSymbol,
+            defaultArgumentSymbol: nil,
+            filterProvider: filterProvider
+        )
+    }
+    throw bridgeFailure("missing ToolRenderer.pythonInterface symbol for both required and optional filterProvider variants")
+}
+
+private func nullFilterProviderExistential() -> ProtocolExistentialStorage {
+    let metadata = unsafeBitCast(Int.self, to: UnsafeRawPointer.self)
+    let witness = bridgeNullFilterProviderWitnessTablePointer()
+    return ProtocolExistentialStorage(
+        buffer0: 0,
+        buffer1: 0,
+        buffer2: 0,
+        type: UInt64(UInt(bitPattern: metadata)),
+        witness: UInt64(UInt(bitPattern: witness))
+    )
 }
 
 private func wfParameterMetadataProviderExistential() throws -> ProtocolExistentialStorage {
@@ -2456,7 +2547,7 @@ public func bridge_swift_direct_run(
                 "drop_comments": true,
                 "validate_catalog_keys_only": false,
                 "error_configuration_prefix": shortHexPrefix(of: run.errorConfiguration),
-                "tool_visibility_mode": "any",
+                "tool_visibility_mode": "visibleForShortcuts",
                 "tool_visibility_filter_prefix": shortHexPrefix(of: run.toolVisibility),
                 "flags_storage_size": MemoryLayout<FlagsStorage>.size,
                 "flags_storage_prefix": shortHexPrefix(of: run.flagsStorage),
@@ -2702,7 +2793,7 @@ public func bridge_swift_toolrenderer_python_interface() -> UnsafeMutablePointer
         semaphore.signal()
     }
 
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
+    if semaphore.wait(timeout: .now() + 180) == .timedOut {
         box.payload = jsonString([
             "ok": false,
             "mode": "toolrenderer-python-interface",
@@ -2732,7 +2823,7 @@ public func bridge_swift_toolrenderer_structured_metadata() -> UnsafeMutablePoin
         semaphore.signal()
     }
 
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
+    if semaphore.wait(timeout: .now() + 180) == .timedOut {
         box.payload = jsonString([
             "ok": false,
             "mode": "toolrenderer-structured-metadata",

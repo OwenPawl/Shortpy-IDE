@@ -18,7 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BRIDGE_VERSION "sim-0.1.25-record-file-saveToRecord-production"
+#define BRIDGE_VERSION "sim-0.1.27-sqlite-visible-shortcuts"
 #define SOCKET_NAME "shortcuts-ide-bridge-sim.sock"
 #define DEFAULT_SOCKET_PATH "/tmp/" SOCKET_NAME
 #define DEFAULT_LOG_PATH "/tmp/shortcuts-ide-bridge-sim.log"
@@ -401,7 +401,8 @@ static void status_json(char *response, size_t cap) {
            "\"socket_path\":\"%s\","
            "\"log_path\":\"%s\","
            "\"swift_linkage\":\"direct cdecl exports in same dylib\","
-           "\"visibility_filter\":\"ToolVisibilityFilter.any\","
+           "\"visibility_source\":\"active-toolkit-sqlite\","
+           "\"tool_visibility_filter\":\"visibleForShortcuts\","
            "\"address_resolution\":\"none\","
            "\"hooks_installed\":false,"
            "\"command_count\":%llu,"

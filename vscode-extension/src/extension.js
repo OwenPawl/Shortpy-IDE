@@ -6,6 +6,7 @@ const vscode = require("vscode");
 const {
   binaryPlistToXml,
   bplistBufferFromResponse,
+  ensureBridgeLaunched,
   runBridgeCli,
   runBridgeCommand,
   runBridgeStatus,
@@ -14,6 +15,7 @@ const {
 const { parseAppleDiagnostic } = require("./diagnostics");
 const {
   indexToolRendererMetadata,
+  isEnvironmentSpecificEnum,
   loadToolRendererMetadata,
   refreshToolRendererMetadata,
   searchToolRendererMetadata,
@@ -22,9 +24,14 @@ const {
   collectToolRendererDiagnostics,
   parameterInfoAt,
 } = require("./shortpyDiagnostics");
+const {
+  CUSTOM_EDITOR_VIEW_TYPE,
+  VISIBLE_COMMANDS,
+  customEditorActions,
+} = require("./commandRegistry");
 
 const COMMAND_NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
-const CUSTOM_EDITOR_VIEW_TYPE = "shortcutsRuntimeIDE.workflowEditor";
+const TOOLKIT_SQLITE_STATE_KEY = "shortcutsRuntimeIDE.toolkitSqlitePath";
 
 let runtimeLog;
 let toolRendererIndex = indexToolRendererMetadata({});
@@ -34,6 +41,10 @@ let triggerDecoration;
 let bridgeStatusBar;
 let shortpyDiagnosticsCollection;
 let missingToolRendererCacheReported = false;
+let activeBridgeCtlPath = "";
+let activeToolkitSqlitePath = "";
+let extensionGlobalStoragePath = "";
+let extensionVersion = "dev";
 const workflowSessionsByWorkflowUri = new Map();
 const workflowSessionsByPythonUri = new Map();
 
@@ -41,6 +52,9 @@ function configOptions() {
   const config = vscode.workspace.getConfiguration("shortcutsRuntimeIDE");
   return {
     bridgeCtlPath: config.get("bridgeCtlPath") || undefined,
+    activeBridgeCtlPath,
+    globalStoragePath: extensionGlobalStoragePath,
+    extensionVersion,
     toolRendererMetadataPath: config.get("toolRendererMetadataPath") || undefined,
     refreshToolRendererInterfaceOnActivation: config.get("refreshToolRendererInterfaceOnActivation") !== false,
     highlightKnownCommands: config.get("highlightKnownCommands") !== false,
@@ -51,6 +65,11 @@ function configOptions() {
     signShortcutExports: config.get("signShortcutExports") !== false,
     shortcutSigningMode: config.get("shortcutSigningMode") || "anyone",
     shortcutsCliPath: config.get("shortcutsCliPath") || undefined,
+    toolkitSqlitePath: config.get("toolkitSqlitePath") || activeToolkitSqlitePath || "",
+    bridgeCommandTimeoutMs: Number(config.get("bridgeCommandTimeoutMs")) || 120000,
+    bridgeMetadataTimeoutMs: Number(config.get("bridgeMetadataTimeoutMs")) || 180000,
+    bridgeStatusTimeoutMs: Number(config.get("bridgeStatusTimeoutMs")) || 10000,
+    bridgeLaunchTimeoutMs: Number(config.get("bridgeLaunchTimeoutMs")) || 300000,
     autoConvertPlistOnOpen: config.get("autoConvertPlistOnOpen") !== false,
     validateOnSave: Boolean(config.get("validateOnSave")),
     validateOnType: Boolean(config.get("validateOnType")),
@@ -83,6 +102,21 @@ function setBridgeStatus(kind, detail) {
   if (kind === "connected") {
     bridgeStatusBar.text = "$(plug) Shortcuts: connected";
     bridgeStatusBar.backgroundColor = undefined;
+  } else if (kind === "connecting") {
+    bridgeStatusBar.text = "$(sync~spin) Shortcuts: connecting";
+    bridgeStatusBar.backgroundColor = undefined;
+  } else if (kind === "building") {
+    bridgeStatusBar.text = "$(tools) Shortcuts: building bridge";
+    bridgeStatusBar.backgroundColor = undefined;
+  } else if (kind === "toolkit") {
+    bridgeStatusBar.text = "$(database) Shortcuts: loading toolkit";
+    bridgeStatusBar.backgroundColor = undefined;
+  } else if (kind === "booting") {
+    bridgeStatusBar.text = "$(device-mobile) Shortcuts: booting simulator";
+    bridgeStatusBar.backgroundColor = undefined;
+  } else if (kind === "launching") {
+    bridgeStatusBar.text = "$(rocket) Shortcuts: launching";
+    bridgeStatusBar.backgroundColor = undefined;
   } else if (kind === "validating") {
     bridgeStatusBar.text = "$(sync~spin) Shortcuts: validating";
     bridgeStatusBar.backgroundColor = undefined;
@@ -97,29 +131,72 @@ function setBridgeStatus(kind, detail) {
   bridgeStatusBar.show();
 }
 
-async function connectBridge() {
+function bridgeStatusDetail(status) {
+  return `Bridge ${status.version || "unknown"} at ${status.socket_path || "auto socket"}`;
+}
+
+function defaultHostToolkitSqlitePath() {
+  const home = process.env.HOME || "";
+  return home ? path.join(home, "Library", "Shortcuts", "ToolKit", "Tools-active") : "";
+}
+
+function applyBridgeProgress(event) {
+  const detail = event && event.message ? event.message : "Connecting Shortcuts bridge";
+  const kind = event && event.kind ? event.kind : "connecting";
+  setBridgeStatus(kind, detail);
+  logRuntime("bridge bootstrap", event || {});
+}
+
+async function probeBridgeStatusPassive() {
   try {
     const status = await runBridgeStatus(configOptions());
-    setBridgeStatus("connected", `Bridge ${status.version || "unknown"} at ${status.socket_path || "auto socket"}`);
-    logRuntime("Bridge connected", status);
-    vscode.window.showInformationMessage(`Shortcuts bridge connected${status.version ? ` (${status.version})` : ""}.`);
+    setBridgeStatus("connected", bridgeStatusDetail(status));
+    logRuntime("Bridge status", status);
     return status;
   } catch (error) {
-    setBridgeStatus("error", error && error.message ? error.message : String(error));
-    throw error;
+    const message = error && error.message ? error.message : String(error);
+    setBridgeStatus("disconnected", `Shortcuts bridge is not connected. Run Shortcuts IDE: Connect To Bridge. ${message}`);
+    logRuntime("Bridge status unavailable", message);
+    return undefined;
   }
+}
+
+async function connectBridge(options = {}) {
+  setBridgeStatus("connecting", "Checking Shortcuts bridge status");
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: "Connecting Shortcuts bridge",
+    cancellable: false,
+  }, async (progress) => {
+    const launched = await ensureBridgeLaunched({
+      ...configOptions(),
+      forceBridgeLaunch: Boolean(options.forceLaunch),
+    }, (event) => {
+      applyBridgeProgress(event);
+      progress.report({ message: event && event.message ? event.message : "Connecting" });
+    });
+    activeBridgeCtlPath = launched.bridgeCtlPath || activeBridgeCtlPath;
+    setBridgeStatus("connected", bridgeStatusDetail(launched.status));
+    logRuntime("Bridge connected", {
+      status: launched.status,
+      bridgeRoot: launched.bridgeRoot,
+      bridgeCtlPath: launched.bridgeCtlPath,
+      source: launched.source,
+      alreadyRunning: launched.alreadyRunning,
+    });
+    vscode.window.showInformationMessage(`Shortcuts bridge connected${launched.status.version ? ` (${launched.status.version})` : ""}.`);
+    return launched.status;
+  }).catch((error) => {
+    const message = error && error.message ? error.message : String(error);
+    setBridgeStatus("error", message);
+    logRuntime("Bridge connect failed", message);
+    throw error;
+  });
 }
 
 function defaultToolRendererMetadataPath(context) {
   return path.join(context.globalStorageUri.fsPath, "toolrenderer-interface.json");
 }
-
-const STABLE_ENUMS_WITH_CASES = new Set([
-  "RunSurface",
-  "InputFallback",
-  "QUERY_OPERATOR",
-  "QUERY_SORT_ORDER",
-]);
 
 function itemKindLabel(item) {
   if (!item) {
@@ -149,19 +226,108 @@ function itemKindLabel(item) {
   return "Action";
 }
 
-function environmentSpecificEnum(item) {
-  const name = String(item && item.pythonName || "");
-  const lower = name.toLowerCase();
-  if (STABLE_ENUMS_WITH_CASES.has(name)) {
-    return false;
+function markdown(lines) {
+  return new vscode.MarkdownString(lines.filter((line) => line !== undefined && line !== null && line !== "").join("\n"));
+}
+
+function typeNamesInExpression(value) {
+  const names = new Set();
+  const ignored = new Set([
+    "Any",
+    "Callable",
+    "Dict",
+    "Enum",
+    "List",
+    "Literal",
+    "None",
+    "Optional",
+    "Picked",
+    "Resolved",
+    "Set",
+    "Tuple",
+    "Union",
+    "bool",
+    "bytes",
+    "dict",
+    "float",
+    "int",
+    "list",
+    "set",
+    "str",
+    "tuple",
+  ]);
+  const re = /[A-Za-z_][A-Za-z0-9_]*/g;
+  let match;
+  while ((match = re.exec(String(value || ""))) !== null) {
+    if (!ignored.has(match[0])) {
+      names.add(match[0]);
+    }
   }
-  return lower.includes("dynamic") ||
-    lower.startsWith("com_") ||
-    lower.startsWith("query_com_") ||
-    lower.startsWith("org_") ||
-    lower.startsWith("net_") ||
-    lower.startsWith("io_") ||
-    lower.startsWith("app_");
+  return [...names];
+}
+
+function referencedTypesForExpression(value) {
+  const byType = toolRendererIndex.typeByPythonName || new Map();
+  return typeNamesInExpression(value)
+    .map((name) => byType.get(name))
+    .filter(Boolean);
+}
+
+function catalogParameterGuidance(type) {
+  const text = String(type || "");
+  if (!/\b(Resolved|Picked)\s*\[/.test(text)) {
+    return "";
+  }
+  return [
+    "Use inline parameterState JSON in editable Shortpy. The bridge rewrites it to Apple catalog refs internally during compile.",
+    "",
+    "```python",
+    "app=[{\"Bundle Identifier\": \"com.apple.shortcuts\", \"Name\": \"Shortcuts\"}]",
+    "```",
+  ].join("\n");
+}
+
+function appendTypeMaterial(lines, type, options = {}) {
+  if (!type) {
+    return;
+  }
+  lines.push("");
+  lines.push(options.heading || `Referenced ${itemKindLabel(type)}: \`${type.pythonName}\``);
+  if (type.signature) {
+    lines.push(`\`${type.signature}\``);
+  }
+  const docs = type.documentation || type.docString || type.summary;
+  if (docs) {
+    lines.push("");
+    lines.push(docs);
+  }
+  if (Array.isArray(type.bases) && type.bases.length > 0) {
+    lines.push(`Bases: ${type.bases.map((base) => `\`${base}\``).join(", ")}`);
+  }
+  if (isEnvironmentSpecificEnum(type)) {
+    lines.push("");
+    lines.push("Cases are environment-specific and are intentionally omitted from the IDE cache.");
+  } else if (Array.isArray(type.cases) && type.cases.length > 0) {
+      lines.push("");
+      lines.push("Cases:");
+      for (const entry of type.cases.slice(0, 80)) {
+        const doc = entry.summary || entry.doc || entry.description;
+        lines.push(`- \`${type.pythonName}.${entry.name}\` = ${entry.value}${doc ? ` - ${doc}` : ""}`);
+      }
+  }
+  if (Array.isArray(type.members) && type.members.length > 0) {
+    lines.push("");
+    lines.push("Members:");
+    for (const entry of type.members.slice(0, 24)) {
+      lines.push(`- \`${entry.name}\`${entry.returnType ? ` -> \`${entry.returnType}\`` : ""}`);
+    }
+  }
+  if (type.definitionBlock && !isEnvironmentSpecificEnum(type)) {
+    lines.push("");
+    lines.push("```python");
+    lines.push(type.definitionBlock);
+    lines.push("```");
+  }
 }
 
 function commandMetadata(item) {
@@ -169,9 +335,6 @@ function commandMetadata(item) {
   lines.push(`**${item.pythonName}**`);
   lines.push("");
   lines.push(itemKindLabel(item));
-  if (item.source) {
-    lines.push(`Source: ${item.source}`);
-  }
   if (item.displayName) {
     lines.push(`Display: ${item.displayName}`);
   }
@@ -199,10 +362,10 @@ function commandMetadata(item) {
     lines.push("");
     lines.push(fullDocs);
   }
-  if (item.signature) {
+  if (item.definitionBlock || item.signature) {
     lines.push("");
     lines.push("```python");
-    lines.push(item.signature);
+    lines.push(item.definitionBlock || item.signature);
     lines.push("```");
   }
   if (Array.isArray(item.parameters) && item.parameters.length > 0) {
@@ -220,16 +383,15 @@ function commandMetadata(item) {
       }
     }
   }
-  if (Array.isArray(item.cases) && item.cases.length > 0) {
+  if (item.kind === "enum" && isEnvironmentSpecificEnum(item)) {
     lines.push("");
-    if (environmentSpecificEnum(item)) {
-      lines.push("Cases are environment-specific and are resolved from the active Shortcuts runtime.");
-    } else {
-      lines.push("Cases:");
-      for (const entry of item.cases.slice(0, 80)) {
-        const doc = entry.summary || entry.doc || entry.description;
-        lines.push(`- \`${item.pythonName}.${entry.name}\` = ${entry.value}${doc ? ` - ${doc}` : ""}`);
-      }
+    lines.push("Cases are environment-specific and are intentionally omitted from the IDE cache.");
+  } else if (Array.isArray(item.cases) && item.cases.length > 0) {
+    lines.push("");
+    lines.push("Cases:");
+    for (const entry of item.cases.slice(0, 80)) {
+      const doc = entry.summary || entry.doc || entry.description;
+      lines.push(`- \`${item.pythonName}.${entry.name}\` = ${entry.value}${doc ? ` - ${doc}` : ""}`);
     }
   }
   if (Array.isArray(item.members) && item.members.length > 0) {
@@ -239,7 +401,39 @@ function commandMetadata(item) {
       lines.push(`- \`${entry.name}\`${entry.returnType ? ` -> \`${entry.returnType}\`` : ""}`);
     }
   }
-  return new vscode.MarkdownString(lines.join("\n"));
+  for (const dependencyName of (toolRendererIndex.directDependencies || new Map()).get(item.pythonName) || []) {
+    const type = toolRendererIndex.typeByPythonName && toolRendererIndex.typeByPythonName.get(dependencyName);
+    if (type && !isEnvironmentSpecificEnum(type)) {
+      appendTypeMaterial(lines, type);
+    }
+  }
+  return markdown(lines);
+}
+
+function parameterMetadata(parameterInfo) {
+  const { item, parameter, name } = parameterInfo;
+  const lines = [
+    `**${name}**`,
+    "",
+    `Parameter of \`${item.pythonName}\``,
+    parameter.displayName ? `Display: ${parameter.displayName}` : "",
+    parameter.type ? `Type: \`${parameter.type}\`` : "",
+    parameter.defaultValue ? `Default: \`${parameter.defaultValue}\`` : "",
+  ];
+  const doc = parameter.doc || parameter.summary;
+  if (doc) {
+    lines.push("");
+    lines.push(doc);
+  }
+  const guidance = catalogParameterGuidance(parameter.type);
+  if (guidance) {
+    lines.push("");
+    lines.push(guidance);
+  }
+  for (const type of referencedTypesForExpression(`${parameter.type || ""} ${parameter.defaultValue || ""}`)) {
+    appendTypeMaterial(lines, type);
+  }
+  return markdown(lines);
 }
 
 function commandSignatureLabel(item) {
@@ -342,7 +536,10 @@ async function refreshNativeToolRendererInterface(context, announce = true, refr
 }
 
 async function refreshToolMetadata(context, announce = true) {
-  const native = await refreshNativeToolRendererInterface(context, false, { live: true });
+  const native = await refreshNativeToolRendererInterface(context, false, {
+    live: false,
+    allowLiveFallback: false,
+  });
   if (announce) {
     const nativeCounts = native.counts || {};
     vscode.window.showInformationMessage(
@@ -350,6 +547,37 @@ async function refreshToolMetadata(context, announce = true) {
     );
   }
   return native;
+}
+
+async function loadToolkitSqlite(context) {
+  const defaultPath = activeToolkitSqlitePath || defaultHostToolkitSqlitePath();
+  const selection = await vscode.window.showOpenDialog({
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    defaultUri: defaultPath ? vscode.Uri.file(path.dirname(defaultPath)) : undefined,
+    filters: {
+      "SQLite databases": ["sqlite", "db", "sqlite3"],
+      "All files": ["*"],
+    },
+    openLabel: "Load ToolKit SQLite",
+    title: "Shortcuts IDE: Load ToolKit SQLite",
+  });
+  if (!selection || selection.length === 0) {
+    return undefined;
+  }
+  activeToolkitSqlitePath = selection[0].fsPath;
+  await context.globalState.update(TOOLKIT_SQLITE_STATE_KEY, activeToolkitSqlitePath);
+  setBridgeStatus("toolkit", `Loading ToolKit sqlite ${activeToolkitSqlitePath}`);
+  logRuntime("ToolKit sqlite selected", activeToolkitSqlitePath);
+  const status = await connectBridge({ forceLaunch: true });
+  try {
+    await refreshToolMetadata(context, false);
+  } catch (error) {
+    logRuntime("ToolRenderer metadata refresh after ToolKit load failed", error && error.message ? error.message : String(error));
+  }
+  vscode.window.showInformationMessage(`Loaded ToolKit sqlite source of truth: ${path.basename(activeToolkitSqlitePath)}`);
+  return status;
 }
 
 async function loadCachedToolRendererMetadata(context) {
@@ -378,7 +606,10 @@ async function ensureToolRendererMetadata(context) {
     return;
   }
   if (options.refreshToolRendererInterfaceOnActivation) {
-    await refreshNativeToolRendererInterface(context, false, { live: true, allowLiveFallback: false });
+    await refreshNativeToolRendererInterface(context, false, {
+      live: false,
+      allowLiveFallback: false,
+    });
     return;
   }
   throw new Error("ToolRenderer metadata is not cached. Run Shortcuts IDE: Refresh Native ToolRenderer Interface once while the simulator bridge is available.");
@@ -394,7 +625,10 @@ async function primeToolRendererMetadata(context) {
     }
     return;
   }
-  refreshNativeToolRendererInterface(context, false, { live: true, allowLiveFallback: false }).then((metadata) => {
+  refreshNativeToolRendererInterface(context, false, {
+    live: false,
+    allowLiveFallback: false,
+  }).then((metadata) => {
     logRuntime("Background ToolRenderer metadata refresh completed", metadata.counts || {});
   }).catch((error) => {
     logRuntime("Background ToolRenderer metadata refresh failed", error && error.message ? error.message : String(error));
@@ -409,12 +643,16 @@ function toolRendererOnlyIndex() {
   return toolRendererIndex;
 }
 
+function shortpyDiagnosticIndex() {
+  return toolRendererIndex;
+}
+
 function toolRendererParameterInfoAt(source, line, character) {
   return parameterInfoAt(source, line, character, [toolRendererOnlyIndex()]);
 }
 
 function collectShortpyDiagnostics(source) {
-  return collectToolRendererDiagnostics(source, toolRendererOnlyIndex());
+  return collectToolRendererDiagnostics(source, shortpyDiagnosticIndex());
 }
 
 function findToolRendererItem(name) {
@@ -506,6 +744,21 @@ function workflowPythonUri(context, workflowUri) {
   return vscode.Uri.file(path.join(context.globalStorageUri.fsPath, "workflow-editors", `${base}-${hash}.shortcuts.py`));
 }
 
+function getOrCreateWorkflowSession(context, workflowUri) {
+  const key = workflowSessionKey(workflowUri);
+  let session = workflowSessionsByWorkflowUri.get(key);
+  if (!session) {
+    session = {
+      workflowUri,
+      pythonUri: workflowPythonUri(context, workflowUri),
+      webviews: new Set(),
+    };
+    workflowSessionsByWorkflowUri.set(key, session);
+    workflowSessionsByPythonUri.set(workflowSessionKey(session.pythonUri), session);
+  }
+  return session;
+}
+
 function workflowSessionForDocument(document) {
   return document && workflowSessionsByPythonUri.get(workflowSessionKey(document.uri));
 }
@@ -551,18 +804,9 @@ async function importWorkflowPlistToSession(context, workflowUri) {
   const bytes = Buffer.from(await vscode.workspace.fs.readFile(workflowUri));
   assertShortcutImportBytes(bytes, path.basename(workflowUri.fsPath));
   const response = await runBridgeCommand("plist-data-to-python", bytes, configOptions());
-  const key = workflowSessionKey(workflowUri);
-  let session = workflowSessionsByWorkflowUri.get(key);
-  if (!session) {
-    session = {
-      workflowUri,
-      pythonUri: workflowPythonUri(context, workflowUri),
-      webviews: new Set(),
-    };
-    workflowSessionsByWorkflowUri.set(key, session);
-    workflowSessionsByPythonUri.set(workflowSessionKey(session.pythonUri), session);
-  }
+  const session = getOrCreateWorkflowSession(context, workflowUri);
   session.lastImportResponse = response;
+  session.lastImportError = undefined;
   await writeWorkflowPythonSource(session, response.python_code || "");
   return session;
 }
@@ -910,10 +1154,6 @@ async function roundTripPythonThroughPlist(collection) {
 }
 
 async function pickNativeAgentTool(context, fixedKind = "all") {
-  await ensureToolRendererMetadata(context);
-  if (toolRendererIndex.byName.size === 0) {
-    throw new Error("Native ToolRenderer metadata is not loaded. Run Refresh Native ToolRenderer Interface first.");
-  }
   const toolName = fixedKind === "tool"
     ? "Actions"
     : fixedKind === "trigger"
@@ -927,7 +1167,37 @@ async function pickNativeAgentTool(context, fixedKind = "all") {
   if (query === undefined) {
     return undefined;
   }
-  const results = searchToolRendererMetadata(toolRendererIndex, query, fixedKind, 40);
+  let results;
+  if (fixedKind === "tool" || fixedKind === "trigger") {
+    const bridgeCommand = fixedKind === "trigger"
+      ? "retrieve-relevant-triggers"
+      : "retrieve-relevant-actions";
+    try {
+      setBridgeStatus("validating", `Retrieving relevant ${toolName.toLowerCase()}`);
+      const response = await runBridgeCli([bridgeCommand, query, "--limit", "40"], configOptions());
+      results = (response.results || []).map((item) => ({
+        ...item,
+        searchKind: fixedKind,
+      }));
+      setBridgeStatus("connected", `${toolName} search used ${response.tool_visibility_source || response.source || "bridge retrieval"}`);
+      logRuntime(`bridge ${bridgeCommand}`, {
+        query,
+        source: response.source,
+        tool_visibility_source: response.tool_visibility_source,
+        counts: response.counts,
+      });
+    } catch (error) {
+      logRuntime(`bridge ${bridgeCommand} unavailable; falling back to cached ToolRenderer search`, error && error.message ? error.message : String(error));
+      setBridgeStatus("error", "Bridge search unavailable; using cached ToolRenderer metadata");
+    }
+  }
+  if (!results) {
+    await ensureToolRendererMetadata(context);
+    if (toolRendererIndex.byName.size === 0) {
+      throw new Error("Native ToolRenderer metadata is not loaded. Run Refresh Native ToolRenderer Interface first.");
+    }
+    results = searchToolRendererMetadata(toolRendererIndex, query, fixedKind, 40);
+  }
   if (results.length === 0) {
     vscode.window.showInformationMessage(`No native Shortcuts ${toolName.toLowerCase()} matched.`);
     return undefined;
@@ -980,156 +1250,6 @@ async function searchNativeAgentTools(context, fixedKind = "all", insert = true)
     );
   }
   return item;
-}
-
-function pythonLiteral(value) {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => pythonLiteral(item)).join(", ")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value)
-      .map(([key, item]) => `${JSON.stringify(key)}: ${pythonLiteral(item)}`)
-      .join(", ")}}`;
-  }
-  if (typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (value === true) {
-    return "True";
-  }
-  if (value === false) {
-    return "False";
-  }
-  if (value === null || value === undefined) {
-    return "None";
-  }
-  return String(value);
-}
-
-function metadataEntriesFromResolveResponse(response) {
-  const entries = [];
-  for (const result of response.results || []) {
-    if (!result || typeof result !== "object") {
-      continue;
-    }
-    for (const [tag, metadataText] of Object.entries(result)) {
-      try {
-        entries.push({ tag, metadata: JSON.parse(metadataText), metadataText });
-      } catch (_) {
-        // Ignore malformed native metadata strings; manual fallback below handles empty results.
-      }
-    }
-  }
-  for (const candidate of response.candidates || []) {
-    if (!candidate || !candidate.metadata) {
-      continue;
-    }
-    try {
-      const metadata = JSON.parse(candidate.metadata);
-      if (!entries.some((entry) => JSON.stringify(entry.metadata) === JSON.stringify(metadata))) {
-        entries.push({ tag: candidate.tag, metadata, metadataText: candidate.metadata });
-      }
-    } catch (_) {
-      // Ignore malformed fallback metadata strings.
-    }
-  }
-  return entries;
-}
-
-async function resolveEntity(context, options = {}) {
-  const typeName = await vscode.window.showInputBox({
-    title: "Shortcuts IDE: Resolve Entity",
-    prompt: "Entity type name",
-    placeHolder: "AppEntity, Contact, Focus, Calendar, Playlist",
-  });
-  if (typeName === undefined) {
-    return undefined;
-  }
-  const parameterName = await vscode.window.showInputBox({
-    title: "Shortcuts IDE: Resolve Entity",
-    prompt: "Action or trigger parameter name",
-    value: "app",
-    placeHolder: "app, contact, calendar",
-  });
-  if (parameterName === undefined) {
-    return undefined;
-  }
-  const query = await vscode.window.showInputBox({
-    title: "Shortcuts IDE: Resolve Entity",
-    prompt: "Entity query or label",
-    placeHolder: "Shortcuts, Work Focus, Alice",
-  });
-  if (query === undefined) {
-    return undefined;
-  }
-  const response = await runBridgeCli([
-    "resolve-entity",
-    typeName.trim(),
-    query.trim(),
-    "--method-parameter-name",
-    parameterName.trim(),
-  ], configOptions());
-  let entries = metadataEntriesFromResolveResponse(response);
-  if (entries.length === 0) {
-    const manual = await vscode.window.showInputBox({
-      title: "Shortcuts IDE: Resolve Entity",
-      prompt: "No entity metadata was returned. Enter inline JSON metadata to insert.",
-      value: parameterName.trim().toLowerCase() === "app"
-        ? "{\"Bundle Identifier\":\"com.apple.shortcuts\",\"Name\":\"Shortcuts\"}"
-        : "{\"Name\":\"Example\"}",
-      validateInput(value) {
-        try {
-          JSON.parse(value);
-          return undefined;
-        } catch (error) {
-          return error && error.message ? error.message : "Invalid JSON metadata.";
-        }
-      },
-    });
-    if (manual === undefined) {
-      return undefined;
-    }
-    entries = [{ tag: "inline", metadata: JSON.parse(manual), metadataText: manual }];
-  }
-  const pick = entries.length === 1
-    ? entries[0]
-    : await vscode.window.showQuickPick(
-      entries.map((entry) => ({
-        label: entry.metadata.Name || entry.metadata["Display Name"] || entry.metadata["Bundle Identifier"] || entry.tag || "Entity",
-        description: entry.metadata["Bundle Identifier"] || entry.tag || "",
-        detail: JSON.stringify(entry.metadata),
-        entry,
-      })),
-      { title: "Shortcuts IDE: Resolve Entity", placeHolder: "Select entity metadata to insert" }
-    ).then((item) => item && item.entry);
-  if (!pick) {
-    return undefined;
-  }
-  const text = parameterName.trim().toLowerCase() === "app"
-    ? `[${pythonLiteral(pick.metadata)}]`
-    : pythonLiteral(pick.metadata);
-  logRuntime("resolve_entity inline metadata", {
-    typeName: typeName.trim(),
-    parameterName: parameterName.trim(),
-    query: query.trim(),
-    tag: pick.tag,
-    metadata: pick.metadata,
-  });
-  if (options.insert === false) {
-    return { text, entry: pick, response };
-  }
-  const editor = vscode.window.activeTextEditor;
-  if (editor && editor.document.languageId === "python") {
-    await editor.insertSnippet(new vscode.SnippetString(text), editor.selection);
-  }
-  vscode.window.showInformationMessage("Inserted inline entity metadata.");
-  return { text, entry: pick, response };
-}
-
-async function showStatus() {
-  const status = await runBridgeStatus(configOptions());
-  setBridgeStatus("connected", `Bridge ${status.version || "unknown"} at ${status.socket_path || "auto socket"}`);
-  await openText(JSON.stringify(status, null, 2), "json", "Shortcuts runtime bridge status");
 }
 
 function textRangeInLine(document, line, text, fallback) {
@@ -1254,7 +1374,7 @@ function provideShortcutCompletions() {
     item.documentation = commandMetadata(type);
     item.sortText = `2_toolrenderer_${type.pythonName}`;
     items.push(item);
-    if (!environmentSpecificEnum(type)) {
+    if (!isEnvironmentSpecificEnum(type)) {
       for (const enumCase of (type.cases || []).slice(0, 80)) {
         const caseItem = new vscode.CompletionItem(enumCase.pythonName, vscode.CompletionItemKind.EnumMember);
         caseItem.detail = `Shortcuts enum case: ${type.pythonName}`;
@@ -1270,18 +1390,8 @@ function provideShortcutCompletions() {
 function provideShortcutHover(document, position) {
   const parameter = toolRendererParameterInfoAt(document.getText(), position.line, position.character);
   if (parameter) {
-    const markdown = new vscode.MarkdownString([
-      `**${parameter.name}**`,
-      "",
-      parameter.parameter.displayName ? `Display: ${parameter.parameter.displayName}` : "",
-      parameter.parameter.type ? `Type: \`${parameter.parameter.type}\`` : "",
-      parameter.parameter.defaultValue ? `Default: \`${parameter.parameter.defaultValue}\`` : "",
-      parameter.parameter.doc || parameter.parameter.summary || "",
-      "",
-      `${itemKindLabel(parameter.item)}: \`${parameter.item.pythonName}\``,
-    ].filter(Boolean).join("\n\n"));
     return new vscode.Hover(
-      markdown,
+      parameterMetadata(parameter),
       new vscode.Range(position.line, parameter.start, position.line, parameter.end)
     );
   }
@@ -1502,6 +1612,15 @@ function customEditorValidationResponse(result) {
   };
 }
 
+function workflowEditorToolbarHtml() {
+  return customEditorActions()
+    .map((action) => {
+      const classes = action.primary ? " class=\"primary\"" : "";
+      return `<button${classes} data-command="${htmlEscape(action.message)}">${htmlEscape(action.label)}</button>`;
+    })
+    .join("\n    ");
+}
+
 function workflowEditorHtml(fileName, pythonPath) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1599,16 +1718,7 @@ function workflowEditorHtml(fileName, pythonPath) {
 </head>
 <body>
   <div class="toolbar">
-    <button data-command="connect">Connect</button>
-    <button data-command="status">Status</button>
-    <button class="primary" data-command="openPython">Open Python Editor</button>
-    <button class="primary" data-command="validate">Validate</button>
-    <button class="primary" data-command="export">Export Plist</button>
-    <button data-command="import">Reimport</button>
-    <button data-command="searchActions">Search Actions</button>
-    <button data-command="searchTriggers">Search Triggers</button>
-    <button data-command="resolveEntity">Resolve Entity</button>
-    <button data-command="refreshMetadata">Refresh Metadata</button>
+    ${workflowEditorToolbarHtml()}
     <div class="status" id="status">${htmlEscape(fileName)}</div>
   </div>
   <div class="body">
@@ -1667,18 +1777,56 @@ class WorkflowPythonCustomEditorProvider {
   async resolveCustomEditor(document, webviewPanel) {
     const webview = webviewPanel.webview;
     webview.options = { enableScripts: true };
-    const session = await importWorkflowPlistToSession(this.context, document.uri);
+    const session = getOrCreateWorkflowSession(this.context, document.uri);
     session.webviews.add(webview);
     webviewPanel.onDidDispose(() => {
       session.webviews.delete(webview);
     });
     webview.html = workflowEditorHtml(path.basename(document.uri.fsPath), session.pythonUri.fsPath);
-    await showWorkflowPythonEditor(session);
-    postWorkflowSessionStatus(session, `Imported ${path.basename(document.uri.fsPath)}`);
+
+    const importIntoSession = async (options = {}) => {
+      try {
+        const imported = await importWorkflowPlistToSession(this.context, document.uri);
+        postWorkflowSessionRuntimeResponse(imported, "No validation run yet.");
+        postWorkflowSessionStatus(imported, `Imported ${path.basename(document.uri.fsPath)}`);
+        if (options.openEditor !== false) {
+          await showWorkflowPythonEditor(imported, options.editorOptions || {});
+        }
+        return imported;
+      } catch (error) {
+        session.lastImportError = error;
+        const text = error && error.message ? error.message : String(error);
+        const payload = {
+          ok: false,
+          source: "Shortcuts Runtime IDE",
+          message: `Could not import workflow. Connect to the bridge, then retry import.`,
+          error: text,
+        };
+        postWorkflowSessionRuntimeResponse(session, payload);
+        postWorkflowSessionStatus(session, "Bridge required. Click Connect.");
+        setBridgeStatus("disconnected", `Shortcuts bridge is not connected. Click the status bar or run Shortcuts IDE: Connect To Bridge. ${text}`);
+        logRuntime("Workflow import failed", text);
+        return undefined;
+      }
+    };
+
+    const ensureImported = async (options = {}) => {
+      if (session.lastImportResponse) {
+        return session;
+      }
+      const imported = await importIntoSession(options);
+      if (!imported) {
+        throw session.lastImportError || new Error("Workflow has not been imported from the bridge yet.");
+      }
+      return imported;
+    };
+
+    await importIntoSession();
 
     const pythonDocument = async () => vscode.workspace.openTextDocument(session.pythonUri);
 
     const validatePythonDocument = async () => {
+      await ensureImported({ editorOptions: { preserveFocus: true } });
       const pyDocument = await pythonDocument();
       await showWorkflowPythonEditor(session, { preserveFocus: true });
       return compilePythonDocument(pyDocument, pyDocument.getText(), this.runtimeDiagnosticsCollection);
@@ -1688,11 +1836,13 @@ class WorkflowPythonCustomEditorProvider {
       try {
         const commandName = message && message.command;
         if (commandName === "openPython") {
+          await ensureImported();
           await showWorkflowPythonEditor(session);
           postWorkflowSessionStatus(session, `Editing ${path.basename(session.pythonUri.fsPath)}`);
         } else if (commandName === "validate") {
           await validatePythonDocument();
         } else if (commandName === "export") {
+          await ensureImported({ editorOptions: { preserveFocus: true } });
           const pyDocument = await pythonDocument();
           await showWorkflowPythonEditor(session, { preserveFocus: true });
           const shouldSign = path.extname(document.uri.fsPath).toLowerCase() !== ".plist";
@@ -1707,33 +1857,29 @@ class WorkflowPythonCustomEditorProvider {
           postWorkflowSessionStatus(session, `Exported ${bytes.length} bytes to ${path.basename(document.uri.fsPath)}`);
           setBridgeStatus("connected", `Exported ${path.basename(document.uri.fsPath)}`);
         } else if (commandName === "import") {
-          await importWorkflowPlistToSession(this.context, document.uri);
-          await showWorkflowPythonEditor(session);
-          postWorkflowSessionRuntimeResponse(session, "No validation run yet.");
-          postWorkflowSessionStatus(session, `Reimported ${path.basename(document.uri.fsPath)}`);
+          await importIntoSession();
         } else if (commandName === "connect") {
           const status = await connectBridge();
           postWorkflowSessionStatus(session, `Connected ${status.version || ""}`.trim());
-        } else if (commandName === "status") {
-          const status = await runBridgeStatus(configOptions());
-          setBridgeStatus("connected", `Bridge ${status.version || "unknown"}`);
-          await openText(JSON.stringify(status, null, 2), "json", "Shortcuts runtime bridge status");
-          postWorkflowSessionStatus(session, `Bridge ${status.version || "unknown"}`);
+          await importIntoSession();
         } else if (commandName === "searchActions") {
+          await ensureImported({ editorOptions: { preserveFocus: true } });
           await showWorkflowPythonEditor(session);
           await searchNativeAgentTools(this.context, "tool", true);
         } else if (commandName === "searchTriggers") {
+          await ensureImported({ editorOptions: { preserveFocus: true } });
           await showWorkflowPythonEditor(session);
           await searchNativeAgentTools(this.context, "trigger", true);
-        } else if (commandName === "resolveEntity") {
-          await showWorkflowPythonEditor(session);
-          await resolveEntity(this.context, { documentUri: session.pythonUri });
         } else if (commandName === "refreshMetadata") {
           await refreshToolMetadata(this.context, false);
+          await ensureImported({ editorOptions: { preserveFocus: true } });
           const pyDocument = await pythonDocument();
           setShortpyDiagnostics(shortpyDiagnosticsCollection, pyDocument);
           updateCommandDecorations();
           postWorkflowSessionStatus(session, "Refreshed ToolRenderer metadata");
+        } else if (commandName === "loadToolkit") {
+          await loadToolkitSqlite(this.context);
+          await importIntoSession({ editorOptions: { preserveFocus: true } });
         }
       } catch (error) {
         const text = error && error.message ? error.message : String(error);
@@ -1747,9 +1893,14 @@ class WorkflowPythonCustomEditorProvider {
 }
 
 function activate(context) {
+  extensionGlobalStoragePath = context.globalStorageUri.fsPath;
+  activeToolkitSqlitePath = context.globalState.get(TOOLKIT_SQLITE_STATE_KEY, "");
+  extensionVersion = context.extension && context.extension.packageJSON && context.extension.packageJSON.version
+    ? context.extension.packageJSON.version
+    : "dev";
   runtimeLog = vscode.window.createOutputChannel("Shortcuts Runtime IDE");
   bridgeStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 80);
-  bridgeStatusBar.command = "shortcutsRuntimeIDE.status";
+  bridgeStatusBar.command = "shortcutsRuntimeIDE.connectBridge";
   setBridgeStatus("disconnected", "Shortcuts Runtime IDE bridge is not connected.");
   actionDecoration = vscode.window.createTextEditorDecorationType({
     textDecoration: "underline dotted",
@@ -1762,6 +1913,35 @@ function activate(context) {
   shortpyDiagnosticsCollection = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDEToolRenderer");
   const handledPlists = new Set();
   const validateTimers = new Map();
+  const visibleCommandHandlers = {
+    connectBridge: () => connectBridge(),
+    saveRuntimePlistFromPython: () => saveRuntimePlistFromPython(diagnostics),
+    writeSiblingRuntimePlistFromPython: () => writeSiblingRuntimePlistFromPython(diagnostics),
+    validatePython: () => validatePython(diagnostics),
+    openWorkflowPlistFromPython: () => openWorkflowPlistFromPython(diagnostics),
+    pythonToPlistDebugJson: () => pythonToPlistDebugJson(diagnostics),
+    loadPythonFromPlist: loadPythonFromPlist,
+    importICloudShortcutLink: importICloudShortcutLink,
+    searchActions: () => searchNativeAgentTools(context, "tool"),
+    searchTriggers: () => searchNativeAgentTools(context, "trigger"),
+    refreshToolMetadata: () => refreshToolMetadata(context, true),
+    loadToolkitSqlite: () => loadToolkitSqlite(context),
+    refreshToolRendererInterface: async () => {
+      const metadata = await refreshNativeToolRendererInterface(context, true, { live: true });
+      logRuntime("Live ToolRenderer refresh completed; relaunch bridge before compile if runtime calls start timing out.", {
+        counts: metadata.counts || {},
+        source: metadata.source,
+      });
+      vscode.window.showWarningMessage("Live ToolRenderer refresh can leave the simulator bridge unable to compile until Shortcuts is relaunched.");
+    },
+  };
+  const visibleCommandRegistrations = VISIBLE_COMMANDS.map((definition) => {
+    const handler = visibleCommandHandlers[definition.key];
+    if (!handler) {
+      throw new Error(`Missing command handler for ${definition.key}`);
+    }
+    return vscode.commands.registerCommand(definition.command, command(handler));
+  });
   context.subscriptions.push(
     runtimeLog,
     bridgeStatusBar,
@@ -1774,29 +1954,9 @@ function activate(context) {
       new WorkflowPythonCustomEditorProvider(context, diagnostics),
       { supportsMultipleEditorsPerDocument: false }
     ),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.connectBridge", command(connectBridge)),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.saveRuntimePlistFromPython", command(() => saveRuntimePlistFromPython(diagnostics))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython", command(() => writeSiblingRuntimePlistFromPython(diagnostics))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.validatePython", command(() => validatePython(diagnostics))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.openWorkflowPlistFromPython", command(() => openWorkflowPlistFromPython(diagnostics))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.pythonToPlistDebugJson", command(() => pythonToPlistDebugJson(diagnostics))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.loadPythonFromPlist", command(loadPythonFromPlist)),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.importICloudShortcutLink", command(importICloudShortcutLink)),
+    ...visibleCommandRegistrations,
     vscode.commands.registerCommand("shortcutsRuntimeIDE.roundTripPythonThroughPlist", command(() => roundTripPythonThroughPlist(diagnostics))),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.searchNativeAgentTools", command(() => searchNativeAgentTools(context))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.searchActions", command(() => searchNativeAgentTools(context, "tool"))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.searchTriggers", command(() => searchNativeAgentTools(context, "trigger"))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.resolveEntity", command(() => resolveEntity(context))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.status", command(showStatus)),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolMetadata", command(() => refreshToolMetadata(context, true))),
-    vscode.commands.registerCommand("shortcutsRuntimeIDE.refreshToolRendererInterface", command(async () => {
-      const metadata = await refreshNativeToolRendererInterface(context, true, { live: true });
-      logRuntime("Live ToolRenderer refresh completed; relaunch bridge before compile if runtime calls start timing out.", {
-        counts: metadata.counts || {},
-        source: metadata.source,
-      });
-      vscode.window.showWarningMessage("Live ToolRenderer refresh can leave the simulator bridge unable to compile until Shortcuts is relaunched.");
-    })),
     vscode.commands.registerCommand("shortcutsRuntimeIDE.copyDiagnostic", command(async (message) => {
       await vscode.env.clipboard.writeText(String(message || ""));
       vscode.window.showInformationMessage("Copied Shortcuts diagnostic.");
@@ -1824,6 +1984,9 @@ function activate(context) {
   );
   primeToolRendererMetadata(context).catch((error) => {
     logRuntime("ToolRenderer metadata unavailable", error && error.message ? error.message : String(error));
+  });
+  probeBridgeStatusPassive().catch((error) => {
+    logRuntime("Passive bridge status probe failed", error && error.message ? error.message : String(error));
   });
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
     if (!configOptions().validateOnSave || document.languageId !== "python") {

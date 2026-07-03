@@ -15,6 +15,7 @@ npm-debug.log*
 
 # Packaged extension artifacts
 *.vsix
+vscode-extension/bundled/
 
 # Local editor/cache state
 .vscode/

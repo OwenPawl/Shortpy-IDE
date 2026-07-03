@@ -27,9 +27,28 @@ This preserves workflow root metadata and native trigger decorators such as `@wh
 
 Editable Python should use inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge rewrites that representation internally for Apple's compiler.
 
-VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then refreshes that cache from the simulator bridge in the background when available. ToolKit sqlite data is not a user-facing documentation source; it remains only an internal bridge fallback for catalog host/key binding until native metadata-provider binding extraction is implemented.
+VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then rebuilds the visible cache from that local interface plus the active sqlite names. Live native ToolRenderer refresh is an explicit command because it can occupy the simulator bridge for a long time. Function and decorator hovers show exact native ToolRenderer definition blocks; keyword hovers show the specific parameter type/default/docs plus stable referenced enum/type material. Environment-specific enum cases are omitted because they depend on the active runtime catalog. ToolRenderer docs/signatures are paired with the active ToolKit sqlite `pythonName` values so the sqlite is the source of truth for editable Shortpy names; generated ToolRenderer names are only a fallback when a sqlite name is missing. The bridge also ensures selected DB rows have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) set before ToolRenderer refresh so native ToolRenderer renders actions that were present in the DB but hidden from the generative surface. ToolKit sqlite data is not a user-facing documentation source; it remains an internal bridge source for compiler names and a temporary fallback for catalog host/key binding until native metadata-provider binding extraction is implemented.
 
 ## Quick Start
+
+For the VS Code extension, install/package from `vscode-extension/` and run
+`Shortcuts IDE: Connect To Bridge`, or click the Shortcuts status bar item.
+The packaged extension bundles the bridge source, stages it into extension
+global storage on first connect, builds the simulator dylib if needed, boots
+Simulator if needed, launches Shortcuts with the bridge, and keeps bridge
+status visible in the status bar.
+The bridge build discovers the installed iOS Simulator runtime at build time
+and prefers iOS 27.0 when present.
+By default the launcher uses `~/Library/Shortcuts/ToolKit/Tools-active` as the
+ToolKit source of truth. On connect it backs up the selected sqlite, rewrites
+duplicate action/trigger Python names in place from their native identifiers,
+sets the ToolRenderer visibility/approval bits, points Simulator
+Shortcuts at that same sqlite, and refreshes bridge metadata.
+Use `Shortcuts IDE: Load ToolKit SQLite` to select a different sqlite; that
+command applies the same in-place name and visibility adjustments and relaunches
+the bridge.
+
+The direct CLI development path is still available:
 
 Build and launch the simulator bridge:
 
@@ -66,13 +85,36 @@ Signed import unwraps either `anyone` or `people-who-know-me` AEA1 envelopes hos
 Run VS Code extension syntax checks:
 
 ```sh
+cd vscode-extension
+npm test
+npm run check
+```
+
+Package the extension from `vscode-extension/` with `vsce` when needed. The
+prepublish step syncs VS Code command contributions from
+`src/commandRegistry.js` and stages the bundled bridge source:
+
+```sh
+cd vscode-extension
+npx --yes @vscode/vsce package --no-dependencies
+```
+
+Install the local VSIX with the repo helper. It uses `code` from PATH when
+available and falls back to the standard macOS VS Code app bundle CLI:
+
+```sh
+cd vscode-extension
+npm run install:local
+```
+
+Low-level checks can also be run directly:
+
+```sh
 node --check vscode-extension/src/bridge.js
 node --check vscode-extension/src/toolrenderer.js
 node --check vscode-extension/src/extension.js
 node --check vscode-extension/test/smoke.js
 ```
-
-Package the extension from `vscode-extension/` with `vsce` when needed.
 
 ## Scope Notes
 

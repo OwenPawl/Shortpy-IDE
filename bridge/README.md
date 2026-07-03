@@ -5,7 +5,7 @@ This bridge loads into the iOS Simulator Shortcuts process and exposes the nativ
 Current target:
 
 - iOS Simulator 27.0
-- `ToolVisibilityFilter.any`
+- standard `visibleForShortcuts` tool visibility filter with launch-time ToolKit sqlite visibility/approval adjustment
 - launch-time `DYLD_INSERT_LIBRARIES`
 - private Apple frameworks from the selected simulator runtime
 

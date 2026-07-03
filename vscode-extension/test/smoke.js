@@ -7,6 +7,7 @@ const util = require("util");
 const {
   binaryPlistToXml,
   bplistBufferFromResponse,
+  ensureBridgeLaunched,
   runBridgeCommand,
   runBridgeStatus,
   shortcutBufferFromResponse,
@@ -21,14 +22,30 @@ const { collectToolRendererDiagnostics, parameterInfoAt } = require("../src/shor
 
 const execFile = util.promisify(cp.execFile);
 
+async function ensureLiveBridge(options) {
+  try {
+    await runBridgeStatus(options);
+    return { reconnected: false };
+  } catch (_) {
+    const result = await ensureBridgeLaunched({
+      ...options,
+      forceBridgeLaunch: true,
+    });
+    return { reconnected: true, result };
+  }
+}
+
 async function main() {
   const root = path.resolve(__dirname, "..", "..");
   const logs = path.join(root, "bridge", "logs");
   await fs.mkdir(logs, { recursive: true });
   const options = {
     bridgeCtlPath: path.join(root, "bridge", "tools", "bridgectl.py"),
+    live: true,
+    bridgeCommandTimeoutMs: 180000,
   };
   const toolRendererMetadataPath = path.join(logs, "vscode-extension-toolrenderer-interface.json");
+  const metadataPreReconnect = await ensureLiveBridge(options);
   let toolRendererRefresh;
   try {
     toolRendererRefresh = await refreshToolRendererMetadata(toolRendererMetadataPath, options);
@@ -43,6 +60,7 @@ async function main() {
   const toolRenderer = indexToolRendererMetadata(await loadToolRendererMetadata(toolRendererMetadataPath));
   const nativeToolSearch = searchToolRendererMetadata(toolRenderer, "show a notification", "tool", 5);
   const nativeTriggerSearch = searchToolRendererMetadata(toolRenderer, "when app opened", "trigger", 5);
+  const metadataPostReconnect = await ensureLiveBridge(options);
   const staticDiagnosticSource = [
     "def shortcut() -> None:",
     "    com_apple_shortcuts_show_notification(title=\"Hello\", body=dict(bogus_nested=True), bogus_param=True)",
@@ -50,6 +68,15 @@ async function main() {
     "",
   ].join("\n");
   const staticDiagnostics = collectToolRendererDiagnostics(staticDiagnosticSource, toolRenderer);
+  const widenedToolRendererCanary = "com_apple_shortcuts_search_shortcuts_actions";
+  const canaryDiagnostics = collectToolRendererDiagnostics(
+    [
+      "def shortcut() -> None:",
+      `    ${widenedToolRendererCanary}(query="notification")`,
+      "",
+    ].join("\n"),
+    toolRenderer
+  );
   const staticDiagnosticLines = staticDiagnosticSource.split(/\r?\n/);
   const nestedParameterColumn = staticDiagnosticLines[1].indexOf("bogus_nested") + 4;
   const titleParameterColumn = staticDiagnosticLines[1].indexOf("title") + 2;
@@ -147,6 +174,13 @@ async function main() {
   const manifest = JSON.parse(await fs.readFile(path.join(root, "vscode-extension", "package.json"), "utf8"));
   const manifestCommands = (manifest.contributes && manifest.contributes.commands || []).map((entry) => entry.command);
   const showNotification = toolRenderer.byName.get("com_apple_shortcuts_show_notification");
+  const openApp = toolRenderer.actions.find((item) =>
+    item.displayName === "Open App" &&
+    (item.parameters || []).some((parameter) => (parameter.pythonName || parameter.name) === "app"));
+  const runnable = toolRenderer.byName.get("runnable");
+  const openAppParameter = openApp
+    ? toolRenderer.parameterByItemAndName.get(`${openApp.pythonName}.app`)
+    : undefined;
   const showNotificationParameters = (showNotification && showNotification.parameters || [])
     .map((parameter) => parameter.pythonName || parameter.name);
   const showNotificationLeaksInternalMetadata = Boolean(showNotification && (showNotification.id || showNotification.nativeIdentifier || showNotification.toolkitDisplayName ||
@@ -193,15 +227,37 @@ async function main() {
       signed_reimported_has_no_refs: !(triggerSignedReimported.python_code || "").includes("ref(0x"),
     },
     toolrenderer_counts: toolRendererRefresh.counts,
+    metadata_reconnect: {
+      pre_reconnected: metadataPreReconnect.reconnected,
+      pre_bridge_version: metadataPreReconnect.result && metadataPreReconnect.result.status && metadataPreReconnect.result.status.version,
+      post_reconnected: metadataPostReconnect.reconnected,
+      post_bridge_version: metadataPostReconnect.result && metadataPostReconnect.result.status && metadataPostReconnect.result.status.version,
+    },
+    widened_toolrenderer: {
+      canary: widenedToolRendererCanary,
+      canary_present: toolRenderer.byName.has(widenedToolRendererCanary),
+      canary_diagnostics: canaryDiagnostics.map((item) => item.code),
+    },
     has_native_show_notification_metadata: toolRenderer.byName.has("com_apple_shortcuts_show_notification"),
     has_native_when_app_opened_metadata: toolRenderer.byName.has("when_app_opened"),
     has_native_when_focus_enable_metadata: toolRenderer.byName.has("when_focus_enable"),
     has_native_run_surface_type: toolRenderer.byName.has("RunSurface"),
     has_native_run_surface_case: toolRenderer.byName.has("RunSurface.SHARE_SHEET"),
     has_native_input_fallback_type: toolRenderer.byName.has("InputFallback"),
+    has_toolrenderer_definition_blocks:
+      Boolean(openApp && openApp.definitionBlock && openApp.definitionBlock.includes(`def ${openApp.pythonName}(`)) &&
+      Boolean(runnable && runnable.definitionBlock && runnable.definitionBlock.includes("def runnable(")),
+    sqlite_open_app_name_present: Boolean(openApp && toolRenderer.byName.has(openApp.pythonName)),
+    sqlite_open_app_python_name: openApp && openApp.pythonName,
+    open_app_parameter_doc: openAppParameter && openAppParameter.parameter && openAppParameter.parameter.doc,
+    runnable_direct_dependencies: toolRenderer.directDependencies.get("runnable") || [],
+    hides_environment_enum_cases: !toolRenderer.byName.has("com_apple_shortcuts_wfapp_in_focus_trigger_wfapp_state.OPENED"),
     show_notification_leaks_internal_metadata: showNotificationLeaksInternalMetadata,
     native_when_app_opened_parameters: ((toolRenderer.byName.get("when_app_opened") || {}).parameters || []).map((parameter) => parameter.pythonName),
-    package_exposes_toolkit_commands: manifestCommands.some((command) => /ToolKit/.test(command) || /toolkit/i.test(command)),
+    package_exposes_unexpected_toolkit_commands: manifestCommands.some((command) =>
+      (/ToolKit/.test(command) || /toolkit/i.test(command)) &&
+      command !== "shortcutsRuntimeIDE.loadToolkitSqlite"
+    ),
     native_tool_search_top: nativeToolSearch.map((item) => item.pythonName),
     native_trigger_search_top: nativeTriggerSearch.map((item) => item.pythonName),
     static_diagnostics: {
@@ -213,8 +269,12 @@ async function main() {
     },
     cli_agent_wrappers: {
       actions_mode: cliActionSearch.mode,
+      actions_tool_visibility_source: cliActionSearch.tool_visibility_source,
+      actions_counts: cliActionSearch.counts,
       actions_top: (cliActionSearch.results || []).map((item) => item.pythonName),
       triggers_mode: cliTriggerSearch.mode,
+      triggers_tool_visibility_source: cliTriggerSearch.tool_visibility_source,
+      triggers_counts: cliTriggerSearch.counts,
       triggers_top: (cliTriggerSearch.results || []).map((item) => item.pythonName),
       transpiler_mode: cliTranspilerFeedback.mode,
       transpiler_valid: cliTranspilerFeedback.valid,
@@ -230,6 +290,10 @@ async function main() {
   };
   if (!summary.has_show_notification_python_parameter_names) {
     throw new Error(`missing show_notification python parameter names: ${showNotificationParameters.join(", ")}`);
+  }
+  if (!summary.widened_toolrenderer.canary_present ||
+      summary.widened_toolrenderer.canary_diagnostics.includes("unknownShortcutsCommand")) {
+    throw new Error(`ToolRenderer native widened diagnostics failed: ${JSON.stringify(summary.widened_toolrenderer)}`);
   }
   if (summary.signed_shortcut_header !== "AEA1" || summary.trigger_roundtrip.signed_header !== "AEA1" || !summary.signed_shortcut_import_ok || summary.signed_shortcut_import_key_source !== "SigningCertificateChain") {
     throw new Error(`signed shortcut export failed: ${JSON.stringify({
@@ -256,10 +320,20 @@ async function main() {
       InputFallback: summary.has_native_input_fallback_type,
     })}`);
   }
-  if (summary.show_notification_leaks_internal_metadata || summary.package_exposes_toolkit_commands) {
+  if (!summary.has_toolrenderer_definition_blocks || !summary.sqlite_open_app_name_present || !/Query string searches across: name/.test(summary.open_app_parameter_doc || "") || !summary.runnable_direct_dependencies.includes("RunSurface") || !summary.hides_environment_enum_cases) {
+    throw new Error(`ToolRenderer hover bundle metadata failed: ${JSON.stringify({
+      definitionBlocks: summary.has_toolrenderer_definition_blocks,
+      sqliteOpenAppNamePresent: summary.sqlite_open_app_name_present,
+      sqliteOpenAppPythonName: summary.sqlite_open_app_python_name,
+      openAppParameterDoc: summary.open_app_parameter_doc,
+      runnableDependencies: summary.runnable_direct_dependencies,
+      hidesEnvironmentEnumCases: summary.hides_environment_enum_cases,
+    })}`);
+  }
+  if (summary.show_notification_leaks_internal_metadata || summary.package_exposes_unexpected_toolkit_commands) {
     throw new Error(`ToolRenderer-only visible metadata failed: ${JSON.stringify({
       internalMetadata: summary.show_notification_leaks_internal_metadata,
-      toolkitCommands: summary.package_exposes_toolkit_commands,
+      toolkitCommands: summary.package_exposes_unexpected_toolkit_commands,
     })}`);
   }
   if (!summary.native_tool_search_top.includes("com_apple_shortcuts_show_notification") || !summary.native_trigger_search_top.includes("when_app_opened")) {
@@ -280,7 +354,10 @@ async function main() {
   const resolveWrapperUsable = summary.cli_agent_wrappers.resolve_ok === true
     ? summary.cli_agent_wrappers.resolve_result_count > 0
     : summary.cli_agent_wrappers.resolve_blocker_present;
-  if (!summary.cli_agent_wrappers.actions_top.includes("com_apple_shortcuts_show_notification") || !summary.cli_agent_wrappers.triggers_top.includes("when_app_opened") || summary.cli_agent_wrappers.transpiler_valid !== true || !resolveWrapperUsable) {
+  if (!summary.cli_agent_wrappers.actions_top.includes("com_apple_shortcuts_show_notification") ||
+      !summary.cli_agent_wrappers.triggers_top.includes("when_app_opened") ||
+      summary.cli_agent_wrappers.transpiler_valid !== true ||
+      !resolveWrapperUsable) {
     throw new Error(`agent wrapper smoke failed: ${JSON.stringify(summary.cli_agent_wrappers)}`);
   }
   if (summary.trigger_roundtrip.fixture_available && (!summary.trigger_roundtrip.fixture_imported_has_native_app_trigger || !summary.trigger_roundtrip.fixture_imported_has_native_focus_trigger || !summary.trigger_roundtrip.fixture_imported_has_no_refs)) {

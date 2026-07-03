@@ -1,11 +1,44 @@
 "use strict";
 
 const fs = require("fs/promises");
-const { runBridgeCli, runBridgeCommand } = require("./bridge");
+const { runBridgeCli } = require("./bridge");
 
 const QUERY_STOPWORDS = new Set(["a", "an", "and", "for", "i", "in", "me", "my", "of", "on", "the", "to"]);
+const STABLE_ENUMS_WITH_CASES = new Set([
+  "RunSurface",
+  "InputFallback",
+  "QUERY_OPERATOR",
+  "QUERY_SORT_ORDER",
+  "DateUnit",
+]);
+const TYPE_DEPENDENCY_WRAPPERS = new Set([
+  "Any",
+  "Callable",
+  "Dict",
+  "Enum",
+  "List",
+  "Literal",
+  "None",
+  "Optional",
+  "Picked",
+  "Resolved",
+  "Set",
+  "Tuple",
+  "Union",
+  "bool",
+  "bytes",
+  "dict",
+  "float",
+  "int",
+  "list",
+  "set",
+  "str",
+  "tuple",
+]);
 const VISIBLE_ITEM_DENYLIST = new Set([
   "bindingSource",
+  "canonicalizedFrom",
+  "canonicalizationSource",
   "customDescription",
   "id",
   "nativeIdentifier",
@@ -133,6 +166,23 @@ function parseReturnType(signature) {
 function docPayload(docs, endIndex) {
   const rawLines = docs.map((line) => line.replace(/\s+$/, ""));
   const cleaned = rawLines.map((line) => line.trim()).filter(Boolean);
+  const parsed = parseDocSections(rawLines);
+  return {
+    displayName: parsed.displayName || cleaned[0] || "",
+    summary: parsed.summary,
+    documentation: cleaned.join("\n"),
+    narrative: parsed.narrative,
+    parameterDocs: parsed.parameterDocs,
+    returnDocs: parsed.returnDocs,
+    endIndex,
+  };
+}
+
+function parseDocSections(documentation) {
+  const rawLines = Array.isArray(documentation)
+    ? documentation
+    : String(documentation || "").split(/\r?\n/);
+  const cleaned = rawLines.map((line) => String(line || "").trim()).filter(Boolean);
   const narrative = [];
   const parameterDocs = {};
   const returnDocs = [];
@@ -174,10 +224,9 @@ function docPayload(docs, endIndex) {
   return {
     displayName,
     summary,
-    documentation: cleaned.join("\n"),
+    narrative,
     parameterDocs,
     returnDocs: returnDocs.join("\n"),
-    endIndex,
   };
 }
 
@@ -247,8 +296,10 @@ function parseFunction(lines, startIndex, section) {
         : ["runnable", "input_fallback"].includes(pythonName)
           ? "decorator"
           : "helper";
+  const endIndex = Math.max(index + 1, docs.endIndex);
+  const definitionBlock = lines.slice(startIndex, endIndex).join("\n").trimEnd();
   return {
-    endIndex: Math.max(index + 1, docs.endIndex),
+    endIndex,
     item: {
       kind,
       pythonName,
@@ -261,6 +312,12 @@ function parseFunction(lines, startIndex, section) {
       returnType: parseReturnType(signature),
       returnDocs: docs.returnDocs,
       parameters,
+      docSections: {
+        narrative: docs.narrative,
+        parameterDocs: docs.parameterDocs,
+        returnDocs: docs.returnDocs,
+      },
+      definitionBlock,
       startLine: startIndex + 1,
       source: "ToolRenderer.pythonInterface",
     },
@@ -283,6 +340,10 @@ function parseTypeAlias(line, priorComments) {
     aliasedTo: match[2].trim(),
     docString: priorComments.join("\n"),
     documentation: priorComments.join("\n"),
+    definitionBlock: [
+      ...priorComments.map((comment) => `# ${comment}`),
+      line.trim(),
+    ].filter(Boolean).join("\n"),
     startLine: undefined,
     source: "ToolRenderer.pythonInterface",
   };
@@ -343,10 +404,147 @@ function parseClass(lines, startIndex, priorComments) {
       members,
       docString: docs.documentation || priorComments.join("\n"),
       documentation: docs.documentation || priorComments.join("\n"),
+      docSections: {
+        narrative: docs.narrative,
+        parameterDocs: docs.parameterDocs,
+        returnDocs: docs.returnDocs,
+      },
+      definitionBlock: lines.slice(startIndex, index).join("\n").trimEnd(),
       startLine: startIndex + 1,
       source: "ToolRenderer.pythonInterface",
     },
   };
+}
+
+function isStableEnumWithCases(itemOrName) {
+  const name = typeof itemOrName === "string"
+    ? itemOrName
+    : String(itemOrName && itemOrName.pythonName || "");
+  return STABLE_ENUMS_WITH_CASES.has(name);
+}
+
+function isEnvironmentSpecificEnum(itemOrName) {
+  const name = typeof itemOrName === "string"
+    ? itemOrName
+    : String(itemOrName && itemOrName.pythonName || "");
+  const lower = name.toLowerCase();
+  if (isStableEnumWithCases(name)) {
+    return false;
+  }
+  return lower.includes("dynamic") ||
+    lower.startsWith("com_") ||
+    lower.startsWith("query_com_") ||
+    lower.startsWith("org_") ||
+    lower.startsWith("net_") ||
+    lower.startsWith("io_") ||
+    lower.startsWith("app_");
+}
+
+function shouldExposeEnumCases(item) {
+  return Boolean(item && item.kind === "enum" && !isEnvironmentSpecificEnum(item));
+}
+
+function mergeDocSections(item) {
+  if (!item || typeof item !== "object") {
+    return item;
+  }
+  const docs = String(item.documentation || item.docString || "");
+  const sections = {
+    ...parseDocSections(docs),
+    ...(item.docSections || {}),
+  };
+  const clean = {
+    ...item,
+    docSections: sections,
+    definitionBlock: item.definitionBlock || "",
+  };
+  if (!clean.displayName && sections.displayName) {
+    clean.displayName = sections.displayName;
+  }
+  if (!clean.summary && sections.summary) {
+    clean.summary = sections.summary;
+  }
+  if (!clean.returnDocs && sections.returnDocs) {
+    clean.returnDocs = sections.returnDocs;
+  }
+  if (Array.isArray(clean.parameters)) {
+    clean.parameters = clean.parameters.map((parameter) => {
+      if (!parameter || typeof parameter !== "object") {
+        return parameter;
+      }
+      const name = parameter.pythonName || parameter.name;
+      const doc = name ? sections.parameterDocs[name] : undefined;
+      return {
+        ...parameter,
+        doc: parameter.doc || parameter.summary || doc,
+        summary: parameter.summary || parameter.doc || doc,
+      };
+    });
+  }
+  return clean;
+}
+
+function mergeStructuredMetadataFromSource(metadata, source) {
+  if (!source) {
+    return metadata;
+  }
+  const parsed = parseToolRendererInterface(source);
+  const parsedByName = new Map();
+  for (const item of [
+    ...(parsed.helpers || []),
+    ...(parsed.actions || []),
+    ...(parsed.triggers || []),
+    ...(parsed.types || []),
+  ]) {
+    if (item && item.pythonName) {
+      parsedByName.set(item.pythonName, item);
+    }
+  }
+  const mergeItems = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    const parsedItem = parsedByName.get(item && item.pythonName);
+    return parsedItem
+      ? mergeDocSections({ ...parsedItem, ...item, definitionBlock: item.definitionBlock || parsedItem.definitionBlock })
+      : mergeDocSections(item);
+  });
+  return {
+    ...metadata,
+    helpers: mergeItems(metadata.helpers),
+    actions: mergeItems(metadata.actions),
+    triggers: mergeItems(metadata.triggers),
+    types: mergeItems(metadata.types),
+  };
+}
+
+function extractTypeNames(value) {
+  const names = new Set();
+  const text = String(value || "");
+  const re = /[A-Za-z_][A-Za-z0-9_]*/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const name = match[0];
+    if (!TYPE_DEPENDENCY_WRAPPERS.has(name)) {
+      names.add(name);
+    }
+  }
+  return [...names];
+}
+
+function directDependenciesForItem(item, typeByPythonName) {
+  const names = new Set();
+  for (const source of [item && item.signature, item && item.returnType, item && item.aliasedTo]) {
+    for (const name of extractTypeNames(source)) {
+      names.add(name);
+    }
+  }
+  for (const parameter of Array.isArray(item && item.parameters) ? item.parameters : []) {
+    for (const source of [parameter.type, parameter.defaultValue]) {
+      for (const name of extractTypeNames(source)) {
+        names.add(name);
+      }
+    }
+  }
+  names.delete(item && item.pythonName);
+  return [...names].filter((name) => !typeByPythonName || typeByPythonName.has(name)).sort();
 }
 
 function parseToolRendererInterface(source) {
@@ -435,13 +633,7 @@ function parseToolRendererInterface(source) {
 
 async function fetchToolRendererResponse(options = {}) {
   if (options.live === true) {
-    try {
-      return await runBridgeCommand("toolrenderer-structured-metadata", Buffer.alloc(0), options);
-    } catch (error) {
-      const response = await runBridgeCommand("toolrenderer-python-interface", Buffer.alloc(0), options);
-      response.structured_metadata_error = error.message;
-      return response;
-    }
+    return runBridgeCli(["toolrenderer-structured-metadata"], options);
   }
   try {
     const response = await runBridgeCli(["toolrenderer-structured-metadata", "--cached"], options);
@@ -451,16 +643,9 @@ async function fetchToolRendererResponse(options = {}) {
     if (options.allowLiveFallback === false) {
       throw cachedError;
     }
-    try {
-      const response = await runBridgeCommand("toolrenderer-structured-metadata", Buffer.alloc(0), options);
-      response.cached_metadata_error = cachedError.message;
-      return response;
-    } catch (error) {
-      const response = await runBridgeCommand("toolrenderer-python-interface", Buffer.alloc(0), options);
-      response.cached_metadata_error = cachedError.message;
-      response.structured_metadata_error = error.message;
-      return response;
-    }
+    const response = await runBridgeCli(["toolrenderer-structured-metadata"], options);
+    response.cached_metadata_error = cachedError.message;
+    return response;
   }
 }
 
@@ -490,7 +675,11 @@ function sanitizeToolRendererItem(item) {
   if (Array.isArray(clean.parameters)) {
     clean.parameters = clean.parameters.map(sanitizeToolRendererParameter);
   }
-  return clean;
+  if (clean.kind === "enum" && isEnvironmentSpecificEnum(clean)) {
+    clean.cases = [];
+    clean.environmentSpecificCasesOmitted = true;
+  }
+  return mergeDocSections(clean);
 }
 
 function sanitizeToolRendererMetadata(metadata) {
@@ -525,6 +714,7 @@ async function refreshToolRendererMetadata(metadataPath, options = {}) {
   let response;
   let metadata;
   response = await fetchToolRendererResponse(options);
+  const sourceInterface = response.python_interface || response.pythonInterface || "";
   if (Array.isArray(response.items) && response.items.length > 0) {
     metadata = {
       ok: true,
@@ -538,8 +728,9 @@ async function refreshToolRendererMetadata(metadataPath, options = {}) {
       types: response.types || [],
       diagnostics: response.diagnostics || [],
     };
+    metadata = mergeStructuredMetadataFromSource(metadata, sourceInterface);
   } else {
-    metadata = parseToolRendererInterface(response.python_interface || response.pythonInterface || "");
+    metadata = parseToolRendererInterface(sourceInterface);
   }
   metadata.response = {
     python_length: response.python_length,
@@ -562,19 +753,57 @@ async function loadToolRendererMetadata(metadataPath) {
 
 function indexToolRendererMetadata(metadata) {
   const byName = new Map();
+  const itemByPythonName = new Map();
+  const parameterByItemAndName = new Map();
+  const typeByPythonName = new Map();
+  const definitionBlocks = new Map();
+  const directDependencies = new Map();
   const actions = Array.isArray(metadata && metadata.actions) ? metadata.actions : [];
   const triggers = Array.isArray(metadata && metadata.triggers) ? metadata.triggers : [];
   const helpers = Array.isArray(metadata && metadata.helpers) ? metadata.helpers : [];
   const types = Array.isArray(metadata && metadata.types) ? metadata.types : [];
+  for (const type of types) {
+    if (type && type.pythonName) {
+      typeByPythonName.set(type.pythonName, type);
+    }
+  }
   for (const item of [...helpers, ...actions, ...triggers, ...types]) {
     if (item && item.pythonName) {
       byName.set(item.pythonName, item);
-      for (const enumCase of item.cases || []) {
+      itemByPythonName.set(item.pythonName, item);
+      if (item.definitionBlock) {
+        definitionBlocks.set(item.pythonName, item.definitionBlock);
+      }
+      directDependencies.set(item.pythonName, directDependenciesForItem(item, typeByPythonName));
+      for (const parameter of Array.isArray(item.parameters) ? item.parameters : []) {
+        const parameterName = parameter && (parameter.pythonName || parameter.name);
+        if (parameterName) {
+          parameterByItemAndName.set(`${item.pythonName}.${parameterName}`, { item, parameter });
+        }
+      }
+      if (shouldExposeEnumCases(item)) {
+        for (const enumCase of item.cases || []) {
+          if (!enumCase || !enumCase.pythonName) {
+            continue;
+          }
         byName.set(enumCase.pythonName, { ...enumCase, kind: "enumCase", enumName: item.pythonName });
+          itemByPythonName.set(enumCase.pythonName, { ...enumCase, kind: "enumCase", enumName: item.pythonName });
+        }
       }
     }
   }
-  return { byName, actions, triggers, helpers, types };
+  return {
+    byName,
+    itemByPythonName,
+    parameterByItemAndName,
+    typeByPythonName,
+    definitionBlocks,
+    directDependencies,
+    actions,
+    triggers,
+    helpers,
+    types,
+  };
 }
 
 function queryTerms(query) {
@@ -674,6 +903,8 @@ function searchToolRendererMetadata(indexOrMetadata, query, kind = "all", limit 
 
 module.exports = {
   indexToolRendererMetadata,
+  isEnvironmentSpecificEnum,
+  isStableEnumWithCases,
   loadToolRendererMetadata,
   parseToolRendererInterface,
   refreshToolRendererMetadata,

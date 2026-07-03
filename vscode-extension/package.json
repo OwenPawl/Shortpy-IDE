@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.17",
+  "version": "0.1.23",
   "publisher": "local",
   "license": "UNLICENSED",
   "repository": {
@@ -15,6 +15,12 @@
   "categories": [
     "Other"
   ],
+  "scripts": {
+    "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js",
+    "check": "node scripts/sync-package-commands.js --check && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/toolrenderer.js && node --check src/extension.js",
+    "install:local": "node scripts/install-vsix.js",
+    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js"
+  },
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:python",
@@ -29,10 +35,9 @@
     "onCommand:shortcutsRuntimeIDE.importICloudShortcutLink",
     "onCommand:shortcutsRuntimeIDE.searchActions",
     "onCommand:shortcutsRuntimeIDE.searchTriggers",
-    "onCommand:shortcutsRuntimeIDE.resolveEntity",
     "onCommand:shortcutsRuntimeIDE.refreshToolMetadata",
-    "onCommand:shortcutsRuntimeIDE.refreshToolRendererInterface",
-    "onCommand:shortcutsRuntimeIDE.status"
+    "onCommand:shortcutsRuntimeIDE.loadToolkitSqlite",
+    "onCommand:shortcutsRuntimeIDE.refreshToolRendererInterface"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -93,20 +98,16 @@
         "title": "Shortcuts IDE: Retrieve Relevant Triggers"
       },
       {
-        "command": "shortcutsRuntimeIDE.resolveEntity",
-        "title": "Shortcuts IDE: Resolve Entity"
-      },
-      {
         "command": "shortcutsRuntimeIDE.refreshToolMetadata",
         "title": "Shortcuts IDE: Refresh ToolRenderer Metadata"
       },
       {
-        "command": "shortcutsRuntimeIDE.refreshToolRendererInterface",
-        "title": "Shortcuts IDE: Refresh Native ToolRenderer Interface"
+        "command": "shortcutsRuntimeIDE.loadToolkitSqlite",
+        "title": "Shortcuts IDE: Load ToolKit SQLite"
       },
       {
-        "command": "shortcutsRuntimeIDE.status",
-        "title": "Shortcuts IDE: Show Bridge Status"
+        "command": "shortcutsRuntimeIDE.refreshToolRendererInterface",
+        "title": "Shortcuts IDE: Refresh Native ToolRenderer Interface"
       }
     ],
     "menus": {
@@ -132,6 +133,14 @@
           "group": "navigation@53"
         },
         {
+          "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
+          "group": "navigation@57"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.importICloudShortcutLink",
+          "group": "navigation@58"
+        },
+        {
           "command": "shortcutsRuntimeIDE.searchActions",
           "when": "editorLangId == python",
           "group": "navigation@54"
@@ -142,21 +151,12 @@
           "group": "navigation@55"
         },
         {
-          "command": "shortcutsRuntimeIDE.resolveEntity",
+          "command": "shortcutsRuntimeIDE.refreshToolMetadata",
           "when": "editorLangId == python",
           "group": "navigation@56"
         },
         {
-          "command": "shortcutsRuntimeIDE.refreshToolMetadata",
-          "when": "editorLangId == python",
-          "group": "navigation@57"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.loadPythonFromPlist",
-          "group": "navigation@58"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.importICloudShortcutLink",
+          "command": "shortcutsRuntimeIDE.loadToolkitSqlite",
           "group": "navigation@59"
         }
       ],
@@ -174,7 +174,7 @@
         "shortcutsRuntimeIDE.bridgeCtlPath": {
           "type": "string",
           "default": "",
-          "description": "Path to bridgectl.py. Leave empty to use bridge/tools/bridgectl.py from the Shortpy IDE repository."
+          "description": "Path to bridgectl.py. Leave empty to use the bundled bridge runtime, then a Shortpy IDE workspace bridge as a development fallback."
         },
         "shortcutsRuntimeIDE.toolRendererMetadataPath": {
           "type": "string",
@@ -229,6 +229,31 @@
           "type": "string",
           "default": "",
           "description": "Path to the macOS shortcuts CLI used for signing. Leave empty to use /usr/bin/shortcuts."
+        },
+        "shortcutsRuntimeIDE.toolkitSqlitePath": {
+          "type": "string",
+          "default": "",
+          "description": "ToolKit sqlite used by the bridge/compiler source-of-truth layer. Leave empty to use ~/Library/Shortcuts/ToolKit/Tools-active. The bridge backs it up, rewrites duplicate action/trigger Python names in place, and points Simulator Shortcuts at it."
+        },
+        "shortcutsRuntimeIDE.bridgeCommandTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Maximum time in milliseconds for compile/import/export bridge commands before VS Code reports a timeout."
+        },
+        "shortcutsRuntimeIDE.bridgeMetadataTimeoutMs": {
+          "type": "number",
+          "default": 180000,
+          "description": "Maximum time in milliseconds for ToolRenderer metadata bridge commands before VS Code reports a timeout. Live ToolRenderer refresh can be large after widening the native visibility surface."
+        },
+        "shortcutsRuntimeIDE.bridgeStatusTimeoutMs": {
+          "type": "number",
+          "default": 10000,
+          "description": "Maximum time in milliseconds for bridge status checks before VS Code reports a timeout."
+        },
+        "shortcutsRuntimeIDE.bridgeLaunchTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Maximum time in milliseconds for Connect To Bridge to build the bridge, boot Simulator, launch Shortcuts, and verify status."
         },
         "shortcutsRuntimeIDE.autoConvertPlistOnOpen": {
           "type": "boolean",
