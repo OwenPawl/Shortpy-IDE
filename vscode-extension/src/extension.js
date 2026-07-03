@@ -330,8 +330,12 @@ function appendTypeMaterial(lines, type, options = {}) {
   }
 }
 
-function commandMetadata(item) {
+function commandMetadata(item, options = {}) {
   const lines = [];
+  const hasDefinition = Boolean(item.definitionBlock || item.signature);
+  const preferExactDefinition = options.preferExactDefinition !== false &&
+    hasDefinition &&
+    ["action", "trigger", "helper", "decorator"].includes(item.kind);
   lines.push(`**${item.pythonName}**`);
   lines.push("");
   lines.push(itemKindLabel(item));
@@ -341,10 +345,10 @@ function commandMetadata(item) {
   if (item.startLine) {
     lines.push(`Source line: ${item.startLine}`);
   }
-  if (item.returnType) {
+  if (!preferExactDefinition && item.returnType) {
     lines.push(`Returns: \`${item.returnType}\``);
   }
-  if (item.returnDocs) {
+  if (!preferExactDefinition && item.returnDocs) {
     lines.push(item.returnDocs);
   }
   if (item.aliasedTo) {
@@ -353,22 +357,22 @@ function commandMetadata(item) {
   if (Array.isArray(item.bases) && item.bases.length > 0) {
     lines.push(`Bases: ${item.bases.map((base) => `\`${base}\``).join(", ")}`);
   }
-  if (item.summary) {
+  if (!preferExactDefinition && item.summary) {
     lines.push("");
     lines.push(item.summary);
   }
   const fullDocs = item.documentation || item.docString;
-  if (fullDocs && fullDocs !== item.summary && fullDocs !== item.displayName) {
+  if (!preferExactDefinition && fullDocs && fullDocs !== item.summary && fullDocs !== item.displayName) {
     lines.push("");
     lines.push(fullDocs);
   }
-  if (item.definitionBlock || item.signature) {
+  if (hasDefinition) {
     lines.push("");
     lines.push("```python");
     lines.push(item.definitionBlock || item.signature);
     lines.push("```");
   }
-  if (Array.isArray(item.parameters) && item.parameters.length > 0) {
+  if (!preferExactDefinition && Array.isArray(item.parameters) && item.parameters.length > 0) {
     lines.push("");
     lines.push("Parameters:");
     for (const [index, parameter] of item.parameters.slice(0, 20).entries()) {
@@ -401,10 +405,12 @@ function commandMetadata(item) {
       lines.push(`- \`${entry.name}\`${entry.returnType ? ` -> \`${entry.returnType}\`` : ""}`);
     }
   }
-  for (const dependencyName of (toolRendererIndex.directDependencies || new Map()).get(item.pythonName) || []) {
-    const type = toolRendererIndex.typeByPythonName && toolRendererIndex.typeByPythonName.get(dependencyName);
-    if (type && !isEnvironmentSpecificEnum(type)) {
-      appendTypeMaterial(lines, type);
+  if (!preferExactDefinition && options.includeReferencedTypes !== false) {
+    for (const dependencyName of (toolRendererIndex.directDependencies || new Map()).get(item.pythonName) || []) {
+      const type = toolRendererIndex.typeByPythonName && toolRendererIndex.typeByPythonName.get(dependencyName);
+      if (type && !isEnvironmentSpecificEnum(type)) {
+        appendTypeMaterial(lines, type);
+      }
     }
   }
   return markdown(lines);
