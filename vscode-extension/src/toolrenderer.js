@@ -124,6 +124,19 @@ function parseParameter(text) {
   const hash = clean.indexOf("#");
   const body = hash >= 0 ? clean.slice(0, hash).trim() : clean;
   const comment = hash >= 0 ? clean.slice(hash + 1).trim() : "";
+  const inlineMatch = /^:\s*([^=]+?)(?:\s*=\s*(.+))?$/.exec(body);
+  if (inlineMatch) {
+    return {
+      pythonName: "",
+      name: "",
+      type: inlineMatch[1] ? inlineMatch[1].trim() : "",
+      defaultValue: inlineMatch[2] ? inlineMatch[2].trim() : undefined,
+      doc: comment || undefined,
+      summary: comment || undefined,
+      positional: true,
+      inline: true,
+    };
+  }
   const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([^=]+?))?(?:\s*=\s*(.+))?$/.exec(body);
   if (!match) {
     return undefined;
@@ -149,7 +162,8 @@ function parseParametersFromSignature(signature) {
   const body = signature.slice(openIndex + 1, closeIndex);
   return splitTopLevelCommas(body)
     .map(parseParameter)
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((parameter, index) => ({ ...parameter, positionalIndex: index }));
 }
 
 function parseReturnType(signature) {
@@ -204,11 +218,11 @@ function parseDocSections(documentation) {
       continue;
     }
     if (section === "args") {
-      const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(trimmed);
+      const match = /^([A-Za-z_][A-Za-z0-9_]*)?\s*:\s*(.*)$/.exec(trimmed);
       if (match) {
-        activeParam = match[1];
+        activeParam = match[1] || "";
         parameterDocs[activeParam] = match[2].trim();
-      } else if (activeParam) {
+      } else if (activeParam || Object.prototype.hasOwnProperty.call(parameterDocs, "")) {
         parameterDocs[activeParam] = `${parameterDocs[activeParam]} ${trimmed}`.trim();
       }
       continue;

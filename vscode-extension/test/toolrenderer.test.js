@@ -29,6 +29,21 @@ def runnable(
     """runnable
     Registers the shortcut to automatically run on the specified run surface. Can ONLY be used as a python decorator: @runnable
     """
+def messages_find_conversation(
+    : query_com_apple_mobile_sms_conversation_entity,
+    sort_by: com_apple_mobile_sms_conversation_entity_wfcontent_item_sort_property,
+    limit: Optional[bool] = False,
+) -> com_apple_mobile_sms_conversation_entity:
+    """Find Conversation
+    Search and filter Messages conversations.
+    Args:
+        : (query_com_apple_mobile_sms_conversation_entity)
+        sort_by: Optionally, what to sort the conversation by.
+        limit: Whether or not to limit the number of conversation retrieved.
+    Returns:
+        Conversation: com_apple_mobile_sms_conversation_entity
+    """
+query_com_apple_mobile_sms_conversation_entity = Any
 class RunSurface(Enum):
     SHARE_SHEET = "SHARE_SHEET"
     APPLE_WATCH = "APPLE_WATCH"
@@ -59,6 +74,15 @@ assert(/Query string searches across: name/.test(appParameter.parameter.doc || "
 const runnable = index.byName.get("runnable");
 assert(runnable, "runnable decorator should be parsed");
 assert((index.directDependencies.get("runnable") || []).includes("RunSurface"), "runnable should depend on RunSurface");
+
+const findConversation = index.byName.get("messages_find_conversation");
+assert(findConversation, "inline-argument action should be parsed");
+assert.strictEqual(findConversation.parameters.length, 3, "inline parameter should be preserved");
+assert.strictEqual(findConversation.parameters[0].pythonName, "");
+assert.strictEqual(findConversation.parameters[0].inline, true);
+assert.strictEqual(findConversation.parameters[0].type, "query_com_apple_mobile_sms_conversation_entity");
+assert.strictEqual(findConversation.parameters[0].doc, "(query_com_apple_mobile_sms_conversation_entity)");
+assert((index.directDependencies.get("messages_find_conversation") || []).includes("query_com_apple_mobile_sms_conversation_entity"), "inline parameter type should be indexed as a dependency");
 
 const runSurface = index.byName.get("RunSurface");
 assert(runSurface, "RunSurface enum should be indexed");

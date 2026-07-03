@@ -261,8 +261,20 @@ def parse_signature_parameters(signature: str) -> list[dict]:
     if close_index < 0:
         return []
     parameters = []
-    for part in split_top_level_commas(signature[open_index + 1:close_index]):
+    for position, part in enumerate(split_top_level_commas(signature[open_index + 1:close_index])):
         if part in {"/", "*"}:
+            continue
+        inline_match = re.match(r"^:\s*([^=]+?)(?:\s*=\s*(.+))?$", part)
+        if inline_match:
+            parameters.append({
+                "pythonName": "",
+                "name": "",
+                "type": (inline_match.group(1) or "").strip(),
+                "defaultValue": (inline_match.group(2) or "").strip() or None,
+                "positional": True,
+                "inline": True,
+                "positionalIndex": position,
+            })
             continue
         match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([^=]+?))?(?:\s*=\s*(.+))?$", part)
         if not match:
@@ -271,6 +283,7 @@ def parse_signature_parameters(signature: str) -> list[dict]:
             "pythonName": match.group(1),
             "type": (match.group(2) or "").strip(),
             "defaultValue": (match.group(3) or "").strip() or None,
+            "positionalIndex": position,
         })
     return parameters
 
@@ -303,11 +316,11 @@ def parse_doc_sections(doc_lines: list[str]) -> dict:
             active_param = ""
             continue
         if section == "args":
-            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)?\s*:\s*(.*)$", line)
             if match:
-                active_param = match.group(1)
+                active_param = match.group(1) or ""
                 parameter_docs[active_param] = match.group(2).strip()
-            elif active_param:
+            elif active_param or "" in parameter_docs:
                 parameter_docs[active_param] = f"{parameter_docs[active_param]} {line}".strip()
             continue
         if section == "returns":

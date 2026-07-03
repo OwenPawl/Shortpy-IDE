@@ -2,7 +2,7 @@
 
 const assert = require("assert");
 const { parseAppleDiagnostic } = require("../src/diagnostics");
-const { collectToolRendererDiagnostics } = require("../src/shortpyDiagnostics");
+const { collectToolRendererDiagnostics, parameterInfoAt } = require("../src/shortpyDiagnostics");
 const { indexToolRendererMetadata } = require("../src/toolrenderer");
 
 const message = `Error at Line 2, Column 5
@@ -42,6 +42,19 @@ const toolRenderer = indexToolRendererMetadata({
       pythonName: "com_native_widened_action",
       parameters: [{ pythonName: "message" }],
     },
+    {
+      kind: "action",
+      pythonName: "messages_find_conversation",
+      parameters: [
+        {
+          pythonName: "",
+          type: "query_com_apple_mobile_sms_conversation_entity",
+          inline: true,
+          positional: true,
+        },
+        { pythonName: "sort_by" },
+      ],
+    },
   ],
 });
 const widenedDiagnostics = collectToolRendererDiagnostics(
@@ -59,5 +72,20 @@ assert(widenedDiagnostics.some((diagnostic) =>
   diagnostic.commandName === "com_native_widened_action" &&
   /bogus/.test(diagnostic.message)
 ));
+
+const inlineSource = [
+  "def shortcut() -> None:",
+  "    messages_find_conversation(query_com_apple_mobile_sms_conversation_entity(), sort_by=None)",
+  "",
+].join("\n");
+const inlineColumn = inlineSource.split(/\r?\n/)[1].indexOf("query_com_apple") + 8;
+const inlineInfo = parameterInfoAt(inlineSource, 1, inlineColumn, [toolRenderer]);
+assert(inlineInfo, "inline positional argument should resolve to a parameter hover");
+assert.strictEqual(inlineInfo.name, "inline argument");
+assert.strictEqual(inlineInfo.parameter.type, "query_com_apple_mobile_sms_conversation_entity");
+const sortByColumn = inlineSource.split(/\r?\n/)[1].indexOf("sort_by") + 2;
+const sortByInfo = parameterInfoAt(inlineSource, 1, sortByColumn, [toolRenderer]);
+assert(sortByInfo, "keyword argument should still resolve to a parameter hover");
+assert.strictEqual(sortByInfo.name, "sort_by");
 
 console.log("diagnostics-ok");

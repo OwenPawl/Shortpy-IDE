@@ -82,6 +82,14 @@ async function main() {
   const titleParameterColumn = staticDiagnosticLines[1].indexOf("title") + 2;
   const nestedParameterHover = parameterInfoAt(staticDiagnosticSource, 1, nestedParameterColumn, [toolRenderer]);
   const titleParameterHover = parameterInfoAt(staticDiagnosticSource, 1, titleParameterColumn, [toolRenderer]);
+  const inlineArgumentSource = [
+    "def shortcut() -> None:",
+    "    messages_find_conversation(query_com_apple_mobile_sms_conversation_entity(), sort_by=None)",
+    "",
+  ].join("\n");
+  const inlineArgumentLine = inlineArgumentSource.split(/\r?\n/)[1];
+  const inlineArgumentColumn = inlineArgumentLine.indexOf("query_com_apple") + 8;
+  const inlineArgumentHover = parameterInfoAt(inlineArgumentSource, 1, inlineArgumentColumn, [toolRenderer]);
   const bridgeCtl = path.join(root, "bridge", "tools", "bridgectl.py");
   const cliActionSearch = JSON.parse((await execFile("python3", [
     bridgeCtl,
@@ -269,6 +277,8 @@ async function main() {
       messages: staticDiagnostics.map((item) => item.message),
       nested_parameter_hover: Boolean(nestedParameterHover),
       title_parameter_hover: Boolean(titleParameterHover),
+      inline_argument_hover: Boolean(inlineArgumentHover),
+      inline_argument_type: inlineArgumentHover && inlineArgumentHover.parameter && inlineArgumentHover.parameter.type,
     },
     cli_agent_wrappers: {
       actions_mode: cliActionSearch.mode,
@@ -364,6 +374,9 @@ async function main() {
   }
   if (summary.static_diagnostics.nested_parameter_hover || !summary.static_diagnostics.title_parameter_hover) {
     throw new Error(`static ToolRenderer hover depth handling failed: ${JSON.stringify(summary.static_diagnostics)}`);
+  }
+  if (!summary.static_diagnostics.inline_argument_hover || summary.static_diagnostics.inline_argument_type !== "query_com_apple_mobile_sms_conversation_entity") {
+    throw new Error(`inline argument hover failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   const resolveWrapperUsable = summary.cli_agent_wrappers.resolve_ok === true
     ? summary.cli_agent_wrappers.resolve_result_count > 0

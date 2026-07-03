@@ -98,7 +98,17 @@ function parameterMap(item) {
 }
 
 function topLevelKeywordArguments(args) {
-  const keywords = [];
+  return topLevelArguments(args)
+    .filter((argument) => argument.keywordName)
+    .map((argument) => ({
+      name: argument.keywordName,
+      index: argument.keywordStart,
+    }));
+}
+
+function topLevelArguments(args) {
+  const ranges = [];
+  let start = 0;
   let depth = 0;
   let quote = "";
   for (let index = 0; index < args.length; index += 1) {
@@ -122,21 +132,31 @@ function topLevelKeywordArguments(args) {
       depth = Math.max(0, depth - 1);
       continue;
     }
-    if (depth !== 0 || !/[A-Za-z_]/.test(ch)) {
-      continue;
+    if (ch === "," && depth === 0) {
+      ranges.push({ start, end: index });
+      start = index + 1;
     }
-    const before = index > 0 ? args[index - 1] : "";
-    if (before && /[A-Za-z0-9_.]/.test(before)) {
-      continue;
-    }
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(args.slice(index));
-    if (!match) {
-      continue;
-    }
-    keywords.push({ name: match[1], index });
-    index += match[1].length - 1;
   }
-  return keywords;
+  ranges.push({ start, end: args.length });
+  return ranges.map((range, position) => {
+    const raw = args.slice(range.start, range.end);
+    const leftTrim = raw.length - raw.replace(/^\s+/, "").length;
+    const rightTrim = raw.length - raw.replace(/\s+$/, "").length;
+    const startIndex = range.start + leftTrim;
+    const endIndex = range.end - rightTrim;
+    const text = args.slice(startIndex, endIndex);
+    const keyword = /^([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(text);
+    return {
+      text,
+      index: startIndex,
+      start: startIndex,
+      end: endIndex,
+      position,
+      keywordName: keyword ? keyword[1] : "",
+      keywordStart: startIndex,
+      keywordEnd: keyword ? startIndex + keyword[1].length : startIndex,
+    };
+  }).filter((argument) => argument.text);
 }
 
 function collectToolRendererDiagnostics(source, index) {
@@ -243,6 +263,23 @@ function functionCallContextAtLine(line, character) {
   return undefined;
 }
 
+function functionCallContextsAtLine(line, character) {
+  const contexts = [];
+  const callRe = /@?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+  let match;
+  while ((match = callRe.exec(line)) !== null) {
+    const openIndex = line.indexOf("(", match.index);
+    if (openIndex < 0 || character <= openIndex) {
+      continue;
+    }
+    const closeIndex = signatureEnd(line, openIndex);
+    if (character <= closeIndex) {
+      contexts.push({ name: match[1], openIndex, closeIndex });
+    }
+  }
+  return contexts.sort((a, b) => b.openIndex - a.openIndex);
+}
+
 function parameterNameAt(line, character) {
   const before = line.slice(0, character);
   const after = line.slice(character);
@@ -271,21 +308,55 @@ function topLevelParameterNameAt(line, character, openIndex, closeIndex) {
   return undefined;
 }
 
+function topLevelArgumentAt(line, character, openIndex, closeIndex) {
+  if (openIndex < 0 || character <= openIndex || character > closeIndex) {
+    return undefined;
+  }
+  for (const argument of topLevelArguments(line.slice(openIndex + 1, closeIndex))) {
+    const start = openIndex + 1 + argument.start;
+    const end = openIndex + 1 + argument.end;
+    if (character >= start && character <= end) {
+      return {
+        ...argument,
+        start,
+        end,
+        keywordStart: openIndex + 1 + argument.keywordStart,
+        keywordEnd: openIndex + 1 + argument.keywordEnd,
+      };
+    }
+  }
+  return undefined;
+}
+
 function parameterInfoAt(source, lineNumber, character, indexes) {
   const lines = String(source || "").split(/\r?\n/);
   const line = lines[lineNumber] || "";
-  const context = functionCallContextAtLine(line, character);
-  if (!context) {
-    return undefined;
+  for (const context of functionCallContextsAtLine(line, character)) {
+    const closeIndex = context.closeIndex;
+    const item = combinedItem(indexes, context.name);
+    if (!item || !Array.isArray(item.parameters)) {
+      continue;
+    }
+    const parameter = topLevelParameterNameAt(line, character, context.openIndex, closeIndex);
+    if (parameter) {
+      const info = parameterMap(item).get(parameter.name);
+      if (info) {
+        return { item, parameter: info, name: parameter.name, start: parameter.start, end: parameter.end };
+      }
+      continue;
+    }
+    const argument = topLevelArgumentAt(line, character, context.openIndex, closeIndex);
+    if (!argument || argument.keywordName) {
+      continue;
+    }
+    const info = item.parameters[argument.position];
+    if (!info) {
+      continue;
+    }
+    const name = info.pythonName || info.name || info.displayName || "inline argument";
+    return { item, parameter: info, name, start: argument.start, end: argument.end, positional: true };
   }
-  const closeIndex = signatureEnd(line, context.openIndex);
-  const parameter = topLevelParameterNameAt(line, character, context.openIndex, closeIndex);
-  if (!parameter) {
-    return undefined;
-  }
-  const item = combinedItem(indexes, context.name);
-  const info = parameterMap(item).get(parameter.name);
-  return info ? { item, parameter: info, name: parameter.name, start: parameter.start, end: parameter.end } : undefined;
+  return undefined;
 }
 
 module.exports = {

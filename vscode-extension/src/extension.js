@@ -371,8 +371,8 @@ function commandMetadata(item) {
   if (Array.isArray(item.parameters) && item.parameters.length > 0) {
     lines.push("");
     lines.push("Parameters:");
-    for (const parameter of item.parameters.slice(0, 20)) {
-      const parameterName = parameter.pythonName || parameter.name;
+    for (const [index, parameter] of item.parameters.slice(0, 20).entries()) {
+      const parameterName = parameterLabel(parameter, index);
       const label = parameter.displayName ? ` - ${parameter.displayName}` : "";
       const type = parameter.type ? `: \`${parameter.type}\`` : "";
       const defaultValue = parameter.defaultValue ? ` = \`${parameter.defaultValue}\`` : "";
@@ -412,10 +412,12 @@ function commandMetadata(item) {
 
 function parameterMetadata(parameterInfo) {
   const { item, parameter, name } = parameterInfo;
+  const label = parameterLabel(parameter, typeof parameter.positionalIndex === "number" ? parameter.positionalIndex : undefined, name);
   const lines = [
-    `**${name}**`,
+    `**${label}**`,
     "",
     `Parameter of \`${item.pythonName}\``,
+    isInlineParameter(parameter) ? "Call style: positional inline argument" : "",
     parameter.displayName ? `Display: ${parameter.displayName}` : "",
     parameter.type ? `Type: \`${parameter.type}\`` : "",
     parameter.defaultValue ? `Default: \`${parameter.defaultValue}\`` : "",
@@ -436,9 +438,30 @@ function parameterMetadata(parameterInfo) {
   return markdown(lines);
 }
 
+function isInlineParameter(parameter) {
+  return Boolean(parameter && (parameter.inline || parameter.positional || !(parameter.pythonName || parameter.name || parameter.key)));
+}
+
+function parameterLabel(parameter, index = 0, fallback = "") {
+  if (!parameter) {
+    return fallback || `argument ${index + 1}`;
+  }
+  if (isInlineParameter(parameter)) {
+    return parameter.displayName || fallback || "inline argument";
+  }
+  return parameter.pythonName || parameter.name || parameter.key || parameter.displayName || fallback || `argument ${index + 1}`;
+}
+
+function parameterSignatureLabel(parameter, index = 0) {
+  if (isInlineParameter(parameter)) {
+    return parameter.type || parameter.displayName || `argument ${index + 1}`;
+  }
+  return `${parameterLabel(parameter, index)}=`;
+}
+
 function commandSignatureLabel(item) {
   const params = Array.isArray(item.parameters) ? item.parameters : [];
-  return `${item.pythonName}(${params.map((param) => `${param.pythonName || param.name}=`).join(", ")})`;
+  return `${item.pythonName}(${params.map((param, index) => parameterSignatureLabel(param, index)).join(", ")})`;
 }
 
 function snippetPlaceholder(index, value) {
@@ -457,8 +480,12 @@ function parameterSnippetValue(parameter) {
 
 function callArgumentsSnippet(parameters, startIndex = 1) {
   return (parameters || []).map((parameter, offset) => {
+    const value = snippetPlaceholder(startIndex + offset, parameterSnippetValue(parameter));
+    if (isInlineParameter(parameter)) {
+      return value;
+    }
     const name = parameter.pythonName || parameter.key || `value${offset + 1}`;
-    return `${name}=${snippetPlaceholder(startIndex + offset, parameterSnippetValue(parameter))}`;
+    return `${name}=${value}`;
   }).join(", ");
 }
 
@@ -498,7 +525,13 @@ function plainArgumentValue(parameter) {
 
 function nativeToolPlainText(item) {
   const args = (Array.isArray(item.parameters) ? item.parameters : [])
-    .map((parameter) => `${parameter.pythonName || parameter.name}=${plainArgumentValue(parameter)}`)
+    .map((parameter, index) => {
+      const value = plainArgumentValue(parameter);
+      if (isInlineParameter(parameter)) {
+        return value;
+      }
+      return `${parameterLabel(parameter, index)}=${value}`;
+    })
     .join(", ");
   if (item.kind === "trigger" || item.searchKind === "trigger") {
     return `@${item.pythonName}(${args})\n`;
@@ -1449,16 +1482,17 @@ function provideShortcutSignatureHelp(document, position) {
     return undefined;
   }
   const signature = new vscode.SignatureInformation(commandSignatureLabel(item), commandMetadata(item));
-  signature.parameters = item.parameters.map((parameter) => {
-    const parameterName = parameter.pythonName || parameter.name;
+  signature.parameters = item.parameters.map((parameter, index) => {
+    const parameterName = parameterLabel(parameter, index);
     const markdown = new vscode.MarkdownString([
       `\`${parameterName}\``,
+      isInlineParameter(parameter) ? "Call style: positional inline argument" : "",
       parameter.displayName ? `Display: ${parameter.displayName}` : "",
       parameter.type ? `Type: \`${parameter.type}\`` : "",
       parameter.defaultValue ? `Default: \`${parameter.defaultValue}\`` : "",
       parameter.doc || parameter.summary || "",
     ].filter(Boolean).join("\n\n"));
-    return new vscode.ParameterInformation(`${parameterName}=`, markdown);
+    return new vscode.ParameterInformation(parameterSignatureLabel(parameter, index), markdown);
   });
   const help = new vscode.SignatureHelp();
   help.signatures = [signature];
