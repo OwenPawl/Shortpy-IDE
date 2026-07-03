@@ -10,6 +10,7 @@ const {
   ensureBridgeLaunched,
   normalizeOptions,
   resolveBridgeRuntime,
+  runBridgeCommand,
   versionedStorageBridgeRoot,
 } = require("../src/bridge");
 
@@ -163,6 +164,42 @@ print(json.dumps(out))
   assert.deepStrictEqual(names.Types, ["App", "App"]);
 }
 
+async function testValidationBridgeArgs(temp) {
+  const bridgeRoot = path.join(temp, "validation-bridge");
+  const argsFile = path.join(temp, "validation-args.json");
+  const inputFile = path.join(temp, "validation-input.txt");
+  await fs.mkdir(path.join(bridgeRoot, "tools"), { recursive: true });
+  await writeExecutable(path.join(bridgeRoot, "tools", "bridgectl.py"), `#!/usr/bin/env python3
+import json, pathlib, sys
+pathlib.Path(${JSON.stringify(argsFile)}).write_text(json.dumps(sys.argv))
+payload = pathlib.Path(sys.argv[sys.argv.index("--file") + 1]).read_text()
+pathlib.Path(${JSON.stringify(inputFile)}).write_text(payload)
+print(json.dumps({
+  "ok": True,
+  "mode": "python-to-workflow-file-data",
+  "plist_payload": {
+    "encoding": "base64",
+    "data": "YnBsaXN0MDA="
+  },
+  "plist_summary": {
+    "WFWorkflowActions_count": 1
+  }
+}))
+`);
+  await runBridgeCommand("python-to-bplist", "def shortcut() -> None:\n    pass\n", {
+    bridgeCtlPath: path.join(bridgeRoot, "tools", "bridgectl.py"),
+    pythonPath: "python3",
+    socket: "auto",
+    signShortcut: false,
+    shortcutSigningMode: "anyone",
+    bridgeCommandTimeoutMs: 1000,
+  });
+  const argv = JSON.parse(await fs.readFile(argsFile, "utf8"));
+  assert(argv.includes("--no-sign"), "validation compile should pass --no-sign");
+  assert(argv.includes("--sign-mode"), "sign mode remains explicit for CLI compatibility");
+  assert.strictEqual(await fs.readFile(inputFile, "utf8"), "def shortcut() -> None:\n    pass\n");
+}
+
 async function main() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "shortpy-bridge-test-"));
   try {
@@ -227,6 +264,7 @@ async function main() {
     assert(progressKinds.includes("launching"), "launch should report launching progress");
 
     await testToolkitDuplicateRewrite(temp);
+    await testValidationBridgeArgs(temp);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

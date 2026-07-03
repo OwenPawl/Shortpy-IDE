@@ -1129,7 +1129,16 @@ async function writeSiblingRuntimePlistFromPython(collection) {
 
 async function validatePython(collection) {
   const editor = activeEditorOrThrow();
-  const response = await compilePythonDocument(editor.document, selectedOrFullText(editor), collection);
+  let response;
+  try {
+    response = await compilePythonDocument(editor.document, editor.document.getText(), collection);
+  } catch (error) {
+    if (error && error.bridgeResponse) {
+      vscode.window.showWarningMessage("Shortcuts Python has validation diagnostics. See Problems for details.");
+      return;
+    }
+    throw error;
+  }
   const count = response.plist_summary && response.plist_summary.WFWorkflowActions_count;
   vscode.window.showInformationMessage(`Shortcuts Python is valid${Number.isInteger(count) ? ` (${count} actions)` : ""}.`);
 }
@@ -1870,7 +1879,14 @@ class WorkflowPythonCustomEditorProvider {
       await ensureImported({ editorOptions: { preserveFocus: true } });
       const pyDocument = await pythonDocument();
       await showWorkflowPythonEditor(session, { preserveFocus: true });
-      return compilePythonDocument(pyDocument, pyDocument.getText(), this.runtimeDiagnosticsCollection);
+      try {
+        return await compilePythonDocument(pyDocument, pyDocument.getText(), this.runtimeDiagnosticsCollection);
+      } catch (error) {
+        if (error && error.bridgeResponse) {
+          return undefined;
+        }
+        throw error;
+      }
     };
 
     webview.onDidReceiveMessage(async (message) => {
