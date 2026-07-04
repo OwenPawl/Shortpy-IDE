@@ -2,7 +2,7 @@
 
 ## Implemented
 
-- Simulator bridge uses the standard `visibleForShortcuts` filter; selected ToolKit sqlite rows are adjusted in place so DB-present actions have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) bits.
+- Simulator bridge uses the standard `visibleForShortcuts` filter; after Shortcuts launch-time ToolKit indexing settles, selected ToolKit sqlite rows are copied into an adjusted prepared sqlite so DB-present actions have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) bits, then the simulator's resolved `Tools-active` target file is backed up, replaced, and WAL-primed.
 - Production `python-to-bplist` uses the native whole-workflow record serializer:
   `ShortcutsLanguage.pythonToShortcut -> WFWorkflow.saveToRecord -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:`.
 - Host-side `python-to-bplist` signs `.shortcut` output by default with macOS `shortcuts sign --mode anyone` while preserving the unsigned `plist_payload`.

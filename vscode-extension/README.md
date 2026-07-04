@@ -18,7 +18,7 @@ Commands:
 - `Shortcuts IDE: Retrieve Relevant Actions` searches Apple's native ToolRenderer action definitions.
 - `Shortcuts IDE: Retrieve Relevant Triggers` searches Apple's native ToolRenderer trigger decorators.
 - `Shortcuts IDE: Refresh ToolRenderer Metadata` refreshes the cached ToolRenderer metadata used by hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics.
-- `Shortcuts IDE: Load ToolKit SQLite` selects the ToolKit sqlite used as the bridge/compiler source of truth, backs it up, rewrites duplicate action/trigger Python names in place, sets ToolRenderer `visibleForShortcuts` and `approved` bits, points Simulator Shortcuts at it, relaunches Shortcuts, and refreshes visible metadata.
+- `Shortcuts IDE: Load ToolKit SQLite` selects the ToolKit sqlite used as the bridge/compiler source of truth, relaunches Shortcuts, waits for launch-time ToolKit indexing to settle, creates an adjusted copy, rewrites duplicate action/trigger Python names in that copy, sets ToolRenderer `visibleForShortcuts` and `approved` bits, backs up the simulator's resolved `Tools-active` target, replaces that target file, primes the WAL database, and refreshes visible metadata.
 - `Shortcuts IDE: Python To Plist Debug JSON` opens a diagnostic summary without embedding the binary plist payload.
 
 Prerequisites:
@@ -40,7 +40,7 @@ Useful settings:
 - `shortcutsRuntimeIDE.signShortcutExports`: sign `.shortcut` exports with macOS `shortcuts sign`; enabled by default.
 - `shortcutsRuntimeIDE.shortcutSigningMode`: signing mode for `.shortcut` exports; default `anyone`.
 - `shortcutsRuntimeIDE.shortcutsCliPath`: path to the macOS `shortcuts` CLI; default `/usr/bin/shortcuts`.
-- `shortcutsRuntimeIDE.toolkitSqlitePath`: ToolKit sqlite used by the bridge/compiler source-of-truth layer. Empty uses `~/Library/Shortcuts/ToolKit/Tools-active`.
+- `shortcutsRuntimeIDE.toolkitSqlitePath`: ToolKit sqlite used to prepare the simulator bridge/compiler ToolKit target. Empty uses `~/Library/Shortcuts/ToolKit/Tools-active`.
 - `shortcutsRuntimeIDE.toolRendererMetadataPath`: optional path to cached ToolRenderer metadata. The default is extension global storage.
 - `shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation`: rebuild the visible metadata cache from the cached ToolRenderer interface at activation. Live native ToolRenderer refresh is explicit because it can occupy the simulator bridge for a long time.
 - `shortcutsRuntimeIDE.bridgeCommandTimeoutMs`, `shortcutsRuntimeIDE.bridgeMetadataTimeoutMs`, `shortcutsRuntimeIDE.bridgeStatusTimeoutMs`: bound bridge subprocesses so validation/import/status failures return to the UI instead of hanging indefinitely. Metadata refresh defaults to a longer timeout because native ToolRenderer output is large after widening visibility.
@@ -61,6 +61,6 @@ Visible commands are defined in `src/commandRegistry.js`. The package prepublish
 
 ToolRenderer definitions are the visible action/trigger/type source. The extension uses the cached ToolRenderer index for hovers, completions, signature help, command highlighting, action/trigger search, and static Shortpy diagnostics without waiting on the bridge after activation. If no cache exists and the bridge is unavailable, refresh ToolRenderer metadata once while the simulator bridge is running.
 
-ToolKit sqlite data is not surfaced directly in VS Code hovers, completions, or diagnostics. The selected sqlite supplies Python names where ToolRenderer needs disambiguation and is also the compiler source of truth after duplicate names and ToolRenderer visibility/approval bits are adjusted in place. It remains an internal temporary bridge fallback for catalog host/key binding during inline parameter-state compilation until native ToolRenderer/metadata-provider binding extraction replaces it. The static checker only validates action/trigger names and their top-level keyword parameters; nested payload fields are left to Apple's runtime diagnostics.
+ToolKit sqlite data is not surfaced directly in VS Code hovers, completions, or diagnostics. The selected sqlite supplies Python names where ToolRenderer needs disambiguation and becomes the simulator compiler source after the bridge waits for launch-time indexing, creates an adjusted copy, replaces the native `Tools-active` target file, and primes the WAL database. It remains an internal temporary bridge fallback for catalog host/key binding during inline parameter-state compilation until native ToolRenderer/metadata-provider binding extraction replaces it. The static checker only validates action/trigger names and their top-level keyword parameters; nested payload fields are left to Apple's runtime diagnostics.
 
 License: MIT. Shortpy IDE is an independent implementation and integration layer, is not affiliated with Apple or Microsoft, does not include or license Apple or Microsoft software, and does not warrant that private Apple runtime surfaces will continue to work. See `LICENSE.txt`.

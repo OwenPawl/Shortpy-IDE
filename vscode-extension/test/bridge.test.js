@@ -175,6 +175,65 @@ print(json.dumps(out))
   assert.deepStrictEqual(names.Types, ["App", "App"]);
 }
 
+async function testToolkitActivateReplacesActiveTarget(temp) {
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const toolkitCtl = path.join(repoRoot, "bridge", "tools", "toolkitctl.py");
+  const home = path.join(temp, "fake-home");
+  const device = "FAKE-DEVICE";
+  const toolkitDir = path.join(home, "Library", "Developer", "CoreSimulator", "Devices", device, "data", "Library", "Shortcuts", "ToolKit");
+  const target = path.join(toolkitDir, "Tools-prod.v78-native.sqlite");
+  const active = path.join(toolkitDir, "Tools-active");
+  const source = path.join(temp, "selected-toolkit.sqlite");
+  await fs.mkdir(toolkitDir, { recursive: true });
+  await execFile("python3", ["-c", `
+import sqlite3, sys
+target, source = sys.argv[1:3]
+for path, rows in [
+    (target, [(1, 'native.one', 'native_one', 7)]),
+    (source, [
+        (1, 'com.apple.shortcuts.OpenAppIntent', 'open_app', 0),
+        (2, 'com.apple.mobiletimer.OpenAppIntent', 'open_app', 3),
+    ]),
+]:
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+    CREATE TABLE Tools (rowId INTEGER PRIMARY KEY, id TEXT, pythonName TEXT, visibilityFlags INTEGER);
+    CREATE TABLE Triggers (rowId INTEGER PRIMARY KEY, id TEXT, pythonName TEXT);
+    """)
+    conn.executemany("INSERT INTO Tools VALUES (?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+`, target, source]);
+  await fs.symlink(target, active);
+  const env = { ...process.env, HOME: home };
+  const raw = await execFile("python3", [toolkitCtl, "--device", device, "activate", "--sqlite", source], { env });
+  const payload = JSON.parse(raw);
+  const realTarget = await fs.realpath(target);
+  assert.strictEqual(payload.ok, true);
+  assert.strictEqual(payload.mode, "prepared-copy-replace-active-target");
+  assert.strictEqual(payload.replacement.target.path, realTarget);
+  assert.strictEqual(await fs.readlink(active), target);
+  assert(payload.replacement.backup.path.includes(".shortpy-target-backup-"));
+  const afterRaw = await execFile("python3", ["-c", `
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+print(json.dumps(list(conn.execute("SELECT id, pythonName, visibilityFlags FROM Tools ORDER BY rowId"))))
+`, target]);
+  assert.deepStrictEqual(JSON.parse(afterRaw), [
+    ["com.apple.shortcuts.OpenAppIntent", "com_apple_shortcuts_OpenAppIntent", 5],
+    ["com.apple.mobiletimer.OpenAppIntent", "com_apple_mobiletimer_OpenAppIntent", 7],
+  ]);
+  const restoreRaw = await execFile("python3", [toolkitCtl, "--device", device, "restore"], { env });
+  const restore = JSON.parse(restoreRaw);
+  assert.strictEqual(restore.ok, true);
+  const restoredRaw = await execFile("python3", ["-c", `
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+print(json.dumps(list(conn.execute("SELECT id, pythonName, visibilityFlags FROM Tools ORDER BY rowId"))))
+`, target]);
+  assert.deepStrictEqual(JSON.parse(restoredRaw), [["native.one", "native_one", 7]]);
+}
+
 async function testValidationBridgeArgs(temp) {
   const bridgeRoot = path.join(temp, "validation-bridge");
   const argsFile = path.join(temp, "validation-args.json");
@@ -290,6 +349,7 @@ async function main() {
     assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_SINGLE_SIMULATOR, "0");
 
     await testToolkitDuplicateRewrite(temp);
+    await testToolkitActivateReplacesActiveTarget(temp);
     await testValidationBridgeArgs(temp);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

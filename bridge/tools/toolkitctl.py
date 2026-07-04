@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -323,6 +324,125 @@ def copy_sqlite_database(source: Path, destination: Path) -> None:
             shutil.copy2(sidecar, Path(f"{destination}{suffix}"))
 
 
+def clear_extended_attributes(path: Path) -> list[str]:
+    listing = subprocess.run(
+        ["/usr/bin/xattr", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    names = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    if names:
+        subprocess.run(["/usr/bin/xattr", "-c", str(path)], check=False, capture_output=True)
+    return names
+
+
+def clear_sqlite_sidecars(sqlite_path: Path) -> list[str]:
+    removed = []
+    for suffix in ("-wal", "-shm", ".lock"):
+        sidecar = Path(f"{sqlite_path}{suffix}")
+        if sidecar.exists() or sidecar.is_symlink():
+            sidecar.unlink()
+            removed.append(str(sidecar))
+    return removed
+
+
+def prime_sqlite_database(sqlite_path: Path) -> dict:
+    sql = "PRAGMA journal_mode; PRAGMA wal_checkpoint; PRAGMA integrity_check; PRAGMA user_version;"
+    proc = subprocess.run(
+        ["/usr/bin/sqlite3", str(sqlite_path), sql],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    payload = {
+        "ok": proc.returncode == 0 and "ok" in lines,
+        "returncode": proc.returncode,
+        "stdout": lines,
+        "stderr": proc.stderr.strip(),
+    }
+    if len(lines) >= 1:
+        payload["journal_mode"] = lines[0]
+    if len(lines) >= 2:
+        payload["wal_checkpoint"] = lines[1]
+    if len(lines) >= 3:
+        payload["integrity"] = lines[2]
+    if len(lines) >= 4:
+        try:
+            payload["user_version"] = int(lines[3])
+        except ValueError:
+            payload["user_version"] = lines[3]
+    return payload
+
+
+def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "select 1 from sqlite_master where type='table' and name=? limit 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def preserve_metadata_from_runtime_target(target: Path, runtime_source: Path) -> dict:
+    keys = [
+        "IndexerSource",
+        "LaunchServicesDatabaseVersionKey",
+        "LaunchServicesSnapshotDatabaseVersionKey",
+        "OSVersion",
+        "VersionKey",
+    ]
+    source_conn = sqlite3.connect(str(runtime_source))
+    try:
+        if not sqlite_table_exists(source_conn, "Metadata"):
+            return {
+                "ok": True,
+                "source": target_description(runtime_source),
+                "keys": {},
+                "skipped": True,
+                "reason": "runtime source has no Metadata table",
+            }
+        rows = dict(
+            source_conn.execute(
+                f"select key,value from Metadata where key in ({','.join('?' for _ in keys)})",
+                keys,
+            ).fetchall()
+        )
+    finally:
+        source_conn.close()
+    if not rows:
+        return {
+            "ok": True,
+            "source": target_description(runtime_source),
+            "keys": {},
+            "skipped": True,
+            "reason": "runtime source has none of the preserved Metadata keys",
+        }
+    target_conn = sqlite3.connect(str(target))
+    try:
+        if not sqlite_table_exists(target_conn, "Metadata"):
+            return {
+                "ok": True,
+                "source": target_description(runtime_source),
+                "keys": {},
+                "skipped": True,
+                "reason": "replacement target has no Metadata table",
+            }
+        for key, value in rows.items():
+            target_conn.execute(
+                "insert or replace into Metadata(key,value) values(?,?)",
+                (key, value),
+            )
+        target_conn.commit()
+    finally:
+        target_conn.close()
+    return {
+        "ok": True,
+        "source": target_description(runtime_source),
+        "keys": rows,
+    }
+
+
 def backup_sqlite_database(source: Path, label: str = "shortpy-backup") -> Path:
     resolved = source.expanduser().resolve(strict=True)
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -346,18 +466,20 @@ def needs_toolrenderer_visibility_adjustment(conn: sqlite3.Connection) -> bool:
     return bool(toolrenderer_visibility_rows(conn))
 
 
-def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True) -> dict:
+def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_source: Path | None = None) -> dict:
     source = sqlite_path.expanduser().resolve(strict=True)
+    overlay_path = overlay_source.expanduser().resolve(strict=True) if overlay_source else None
     created_backup: Path | None = None
     conn = sqlite3.connect(str(source))
     try:
         needs_adjustment = has_duplicate_python_names(conn) or needs_toolrenderer_visibility_adjustment(conn)
     finally:
         conn.close()
-    if needs_adjustment and backup:
+    if (needs_adjustment or overlay_path is not None) and backup:
         created_backup = backup_sqlite_database(source)
     conn = sqlite3.connect(str(source))
     try:
+        overlay = overlay_python_names(conn, overlay_path) if overlay_path else None
         adjustment = adjust_duplicate_python_names(conn)
         visibility_adjustment = adjust_toolrenderer_visibility(conn)
         conn.commit()
@@ -367,10 +489,16 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True) -> dict:
         "ok": True,
         "action": "adjust",
         "source": target_description(source),
+        "overlay_source": target_description(overlay_path) if overlay_path else None,
         "backup": target_description(created_backup) if created_backup else None,
+        "python_name_overlay": overlay,
         "duplicate_adjustment": adjustment,
         "toolrenderer_visibility_adjustment": visibility_adjustment,
-        "restart_required": adjustment.get("change_count", 0) > 0 or visibility_adjustment.get("changed_count", 0) > 0,
+        "restart_required": bool(
+            (overlay or {}).get("change_count", 0) > 0
+            or adjustment.get("change_count", 0) > 0
+            or visibility_adjustment.get("changed_count", 0) > 0
+        ),
     }
 
 
@@ -443,6 +571,48 @@ def point_active(device: str, sqlite_path: Path, resolve_target: bool) -> dict:
     }
 
 
+def active_target(device: str) -> Path:
+    active = active_path(device)
+    if not active.exists() and not active.is_symlink():
+        raise RuntimeError(
+            f"simulator Tools-active does not exist yet: {active}. "
+            "Launch Shortcuts once so the native ToolKit target is indexed, then retry."
+        )
+    target = active.resolve(strict=True)
+    if not target.is_file():
+        raise RuntimeError(f"resolved Tools-active target is not a sqlite file: {target}")
+    return target
+
+
+def replace_active_target(device: str, prepared_sqlite: Path) -> dict:
+    active = active_path(device)
+    target = active_target(device)
+    prepared = prepared_sqlite.expanduser().resolve(strict=True)
+    if prepared == target:
+        raise RuntimeError(f"refusing to replace active target with itself: {target}")
+    removed_before = clear_sqlite_sidecars(target)
+    backup = backup_sqlite_database(target, "shortpy-target-backup")
+    shutil.copy2(prepared, target)
+    preserved_metadata = preserve_metadata_from_runtime_target(target, backup)
+    removed_xattrs = clear_extended_attributes(target)
+    sqlite_prime = prime_sqlite_database(target)
+    return {
+        "ok": True,
+        "action": "replace-active-target",
+        "device": resolve_device(device),
+        "active": target_description(active),
+        "target": target_description(target),
+        "prepared": target_description(prepared),
+        "backup": target_description(backup),
+        "removed_sidecars_before": removed_before,
+        "removed_sidecars_after": [],
+        "removed_xattrs": removed_xattrs,
+        "preserved_runtime_metadata": preserved_metadata,
+        "sqlite_prime": sqlite_prime,
+        "restart_required": True,
+    }
+
+
 def adjusted_sqlite_path(path: Path) -> bool:
     text = str(path)
     return ".shortpy-adjusted-" in path.name or "/toolkit-adjusted/" in text
@@ -476,76 +646,189 @@ def simulator_base_sqlite(device: str) -> Path | None:
 
 
 def activate_adjusted(device: str, sqlite_path: Path, out_dir: Path | None, out: Path | None, base: Path | None = None) -> dict:
-    if out or out_dir or base:
-        selected_base = base or simulator_base_sqlite(device)
-        prepared = prepare_adjusted_sqlite(sqlite_path, out, out_dir, selected_base)
-        point = point_active(device, Path(prepared["prepared"]["path"]), True)
-        return {
-            "ok": True,
-            "action": "activate",
-            "mode": "prepared-copy",
-            "device": point["device"],
-            "source": prepared["source"],
-            "base": prepared["base"],
-            "prepared": prepared["prepared"],
-            "python_name_overlay": prepared["python_name_overlay"],
-            "duplicate_adjustment": prepared["duplicate_adjustment"],
-            "toolrenderer_visibility_adjustment": prepared["toolrenderer_visibility_adjustment"],
-            "point": point,
-            "restart_required": True,
-        }
-    adjusted = adjust_sqlite_in_place(sqlite_path)
-    point = point_active(device, Path(adjusted["source"]["path"]), True)
+    prepared_out_dir = out_dir or (toolkit_dir(device) / "ShortpyPrepared")
+    selected_base = base
+    prepared = prepare_adjusted_sqlite(sqlite_path, out, prepared_out_dir, selected_base)
+    replacement = replace_active_target(device, Path(prepared["prepared"]["path"]))
     return {
         "ok": True,
         "action": "activate",
-        "mode": "source-of-truth",
-        "device": point["device"],
-        "source": adjusted["source"],
-        "backup": adjusted["backup"],
-        "duplicate_adjustment": adjusted["duplicate_adjustment"],
-        "toolrenderer_visibility_adjustment": adjusted["toolrenderer_visibility_adjustment"],
-        "point": point,
+        "mode": "prepared-copy-replace-active-target",
+        "device": replacement["device"],
+        "source": prepared["source"],
+        "base": prepared["base"],
+        "prepared": prepared["prepared"],
+        "python_name_overlay": prepared["python_name_overlay"],
+        "duplicate_adjustment": prepared["duplicate_adjustment"],
+        "toolrenderer_visibility_adjustment": prepared["toolrenderer_visibility_adjustment"],
+        "replacement": replacement,
         "restart_required": True,
     }
 
 
+def prime_active(device: str) -> dict:
+    target = active_target(device)
+    return {
+        "ok": True,
+        "action": "prime",
+        "device": resolve_device(device),
+        "target": target_description(target),
+        "sqlite_prime": prime_sqlite_database(target),
+    }
+
+
+def active_database_snapshot(device: str) -> dict:
+    target = active_target(device)
+    stat = target.stat()
+    payload = {
+        "target": target_description(target),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True, timeout=1.0)
+    try:
+        for table, key in (("Tools", "tools"), ("Triggers", "triggers")):
+            if sqlite_table_exists(conn, table):
+                payload[key] = conn.execute(f"select count(*) from {table}").fetchone()[0]
+            else:
+                payload[key] = None
+        if sqlite_table_exists(conn, "Metadata"):
+            payload["metadata"] = dict(
+                conn.execute(
+                    "select key,value from Metadata where key in "
+                    "('OSVersion','LaunchServicesDatabaseVersionKey',"
+                    "'LaunchServicesSnapshotDatabaseVersionKey','VersionKey','IndexerSource')"
+                ).fetchall()
+            )
+        else:
+            payload["metadata"] = {}
+    finally:
+        conn.close()
+    return payload
+
+
+def wait_active_idle(device: str, min_wait: float, stable_seconds: float, timeout: float, interval: float) -> dict:
+    started = time.monotonic()
+    deadline = started + timeout
+    samples: list[dict] = []
+    last_key = None
+    stable_since = None
+    while True:
+        now = time.monotonic()
+        try:
+            snapshot = active_database_snapshot(device)
+            key = (
+                snapshot.get("target", {}).get("path"),
+                snapshot.get("size"),
+                snapshot.get("mtime_ns"),
+                snapshot.get("tools"),
+                snapshot.get("triggers"),
+            )
+            if key == last_key:
+                if stable_since is None:
+                    stable_since = now
+            else:
+                last_key = key
+                stable_since = now
+            snapshot["elapsed_s"] = round(now - started, 3)
+            snapshot["stable_for_s"] = round(now - (stable_since or now), 3)
+            samples.append(snapshot)
+            if (
+                now - started >= min_wait
+                and stable_since is not None
+                and now - stable_since >= stable_seconds
+                and snapshot.get("tools") is not None
+            ):
+                return {
+                    "ok": True,
+                    "action": "wait-idle",
+                    "device": resolve_device(device),
+                    "min_wait_s": min_wait,
+                    "stable_seconds": stable_seconds,
+                    "timeout_s": timeout,
+                    "interval_s": interval,
+                    "elapsed_s": round(now - started, 3),
+                    "snapshot": snapshot,
+                    "sample_count": len(samples),
+                    "samples_tail": samples[-10:],
+                }
+        except Exception as exc:
+            samples.append({"elapsed_s": round(now - started, 3), "error": repr(exc)})
+        if now >= deadline:
+            return {
+                "ok": False,
+                "action": "wait-idle",
+                "device": resolve_device(device),
+                "error": "active ToolKit sqlite did not become idle before timeout",
+                "min_wait_s": min_wait,
+                "stable_seconds": stable_seconds,
+                "timeout_s": timeout,
+                "interval_s": interval,
+                "elapsed_s": round(now - started, 3),
+                "sample_count": len(samples),
+                "samples_tail": samples[-10:],
+            }
+        time.sleep(interval)
+
+
 def restore_active(device: str, backup: Path | None) -> dict:
     active = active_path(device)
+    target = active_target(device)
     if backup is None:
-        backups = sorted(active.parent.glob("Tools-active.backup-*"), key=lambda p: p.name)
-        if not backups:
-            raise RuntimeError(f"no Tools-active.backup-* files found in {active.parent}")
-        backup = backups[-1]
+        target_backups = sorted(target.parent.glob(f"{target.name}.shortpy-target-backup-*"), key=lambda p: p.name)
+        if target_backups:
+            backup = target_backups[-1]
+        else:
+            backups = sorted(active.parent.glob("Tools-active.backup-*"), key=lambda p: p.name)
+            if not backups:
+                raise RuntimeError(f"no Tools-active or target backup files found in {active.parent}")
+            backup = backups[-1]
     if not backup.exists() and not backup.is_symlink():
         raise FileNotFoundError(backup)
-    current_backup = backup_active(active)
-    if active.exists() or active.is_symlink():
-        active.unlink()
     if backup.is_symlink():
+        current_backup = backup_active(active)
+        if active.exists() or active.is_symlink():
+            active.unlink()
         os.symlink(os.readlink(backup), active)
+        restored_target = active.resolve(strict=False)
     else:
-        shutil.copy2(backup, active)
+        current_backup = backup_sqlite_database(target, "shortpy-target-restore-backup")
+        removed_before = clear_sqlite_sidecars(target)
+        shutil.copy2(backup, target)
+        removed_after = clear_sqlite_sidecars(target)
+        restored_target = target
     return {
         "ok": True,
         "action": "restore",
         "device": resolve_device(device),
         "active": target_description(active),
+        "target": target_description(restored_target),
         "restored_from": target_description(backup),
         "previous_active_backup": target_description(current_backup) if current_backup else None,
+        "removed_sidecars_before": removed_before if not backup.is_symlink() else [],
+        "removed_sidecars_after": removed_after if not backup.is_symlink() else [],
         "restart_required": True,
     }
 
 
 def show(device: str) -> dict:
     active = active_path(device)
+    target = active.resolve(strict=False) if active.exists() or active.is_symlink() else None
+    target_backups = []
+    if target:
+        target_backups = [
+            target_description(path)
+            for path in sorted(target.parent.glob(f"{target.name}.shortpy-target-backup-*"))[-10:]
+        ]
     return {
         "ok": True,
         "device": resolve_device(device),
         "toolkit_dir": str(active.parent),
         "active": target_description(active),
+        "target": target_description(target) if target else None,
         "host_active": target_description(HOST_TOOLKIT_ACTIVE),
         "backups": [target_description(path) for path in sorted(active.parent.glob("Tools-active.backup-*"))[-10:]],
+        "target_backups": target_backups,
     }
 
 
@@ -728,13 +1011,21 @@ def main() -> int:
     adjust.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
     adjust.add_argument("--no-backup", action="store_true", help="Do not create a sqlite backup before making changes.")
 
-    activate = sub.add_parser("activate", help="Adjust a sqlite in place and point simulator Tools-active at it.")
+    activate = sub.add_parser("activate", help="Prepare an adjusted sqlite copy and replace the simulator Tools-active target with it.")
     activate.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
     activate.add_argument("--base", type=Path, help="Debug only: base sqlite to copy before overlaying Python names from --sqlite.")
     activate.add_argument("--out", type=Path, help="Debug only: adjusted sqlite output path.")
     activate.add_argument("--out-dir", type=Path, help="Debug only: directory for a generated adjusted sqlite name.")
 
-    restore = sub.add_parser("restore", help="Restore simulator Tools-active from the latest or specified backup.")
+    sub.add_parser("prime", help="Open and checkpoint the active simulator ToolKit sqlite.")
+
+    wait_idle = sub.add_parser("wait-idle", help="Wait until the active simulator ToolKit sqlite stops changing.")
+    wait_idle.add_argument("--min-wait", type=float, default=45.0, help="Minimum seconds to wait before accepting an idle snapshot.")
+    wait_idle.add_argument("--stable-seconds", type=float, default=8.0, help="Seconds the active sqlite snapshot must remain unchanged.")
+    wait_idle.add_argument("--timeout", type=float, default=180.0, help="Maximum seconds to wait.")
+    wait_idle.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds.")
+
+    restore = sub.add_parser("restore", help="Restore simulator Tools-active target from the latest or specified backup.")
     restore.add_argument("--backup", type=Path)
 
     metadata = sub.add_parser("metadata", help="Extract Python names and parameter keys from a ToolKit sqlite.")
@@ -755,6 +1046,10 @@ def main() -> int:
             payload = adjust_sqlite_in_place(args.sqlite, not args.no_backup)
         elif args.command == "activate":
             payload = activate_adjusted(args.device, args.sqlite, args.out_dir, args.out, args.base)
+        elif args.command == "prime":
+            payload = prime_active(args.device)
+        elif args.command == "wait-idle":
+            payload = wait_active_idle(args.device, args.min_wait, args.stable_seconds, args.timeout, args.interval)
         elif args.command == "restore":
             payload = restore_active(args.device, args.backup)
         elif args.command == "metadata":
@@ -778,7 +1073,7 @@ def main() -> int:
         return 1
 
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0
+    return 0 if payload.get("ok", True) else 1
 
 
 if __name__ == "__main__":

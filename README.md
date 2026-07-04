@@ -49,13 +49,15 @@ down other booted iOS simulators.
 The bridge build discovers the installed iOS Simulator runtime at build time
 and prefers iOS 27.0 when present.
 By default the launcher uses `~/Library/Shortcuts/ToolKit/Tools-active` as the
-ToolKit source of truth. On connect it backs up the selected sqlite, rewrites
-duplicate action/trigger Python names in place from their native identifiers,
-sets the ToolRenderer visibility/approval bits, points Simulator
-Shortcuts at that same sqlite, and refreshes bridge metadata.
+ToolKit source of truth. On connect it launches the simulator bridge, waits for
+Shortcuts' launch-time ToolKit indexing to settle, creates an adjusted copy,
+rewrites duplicate action/trigger Python names in that copy from their native
+identifiers, sets the ToolRenderer visibility/approval bits, backs up the
+simulator's resolved `Tools-active` target, replaces that target file with the
+adjusted copy, primes the WAL database, and refreshes bridge metadata.
 Use `Shortcuts IDE: Load ToolKit SQLite` to select a different sqlite; that
-command applies the same in-place name and visibility adjustments and relaunches
-the bridge.
+command applies the same post-index prepared-copy target replacement and
+relaunches the bridge.
 Set `shortcutsRuntimeIDE.openSimulatorOnConnect` when you intentionally want the
 visible Simulator UI, or disable `shortcutsRuntimeIDE.singleSimulatorOnConnect`
 when another booted iOS simulator must stay running.
