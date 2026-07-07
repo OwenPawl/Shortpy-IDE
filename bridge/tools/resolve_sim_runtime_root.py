@@ -178,14 +178,9 @@ def choose_runtime(build=None):
             continue
         framework_score = 1 if has_required_frameworks(runtime_root) else 0
         version = version_tuple(runtime.get("version") or runtime.get("name"))
-        if version[:2] == (27, 0):
-            version_preference = 2
-        elif version and version[0] == 27:
-            version_preference = 1
-        else:
-            version_preference = 0
-        build_score = xcode_build_tuple(runtime_build)
-        candidates.append((framework_score, version_preference, version, build_score, runtime))
+        preferred_major = 1 if version and version[0] == 27 else 0
+        build_score = version_tuple(runtime_build)
+        candidates.append((framework_score, preferred_major, version, build_score, runtime))
     if not candidates:
         available = sorted(
             {

@@ -37,7 +37,7 @@ runtime_build="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin
 runtime_version="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("targetVersion") or "")' <<<"${runtime_json}")"
 runtime_root="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("runtimeRoot") or "")' <<<"${runtime_json}")"
 
-if [[ -n "${runtime_build}" && -n "${runtime_version}" ]]; then
+if [[ -n "${SIM_RUNTIME_BUILD:-}" ]]; then
   sdk_name="iphoneos${runtime_version}"
   echo "shortpy-bridge-stage: selecting simulator runtime ${runtime_build} for ${sdk_name}"
   xcrun simctl runtime match set "${sdk_name}" "${runtime_build}" >/dev/null
@@ -53,12 +53,7 @@ for runtime, devices in data.get("devices", {}).items():
         continue
     version_text = runtime.rsplit(".iOS-", 1)[-1].replace("-", ".")
     version = tuple(int(part) for part in re.findall(r"\d+", version_text))
-    if version[:2] == (27, 0):
-        preferred_runtime = 2
-    elif version and version[0] == 27:
-        preferred_runtime = 1
-    else:
-        preferred_runtime = 0
+    preferred_runtime = 1 if version and version[0] == 27 else 0
     for index, device in enumerate(devices):
         if device.get("isAvailable", True) and device.get("state") == "Booted":
             name = device.get("name", "")
@@ -123,12 +118,7 @@ for runtime, devices in data.get("devices", {}).items():
         continue
     version_text = runtime.rsplit(".iOS-", 1)[-1].replace("-", ".")
     version = tuple(int(part) for part in re.findall(r"\d+", version_text))
-    if version[:2] == (27, 0):
-        preferred_runtime = 2
-    elif version and version[0] == 27:
-        preferred_runtime = 1
-    else:
-        preferred_runtime = 0
+    preferred_runtime = 1 if version and version[0] == 27 else 0
     for index, device in enumerate(devices):
         if not device.get("isAvailable", True):
             continue

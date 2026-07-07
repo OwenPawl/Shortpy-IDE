@@ -54,12 +54,6 @@ ALTERNATIVE_SYMBOL_GROUPS = [
 ]
 
 
-class MissingFrameworkBinary(RuntimeError):
-    def __init__(self, binary):
-        self.binary = binary
-        super().__init__(binary)
-
-
 def run_lines(command):
     try:
         raw = subprocess.check_output(command, text=True, stderr=subprocess.PIPE)
@@ -90,22 +84,8 @@ def framework_symbols(runtime_root, framework_name):
         framework_name,
     )
     if not os.path.exists(binary):
-        raise MissingFrameworkBinary(binary)
+        raise SystemExit(f"Missing private framework binary: {binary}")
     return binary, {normalize_symbol(line) for line in run_lines(["nm", "-gU", binary]) if normalize_symbol(line)}
-
-
-def can_runtime_resolve_missing_framework(runtime_root, framework_name):
-    if framework_name != "ToolKit":
-        return False
-    cache_path = os.path.join(
-        runtime_root,
-        "System",
-        "Library",
-        "Caches",
-        "com.apple.dyld",
-        "dyld_sim_shared_cache_arm64",
-    )
-    return os.path.exists(cache_path)
 
 
 def owning_module(symbol):
@@ -141,24 +121,12 @@ def main():
     framework_cache = {}
     missing = {}
     checked = {}
-    skipped = {}
     for module, symbols in by_module.items():
         if not symbols:
             checked[module] = 0
             continue
         framework = MODULES[module]["framework"]
-        try:
-            binary, exports = framework_symbols(args.runtime_root, framework)
-        except MissingFrameworkBinary as error:
-            if can_runtime_resolve_missing_framework(args.runtime_root, framework):
-                framework_cache[module] = f"{error.binary} (missing; expected dyld-cache runtime resolution)"
-                checked[module] = len(symbols)
-                skipped[module] = {
-                    "reason": "framework binary missing from RuntimeRoot; symbols are left for runtime resolution",
-                    "symbol_count": len(symbols),
-                }
-                continue
-            raise SystemExit(f"Missing private framework binary: {error.binary}") from error
+        binary, exports = framework_symbols(args.runtime_root, framework)
         framework_cache[module] = binary
         absent = [symbol for symbol in symbols if symbol not in exports]
         checked[module] = len(symbols)
@@ -168,10 +136,7 @@ def main():
     for group in ALTERNATIVE_SYMBOL_GROUPS:
         module = group["module"]
         framework = MODULES[module]["framework"]
-        try:
-            binary, exports = framework_symbols(args.runtime_root, framework)
-        except MissingFrameworkBinary as error:
-            raise SystemExit(f"Missing private framework binary: {error.binary}") from error
+        binary, exports = framework_symbols(args.runtime_root, framework)
         framework_cache[module] = binary
         variants = {}
         ok = False
@@ -203,7 +168,6 @@ def main():
         "runtimeRoot": os.path.abspath(args.runtime_root),
         "frameworks": framework_cache,
         "checked": checked,
-        "skipped": skipped,
         "alternatives": alternative_reports,
         "missing": missing,
     }

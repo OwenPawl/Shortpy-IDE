@@ -14,7 +14,6 @@ SIM_IOS_VERSION ?= $(shell $(RUNTIME_RESOLVER) --version)
 TARGET ?= arm64-apple-ios$(SIM_IOS_VERSION)-simulator
 SIM_RUNTIME_ROOT ?= $(shell $(RUNTIME_RESOLVER) --runtime-root)
 PRIVATE_FRAMEWORKS := $(SIM_RUNTIME_ROOT)/System/Library/PrivateFrameworks
-TOOLKIT_LINK_FLAGS := $(shell if [ -f "$(PRIVATE_FRAMEWORKS)/ToolKit.framework/ToolKit" ]; then printf '%s' "-Xlinker -framework -Xlinker ToolKit"; else printf '%s' "-Xlinker -undefined -Xlinker dynamic_lookup"; fi)
 
 DYLIB := $(BUILD_DIR)/libShortcutsIDESimBridge-v019.dylib
 C_BRIDGE := $(BUILD_DIR)/ShortcutsIDESimBridge.o
@@ -28,7 +27,7 @@ PRIVATE_LINK_FLAGS := -Xlinker -F -Xlinker "$(PRIVATE_FRAMEWORKS)" \
 	-Xlinker -framework -Xlinker ShortcutsLanguage \
 	-Xlinker -framework -Xlinker ShortcutsAgent \
 	-Xlinker -framework -Xlinker ToolRenderer \
-	$(TOOLKIT_LINK_FLAGS) \
+	-Xlinker -framework -Xlinker ToolKit \
 	-Xlinker -framework -Xlinker WorkflowKit
 FRAMEWORK_FLAGS := $(PRIVATE_LINK_FLAGS) -framework FoundationModels -framework Foundation
 
