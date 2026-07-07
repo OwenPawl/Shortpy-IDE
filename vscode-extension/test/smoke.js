@@ -196,7 +196,7 @@ async function main() {
     .map((parameter) => parameter.pythonName || parameter.name);
   const thirdPartyShowNotificationParameters = (thirdPartyShowNotification && thirdPartyShowNotification.parameters || [])
     .map((parameter) => parameter.pythonName || parameter.name);
-  const showNotificationLeaksInternalMetadata = Boolean(showNotification && (showNotification.toolkitDisplayName ||
+  const showNotificationLeaksInternalMetadata = Boolean(showNotification && (showNotification.id || showNotification.nativeIdentifier || showNotification.toolkitDisplayName ||
     (showNotification.parameters || []).some((parameter) => parameter.rawKey || parameter.key || parameter.binding || parameter.catalog || parameter.customDescription)));
   const summary = {
     ok: true,
@@ -258,11 +258,10 @@ async function main() {
     has_native_run_surface_case: toolRenderer.byName.has("RunSurface.SHARE_SHEET"),
     has_native_input_fallback_type: toolRenderer.byName.has("InputFallback"),
     has_toolrenderer_definition_blocks:
-      Boolean(showNotification && showNotification.definitionBlock && showNotification.definitionBlock.includes(`def ${showNotification.pythonName}(`)) &&
+      Boolean(openApp && openApp.definitionBlock && openApp.definitionBlock.includes(`def ${openApp.pythonName}(`)) &&
       Boolean(runnable && runnable.definitionBlock && runnable.definitionBlock.includes("def runnable(")),
     sqlite_open_app_name_present: Boolean(openApp && toolRenderer.byName.has(openApp.pythonName)),
     sqlite_open_app_python_name: openApp && openApp.pythonName,
-    sqlite_open_app_definition_missing: Boolean(openApp && openApp.definitionMissing),
     open_app_parameter_doc: openAppParameter && openAppParameter.parameter && openAppParameter.parameter.doc,
     runnable_direct_dependencies: toolRenderer.directDependencies.get("runnable") || [],
     hides_environment_enum_cases: !toolRenderer.byName.has("com_apple_shortcuts_wfapp_in_focus_trigger_wfapp_state.OPENED"),
@@ -348,12 +347,11 @@ async function main() {
       InputFallback: summary.has_native_input_fallback_type,
     })}`);
   }
-  if (!summary.has_toolrenderer_definition_blocks || !summary.sqlite_open_app_name_present || !summary.sqlite_open_app_definition_missing || !summary.runnable_direct_dependencies.includes("RunSurface") || !summary.hides_environment_enum_cases) {
+  if (!summary.has_toolrenderer_definition_blocks || !summary.sqlite_open_app_name_present || !/Query string searches across: name/.test(summary.open_app_parameter_doc || "") || !summary.runnable_direct_dependencies.includes("RunSurface") || !summary.hides_environment_enum_cases) {
     throw new Error(`ToolRenderer hover bundle metadata failed: ${JSON.stringify({
       definitionBlocks: summary.has_toolrenderer_definition_blocks,
       sqliteOpenAppNamePresent: summary.sqlite_open_app_name_present,
       sqliteOpenAppPythonName: summary.sqlite_open_app_python_name,
-      sqliteOpenAppDefinitionMissing: summary.sqlite_open_app_definition_missing,
       openAppParameterDoc: summary.open_app_parameter_doc,
       runnableDependencies: summary.runnable_direct_dependencies,
       hidesEnvironmentEnumCases: summary.hides_environment_enum_cases,

@@ -562,6 +562,8 @@ VISIBLE_TOOLKIT_ITEM_KEYS = {
     "canonicalizedFrom",
     "canonicalizationSource",
     "customDescription",
+    "id",
+    "nativeIdentifier",
     "toolkitDisplayName",
 }
 
@@ -598,6 +600,13 @@ def visible_toolrenderer_item(item: object) -> object:
     return output
 
 
+def item_display_key(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    display = item.get("displayName") or item.get("documentation") or item.get("pythonName") or ""
+    return re.sub(r"\s+", " ", str(display).strip()).lower()
+
+
 def rewrite_def_name(text: object, old_name: str, new_name: str) -> object:
     if not isinstance(text, str) or not old_name or not new_name or old_name == new_name:
         return text
@@ -629,86 +638,175 @@ def current_toolkit_metadata() -> dict:
         return {}
 
 
-def toolkit_items_by_id(kind: str) -> dict[str, dict]:
+def toolkit_groups_by_display(kind: str) -> dict[str, list[dict]]:
     metadata = current_toolkit_metadata()
     items = metadata.get(kind, [])
     if not isinstance(items, list):
         return {}
-    by_id: dict[str, dict] = {}
+    by_display: dict[str, list[dict]] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
-        identifier = item.get("id")
-        python_name = item.get("pythonName")
-        if not isinstance(identifier, str) or not identifier:
+        key = item_display_key(item)
+        if not key:
             continue
-        if not isinstance(python_name, str) or not python_name:
+        by_display.setdefault(key, []).append(item)
+    return by_display
+
+
+def db_python_names_for_group(group: list[dict]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in group:
+        name = item.get("pythonName")
+        if not isinstance(name, str) or not name or name in seen:
             continue
-        by_id[identifier] = item
-    return by_id
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def parameter_name_set(item: dict) -> set[str]:
+    names: set[str] = set()
+    for parameter in item.get("parameters", []) or []:
+        if not isinstance(parameter, dict):
+            continue
+        name = parameter.get("pythonName") or parameter.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def canonical_identifier_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^0-9a-z]+", "_", value.lower()).strip("_")
+
+
+def toolrenderer_template_score(toolkit_item: dict, candidate: dict) -> tuple[int, int, int, int, int]:
+    toolkit_name = toolkit_item.get("pythonName")
+    candidate_name = candidate.get("pythonName")
+    name_match = int(
+        isinstance(toolkit_name, str)
+        and isinstance(candidate_name, str)
+        and toolkit_name == candidate_name
+    )
+    toolkit_identifier = canonical_identifier_text(toolkit_item.get("id"))
+    candidate_identifier = canonical_identifier_text(candidate.get("nativeIdentifier"))
+    identifier_match = int(
+        bool(toolkit_identifier)
+        and bool(candidate_identifier)
+        and toolkit_identifier == candidate_identifier
+    )
+    toolkit_params = parameter_name_set(toolkit_item)
+    candidate_params = parameter_name_set(candidate)
+    overlap = len(toolkit_params & candidate_params)
+    exact = int(bool(toolkit_params) and toolkit_params == candidate_params)
+    count_delta = -abs(len(toolkit_params) - len(candidate_params))
+    return (name_match, identifier_match, exact, overlap, count_delta)
+
+
+def ordered_templates_for_toolkit_group(toolkit_group: list[dict], candidates: list[dict]) -> list[dict]:
+    if not candidates:
+        return []
+    output: list[dict] = []
+    unused = set(range(len(candidates)))
+    for toolkit_item in toolkit_group:
+        ranked = sorted(
+            (
+                (toolrenderer_template_score(toolkit_item, candidates[index]), index)
+                for index in unused
+            ),
+            reverse=True,
+        )
+        if ranked:
+            index = ranked[0][1]
+            unused.discard(index)
+            output.append(candidates[index])
+        else:
+            output.append(candidates[0])
+    return output
 
 
 def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[dict], dict]:
-    toolkit_by_id = toolkit_items_by_id(kind)
-    toolrenderer_by_id: dict[str, dict] = {}
-    toolrenderer_by_name: dict[str, dict | None] = {}
+    by_display: dict[str, list[dict]] = {}
     for item in items:
-        identifier = item.get("nativeIdentifier") or item.get("id")
-        if isinstance(identifier, str) and identifier:
-            toolrenderer_by_id.setdefault(identifier, item)
-        name = item.get("pythonName")
-        if isinstance(name, str) and name:
-            if name in toolrenderer_by_name:
-                toolrenderer_by_name[name] = None
-            else:
-                toolrenderer_by_name[name] = item
+        by_display.setdefault(item_display_key(item), []).append(item)
 
+    toolkit_by_display = toolkit_groups_by_display(kind)
     output: list[dict] = []
-    matched = 0
-    renamed = 0
-    missing_definitions = 0
+    processed_keys: set[str] = set()
+    changed_groups = 0
+    aliases = 0
 
-    for identifier in sorted(toolkit_by_id):
-        toolkit_item = toolkit_by_id[identifier]
-        name = toolkit_item.get("pythonName")
-        if not isinstance(name, str) or not name:
+    for item in items:
+        key = item_display_key(item)
+        if not key:
+            output.append(item)
             continue
-        template = toolrenderer_by_id.get(identifier)
-        match_source = "nativeIdentifier"
-        if not template:
-            by_name = toolrenderer_by_name.get(name)
-            if by_name:
-                template = by_name
-                match_source = "pythonName"
-        if template:
-            clone = clone_toolrenderer_item_with_python_name(template, name)
-            clone["id"] = identifier
-            clone["nativeIdentifier"] = identifier
-            clone["metadataMatchSource"] = match_source
-            output.append(clone)
-            matched += 1
-            if template.get("pythonName") != name:
-                renamed += 1
+        if key in processed_keys:
             continue
-        missing_definitions += 1
-        output.append({
-            "kind": "action" if kind == "actions" else "trigger",
-            "pythonName": name,
-            "nativeIdentifier": identifier,
-            "id": identifier,
-            "displayName": toolkit_item.get("displayName") or name,
-            "summary": toolkit_item.get("summary") or "",
-            "documentation": toolkit_item.get("summary") or "",
-            "parameters": toolkit_item.get("parameters") or [],
-            "source": "sqlite-pythonName",
-            "definitionMissing": True,
-        })
+        processed_keys.add(key)
+        toolkit_group = toolkit_by_display.get(key, [])
+        db_names = db_python_names_for_group(toolkit_group)
+        candidates = by_display.get(key, [])
+        if not db_names:
+            output.extend(candidates)
+            continue
+        db_name_set = set(db_names)
+        matched_names: set[str] = set()
+        matched_candidate_indexes: set[int] = set()
+        clones: list[dict] = []
+        for index, candidate in enumerate(candidates):
+            candidate_name = candidate.get("pythonName")
+            if not isinstance(candidate_name, str) or candidate_name not in db_name_set:
+                continue
+            if candidate_name in matched_names:
+                continue
+            matched_names.add(candidate_name)
+            matched_candidate_indexes.add(index)
+            clones.append(candidate)
+
+        remaining_toolkit_group = [
+            toolkit_item
+            for toolkit_item in toolkit_group
+            if toolkit_item.get("pythonName") in db_name_set - matched_names
+        ]
+        remaining_candidates = [
+            candidate
+            for index, candidate in enumerate(candidates)
+            if index not in matched_candidate_indexes
+        ]
+        templates = ordered_templates_for_toolkit_group(remaining_toolkit_group, remaining_candidates)
+        for index, toolkit_item in enumerate(remaining_toolkit_group):
+            name = toolkit_item.get("pythonName")
+            if not isinstance(name, str) or not name:
+                continue
+            if templates:
+                template = templates[min(index, len(templates) - 1)]
+            elif candidates:
+                template = candidates[0]
+            else:
+                continue
+            clones.append(clone_toolrenderer_item_with_python_name(template, name))
+
+        if not clones:
+            output.extend(candidates)
+            continue
+        changed = len(candidates) != len(clones) or any(
+            candidate.get("pythonName") != clone.get("pythonName")
+            for candidate, clone in zip(candidates, clones)
+        )
+        if changed:
+            changed_groups += 1
+            aliases += len(clones)
+        output.extend(clones)
 
     return output, {
-        "source": "sqlite-pythonName-strict-id-or-exact-name",
-        "matchedDefinitions": matched,
-        "renamedDefinitions": renamed,
-        "missingDefinitions": missing_definitions,
+        "source": "sqlite-pythonName",
+        "groups": changed_groups,
+        "aliases": aliases,
+        "skippedAmbiguousGroups": 0,
     }
 
 
@@ -718,13 +816,13 @@ def canonicalize_toolrenderer_metadata(metadata: dict) -> dict:
     canonical_actions, action_summary = canonicalize_toolrenderer_items(actions, "actions")
     canonical_triggers, trigger_summary = canonicalize_toolrenderer_items(triggers, "triggers")
     summary = {
-        "source": "sqlite-pythonName-strict-id-or-exact-name",
-        "actionMatchedDefinitions": action_summary["matchedDefinitions"],
-        "actionRenamedDefinitions": action_summary["renamedDefinitions"],
-        "actionMissingDefinitions": action_summary["missingDefinitions"],
-        "triggerMatchedDefinitions": trigger_summary["matchedDefinitions"],
-        "triggerRenamedDefinitions": trigger_summary["renamedDefinitions"],
-        "triggerMissingDefinitions": trigger_summary["missingDefinitions"],
+        "source": "sqlite-pythonName",
+        "actionGroups": action_summary["groups"],
+        "actionAliases": action_summary["aliases"],
+        "triggerGroups": trigger_summary["groups"],
+        "triggerAliases": trigger_summary["aliases"],
+        "skippedAmbiguousActionGroups": action_summary["skippedAmbiguousGroups"],
+        "skippedAmbiguousTriggerGroups": trigger_summary["skippedAmbiguousGroups"],
     }
     output = {
         **metadata,
@@ -1105,15 +1203,9 @@ def load_toolkit_metadata() -> dict:
     try:
         selection = json.loads(selection_path.read_text())
         if isinstance(selection, dict):
-            for key in ("target", "active", "prepared", "source"):
+            for key in ("source", "prepared"):
                 section = selection.get(key)
-                path_value = None
-                if isinstance(section, dict):
-                    for path_key in ("resolved", "path"):
-                        value = section.get(path_key)
-                        if isinstance(value, str) and value:
-                            path_value = value
-                            break
+                path_value = section.get("path") if isinstance(section, dict) else None
                 if isinstance(path_value, str) and path_value:
                     selected_sqlite = path_value
                     break
@@ -1188,7 +1280,7 @@ def catalog_parameter_info(action_name: str, parameter_name: str) -> dict | None
     is_picked = "Picked[" in compact
     if not is_resolved and not is_picked:
         return None
-    is_list = bool(re.search(r"(?:^|[\[,])(?:List|ContentCollection|Collection|Set|Sequence)\[(?:Resolved|Picked)\[", compact))
+    is_list = bool(re.search(r"(?:^|[\[,])List\[(?:Resolved|Picked)\[", compact))
     return {
         **info,
         "catalogKind": "picked" if is_picked else "resolved",

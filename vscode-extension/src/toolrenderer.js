@@ -40,6 +40,8 @@ const VISIBLE_ITEM_DENYLIST = new Set([
   "canonicalizedFrom",
   "canonicalizationSource",
   "customDescription",
+  "id",
+  "nativeIdentifier",
   "toolkitDisplayName",
 ]);
 const VISIBLE_PARAMETER_DENYLIST = new Set([
