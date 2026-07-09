@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const {
   indexToolRendererMetadata,
-  isEnvironmentSpecificEnum,
+  isRuntimeSpecificMetadata,
   parseToolRendererInterface,
 } = require("../src/toolrenderer");
 
@@ -33,6 +33,8 @@ def messages_find_conversation(
     : query_com_apple_mobile_sms_conversation_entity,
     sort_by: com_apple_mobile_sms_conversation_entity_wfcontent_item_sort_property,
     limit: Optional[bool] = False,
+    get: Optional[float] = 5,
+    conversation: Optional[com_apple_mobile_sms_conversation_entity_wfcontent_item_input_parameter] = com_apple_mobile_sms_conversation_entity_wfcontent_item_input_parameter.CONVERSATION,
 ) -> com_apple_mobile_sms_conversation_entity:
     """Find Conversation
     Search and filter Messages conversations.
@@ -44,6 +46,8 @@ def messages_find_conversation(
         Conversation: com_apple_mobile_sms_conversation_entity
     """
 query_com_apple_mobile_sms_conversation_entity = Any
+class com_apple_mobile_sms_conversation_entity_wfcontent_item_input_parameter(Enum):
+    CONVERSATION = "CONVERSATION"
 class RunSurface(Enum):
     SHARE_SHEET = "SHARE_SHEET"
     APPLE_WATCH = "APPLE_WATCH"
@@ -77,22 +81,31 @@ assert((index.directDependencies.get("runnable") || []).includes("RunSurface"), 
 
 const findConversation = index.byName.get("messages_find_conversation");
 assert(findConversation, "inline-argument action should be parsed");
-assert.strictEqual(findConversation.parameters.length, 3, "inline parameter should be preserved");
+assert.strictEqual(findConversation.filterActionSurface, "expanded-query", "filter action should be normalized to the compiler/import query surface");
+assert.strictEqual(findConversation.parameters.length, 6, "filter parameters should use the expanded query surface");
 assert.strictEqual(findConversation.parameters[0].pythonName, "query");
-assert.strictEqual(findConversation.parameters[0].inline, true);
-assert.strictEqual(findConversation.parameters[0].type, "query_com_apple_mobile_sms_conversation_entity");
-assert.strictEqual(findConversation.parameters[0].doc, "(query_com_apple_mobile_sms_conversation_entity)");
+assert.strictEqual(findConversation.parameters[0].inline, false);
+assert.strictEqual(findConversation.parameters[0].type, "List[query_com_apple_mobile_sms_conversation_entity]");
+assert.strictEqual(findConversation.parameters[1].pythonName, "query_operator");
+assert.strictEqual(findConversation.parameters[3].pythonName, "query_sort_order");
+assert.strictEqual(findConversation.parameters[4].pythonName, "limit");
+assert.strictEqual(findConversation.parameters[5].pythonName, "scope");
 assert(index.parameterByItemAndName.has("messages_find_conversation.query"), "inline query parameter should be indexed under query=");
+assert(index.parameterByItemAndName.has("messages_find_conversation.get"), "native get alias should be indexed");
+assert(index.parameterByItemAndName.has("messages_find_conversation.conversation"), "native scope alias should be indexed");
 assert((index.directDependencies.get("messages_find_conversation") || []).includes("query_com_apple_mobile_sms_conversation_entity"), "inline parameter type should be indexed as a dependency");
+assert((index.directDependencies.get("messages_find_conversation") || []).includes("QUERY_OPERATOR"), "query operator dependency should be indexed");
+assert(index.byName.has("QUERY_OPERATOR.ANY"), "stable query operator enum cases should be indexed for completion/hover");
 
 const runSurface = index.byName.get("RunSurface");
 assert(runSurface, "RunSurface enum should be indexed");
 assert(index.byName.has("RunSurface.SHARE_SHEET"), "stable enum cases should be indexed for completion/hover");
 
 const dynamicEnum = index.byName.get("com_example_dynamic_choices");
-assert(dynamicEnum, "environment-specific enum type should still be indexed");
-assert(isEnvironmentSpecificEnum(dynamicEnum), "bundle/dynamic enum should be classified as environment-specific");
-assert(!index.byName.has("com_example_dynamic_choices.ONE"), "environment-specific enum cases should not be indexed");
+assert(dynamicEnum, "runtime-shaped enum type should be indexed");
+assert(isRuntimeSpecificMetadata(dynamicEnum), "dynamic enum should be classified for simulator-runtime notices");
+assert(index.byName.has("com_example_dynamic_choices.ONE"), "dynamic enum cases should be indexed for completion/hover");
+assert(index.byName.has("com_apple_mobile_sms_conversation_entity_wfcontent_item_input_parameter.CONVERSATION"), "com_* enum cases should be indexed for completion/hover");
 
 const cachePath = path.join(__dirname, "..", "..", "bridge", "logs", "vscode-extension-toolrenderer-interface.json");
 if (fs.existsSync(cachePath)) {

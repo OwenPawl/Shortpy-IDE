@@ -7,6 +7,7 @@ const os = require("os");
 const path = require("path");
 
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
+const METADATA_MAX_BUFFER = 128 * 1024 * 1024;
 const BRIDGE_DYLIB_RELATIVE_PATH = path.join("build-sim", "libShortcutsIDESimBridge-v019.dylib");
 const BRIDGE_RUNTIME_MARKER = ".shortpy-bridge-runtime.json";
 
@@ -273,7 +274,10 @@ async function runBridgeCommand(command, input, options = {}) {
     const timeoutMs = command.includes("toolrenderer")
       ? config.bridgeMetadataTimeoutMs
       : config.bridgeCommandTimeoutMs;
-    const stdout = await execFile(config.pythonPath, args, { timeoutMs });
+    const maxBuffer = command.includes("toolrenderer")
+      ? METADATA_MAX_BUFFER
+      : DEFAULT_MAX_BUFFER;
+    const stdout = await execFile(config.pythonPath, args, { timeoutMs, maxBuffer });
     let response;
     try {
       response = JSON.parse(stdout);
@@ -300,13 +304,16 @@ async function runBridgeCli(args, options = {}) {
   const timeoutMs = commandName.includes("toolrenderer")
     ? config.bridgeMetadataTimeoutMs
     : config.bridgeCommandTimeoutMs;
+  const maxBuffer = commandName.includes("toolrenderer")
+    ? METADATA_MAX_BUFFER
+    : DEFAULT_MAX_BUFFER;
   const stdout = await execFile(config.pythonPath, [
     config.bridgeCtlPath,
     "--socket",
     config.socket,
     "--raw",
     ...args,
-  ], { timeoutMs });
+  ], { timeoutMs, maxBuffer });
   let response;
   try {
     response = JSON.parse(stdout);

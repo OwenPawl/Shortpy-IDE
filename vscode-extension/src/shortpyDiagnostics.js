@@ -89,6 +89,9 @@ function parameterMap(item) {
       parameter.pythonName,
       parameter.key,
       parameter.name,
+      parameter.rawKey,
+      ...(Array.isArray(parameter.aliases) ? parameter.aliases : []),
+      ...(Array.isArray(parameter.acceptedNames) ? parameter.acceptedNames : []),
     ].filter(Boolean);
     for (const name of names) {
       map.set(name, parameter);

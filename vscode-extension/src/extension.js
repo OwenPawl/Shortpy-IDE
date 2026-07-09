@@ -15,7 +15,7 @@ const {
 const { parseAppleDiagnostic } = require("./diagnostics");
 const {
   indexToolRendererMetadata,
-  isEnvironmentSpecificEnum,
+  isRuntimeSpecificMetadata,
   loadToolRendererMetadata,
   refreshToolRendererMetadata,
   searchToolRendererMetadata,
@@ -296,13 +296,22 @@ function catalogParameterGuidance(type) {
   ].join("\n");
 }
 
+function appendRuntimeSpecificNotice(lines, item) {
+  if (!isRuntimeSpecificMetadata(item)) {
+    return;
+  }
+  lines.push("");
+  lines.push("> This definition is from the current simulator runtime; dynamic cases may differ on another runtime/device.");
+}
+
 function appendTypeMaterial(lines, type, options = {}) {
   if (!type) {
     return;
   }
   lines.push("");
   lines.push(options.heading || `Referenced ${itemKindLabel(type)}: \`${type.pythonName}\``);
-  if (type.definitionBlock && !isEnvironmentSpecificEnum(type)) {
+  appendRuntimeSpecificNotice(lines, type);
+  if (type.definitionBlock) {
     lines.push("");
     lines.push("```python");
     lines.push(type.definitionBlock);
@@ -320,10 +329,7 @@ function appendTypeMaterial(lines, type, options = {}) {
   if (Array.isArray(type.bases) && type.bases.length > 0) {
     lines.push(`Bases: ${type.bases.map((base) => `\`${base}\``).join(", ")}`);
   }
-  if (isEnvironmentSpecificEnum(type)) {
-    lines.push("");
-    lines.push("Cases are environment-specific and are intentionally omitted from the IDE cache.");
-  } else if (Array.isArray(type.cases) && type.cases.length > 0) {
+  if (Array.isArray(type.cases) && type.cases.length > 0) {
       lines.push("");
       lines.push("Cases:");
       for (const entry of type.cases.slice(0, 80)) {
@@ -355,6 +361,7 @@ function commandMetadata(item, options = {}) {
   if (item.startLine) {
     lines.push(`Source line: ${item.startLine}`);
   }
+  appendRuntimeSpecificNotice(lines, item);
   if (!preferExactDefinition && item.returnType) {
     lines.push(`Returns: \`${item.returnType}\``);
   }
@@ -397,10 +404,7 @@ function commandMetadata(item, options = {}) {
       }
     }
   }
-  if (item.kind === "enum" && isEnvironmentSpecificEnum(item)) {
-    lines.push("");
-    lines.push("Cases are environment-specific and are intentionally omitted from the IDE cache.");
-  } else if (Array.isArray(item.cases) && item.cases.length > 0) {
+  if (Array.isArray(item.cases) && item.cases.length > 0) {
     lines.push("");
     lines.push("Cases:");
     for (const entry of item.cases.slice(0, 80)) {
@@ -418,7 +422,7 @@ function commandMetadata(item, options = {}) {
   if (!preferExactDefinition && options.includeReferencedTypes !== false) {
     for (const dependencyName of (toolRendererIndex.directDependencies || new Map()).get(item.pythonName) || []) {
       const type = toolRendererIndex.typeByPythonName && toolRendererIndex.typeByPythonName.get(dependencyName);
-      if (type && !isEnvironmentSpecificEnum(type)) {
+      if (type) {
         appendTypeMaterial(lines, type);
       }
     }
@@ -586,8 +590,8 @@ async function refreshNativeToolRendererInterface(context, announce = true, refr
 
 async function refreshToolMetadata(context, announce = true) {
   const native = await refreshNativeToolRendererInterface(context, false, {
-    live: false,
-    allowLiveFallback: false,
+    live: true,
+    allowLiveFallback: true,
   });
   if (announce) {
     const nativeCounts = native.counts || {};
@@ -1435,14 +1439,12 @@ function provideShortcutCompletions() {
     item.documentation = commandMetadata(type);
     item.sortText = `2_toolrenderer_${type.pythonName}`;
     items.push(item);
-    if (!isEnvironmentSpecificEnum(type)) {
-      for (const enumCase of (type.cases || []).slice(0, 80)) {
-        const caseItem = new vscode.CompletionItem(enumCase.pythonName, vscode.CompletionItemKind.EnumMember);
-        caseItem.detail = `Shortcuts enum case: ${type.pythonName}`;
-        caseItem.documentation = commandMetadata({ ...enumCase, kind: "enumCase", displayName: enumCase.name });
-        caseItem.sortText = `2_case_${enumCase.pythonName}`;
-        items.push(caseItem);
-      }
+    for (const enumCase of (type.cases || []).slice(0, 80)) {
+      const caseItem = new vscode.CompletionItem(enumCase.pythonName, vscode.CompletionItemKind.EnumMember);
+      caseItem.detail = `Shortcuts enum case: ${type.pythonName}`;
+      caseItem.documentation = commandMetadata({ ...enumCase, kind: "enumCase", displayName: enumCase.name });
+      caseItem.sortText = `2_case_${enumCase.pythonName}`;
+      items.push(caseItem);
     }
   }
   return items;

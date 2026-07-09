@@ -55,6 +55,26 @@ const toolRenderer = indexToolRendererMetadata({
         { pythonName: "sort_by" },
       ],
     },
+    {
+      kind: "action",
+      pythonName: "reminders_find_reminders",
+      parameters: [
+        {
+          pythonName: "query",
+          type: "query_com_apple_shortcuts_wfreminder_content_item",
+          inline: true,
+          positional: true,
+        },
+        { pythonName: "sort_by", type: "filter_reminders_wfcontent_item_sort_property" },
+        { pythonName: "limit", type: "Optional[bool]", defaultValue: "False" },
+        { pythonName: "get", type: "Optional[float]", defaultValue: "5" },
+        {
+          pythonName: "reminders",
+          type: "Optional[filter_reminders_wfcontent_item_input_parameter]",
+          defaultValue: "filter_reminders_wfcontent_item_input_parameter.REMINDERS",
+        },
+      ],
+    },
   ],
 });
 const widenedDiagnostics = collectToolRendererDiagnostics(
@@ -82,7 +102,7 @@ const inlineColumn = inlineSource.split(/\r?\n/)[1].indexOf("query") + 2;
 const inlineInfo = parameterInfoAt(inlineSource, 1, inlineColumn, [toolRenderer]);
 assert(inlineInfo, "inline query keyword should resolve to a parameter hover");
 assert.strictEqual(inlineInfo.name, "query");
-assert.strictEqual(inlineInfo.parameter.type, "query_com_apple_mobile_sms_conversation_entity");
+assert.strictEqual(inlineInfo.parameter.type, "List[query_com_apple_mobile_sms_conversation_entity]");
 const sortByColumn = inlineSource.split(/\r?\n/)[1].indexOf("sort_by") + 2;
 const sortByInfo = parameterInfoAt(inlineSource, 1, sortByColumn, [toolRenderer]);
 assert(sortByInfo, "keyword argument should still resolve to a parameter hover");
@@ -90,5 +110,41 @@ assert.strictEqual(sortByInfo.name, "sort_by");
 assert(!collectToolRendererDiagnostics(inlineSource, toolRenderer).some((diagnostic) =>
   diagnostic.code === "unknownShortcutsParameter" && /query/.test(diagnostic.message)
 ), "query= should be accepted for ToolRenderer inline query parameters");
+
+const filterSource = [
+  "def shortcut() -> None:",
+  "    reminders = reminders_find_reminders(query=[reminder_filters.is_completed_equal_to(bool=False)])",
+  "    reminders_find_reminders(query=[reminder_filters.due_date_is_today()], query_operator=QUERY_OPERATOR.ANY, query_sort_order=QUERY_SORT_ORDER.ASCENDING, limit=5, scope=reminders)",
+  "    reminders_find_reminders(query=[reminder_filters.due_date_is_today()], get=5, reminders=reminders)",
+  "",
+].join("\n");
+const filterDiagnostics = collectToolRendererDiagnostics(filterSource, toolRenderer);
+assert(!filterDiagnostics.some((diagnostic) =>
+  diagnostic.code === "unknownShortcutsParameter" &&
+  /query_operator|query_sort_order|limit|scope|get|reminders/.test(diagnostic.message)
+), "expanded filter action parameters and native aliases should be accepted");
+assert(filterDiagnostics.length === 0, `filter source should not produce diagnostics: ${JSON.stringify(filterDiagnostics)}`);
+const scopeColumn = filterSource.split(/\r?\n/)[2].indexOf("scope") + 2;
+const scopeInfo = parameterInfoAt(filterSource, 2, scopeColumn, [toolRenderer]);
+assert(scopeInfo, "expanded filter scope keyword should resolve to a parameter hover");
+assert.strictEqual(scopeInfo.name, "scope");
+assert.strictEqual(scopeInfo.parameter.type, "Optional[filter_reminders_wfcontent_item_input_parameter]");
+const nativeScopeColumn = filterSource.split(/\r?\n/)[3].indexOf("reminders=") + 2;
+const nativeScopeInfo = parameterInfoAt(filterSource, 3, nativeScopeColumn, [toolRenderer]);
+assert(nativeScopeInfo, "native filter scope alias should resolve to the scope parameter hover");
+assert.strictEqual(nativeScopeInfo.parameter.pythonName, "scope");
+
+const builtinsIndex = indexToolRendererMetadata({});
+const builtinSource = [
+  "def shortcut() -> None:",
+  "    reminders_find_reminders(query=[reminder_filters.due_date_less_than(date=shortcuts_builtin_current_date())])",
+  "    com_visible_action(title=f\"{shortcuts_builtin_clipboard()}\")",
+  "",
+].join("\n");
+assert(builtinsIndex.byName.has("shortcuts_builtin_current_date"), "Shortpy builtin current date should be indexed");
+assert(builtinsIndex.byName.has("shortcuts_builtin_clipboard"), "Shortpy builtin clipboard should be indexed");
+assert(!collectToolRendererDiagnostics(builtinSource, [toolRenderer, builtinsIndex]).some((diagnostic) =>
+  diagnostic.code === "unknownShortcutsCommand" && /shortcuts_builtin/.test(diagnostic.message)
+), "Shortpy builtin helpers should not be flagged as unknown actions");
 
 console.log("diagnostics-ok");

@@ -40,8 +40,6 @@ const VISIBLE_ITEM_DENYLIST = new Set([
   "canonicalizedFrom",
   "canonicalizationSource",
   "customDescription",
-  "id",
-  "nativeIdentifier",
   "toolkitDisplayName",
 ]);
 const VISIBLE_PARAMETER_DENYLIST = new Set([
@@ -52,6 +50,420 @@ const VISIBLE_PARAMETER_DENYLIST = new Set([
   "rawKey",
   "sortOrder",
 ]);
+
+const SHORTPY_BUILTIN_HELPERS = [
+  {
+    pythonName: "shortcuts_builtin_ask",
+    displayName: "Ask Each Time",
+    signature: "def shortcuts_builtin_ask(prompt: Optional[str] = None) -> Any:",
+    returnType: "Any",
+    parameters: [
+      {
+        pythonName: "prompt",
+        type: "Optional[str]",
+        defaultValue: "None",
+        doc: "The str used to prompt the user.",
+      },
+    ],
+    documentation: [
+      "Ask Each Time",
+      "Represents a value which will be chosen by the user at runtime.",
+      "The prompt string is shown to the user at runtime to give the user context as they choose a value.",
+      "This function must only be used as a parameter to another function or inside a f-string.",
+      "It can not be used directly in either a variable assignment or a control flow statement.",
+      "The return type is always the type expected by the parameter of the function this value is passed to.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_ask(",
+      "    prompt: Optional[str] = None,",
+      ") -> Any:",
+      "    \"\"\"Ask Each Time",
+      "    Represents a value which will be chosen by the user at runtime.",
+      "    The prompt string is shown to the user at runtime to give the user context as they choose a value.",
+      "    This function must only be used as a parameter to another function or inside a f-string.",
+      "    It can not be used directly in either a variable assignment or a control flow statement.",
+      "",
+      "    The return type is always the type expected by the parameter of the function this value is passed to.",
+      "    Args:",
+      "        prompt: The str used to prompt the user",
+      "    Returns:",
+      "        Any",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+  {
+    pythonName: "shortcuts_builtin_current_date",
+    displayName: "Current Date",
+    signature: "def shortcuts_builtin_current_date() -> DateTime:",
+    returnType: "DateTime",
+    documentation: [
+      "Current Date",
+      "A shortcut can access the current date as a variable.",
+      "Returns the current date.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_current_date() -> DateTime:",
+      "    \"\"\"Current Date",
+      "    A shortcut can access the current date as a variable.",
+      "    Returns the current date.",
+      "    Returns:",
+      "        DateTime",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+  {
+    pythonName: "shortcuts_builtin_current_app",
+    displayName: "Current App",
+    signature: "def shortcuts_builtin_current_app() -> App:",
+    returnType: "App",
+    documentation: [
+      "Current App",
+      "A shortcut can access the current foreground app as a variable.",
+      "Returns the current app that is in the foreground.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_current_app() -> App:",
+      "    \"\"\"Current App",
+      "    A shortcut can access the current foreground app as a variable.",
+      "    Returns the current app that is in the foreground.",
+      "    Returns:",
+      "        App",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+  {
+    pythonName: "shortcuts_builtin_clipboard",
+    displayName: "Clipboard",
+    signature: "def shortcuts_builtin_clipboard() -> str:",
+    returnType: "str",
+    documentation: [
+      "Clipboard",
+      "A shortcut can access the clipboard contents as a variable.",
+      "Returns the clipboard contents.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_clipboard() -> str:",
+      "    \"\"\"Clipboard",
+      "    A shortcut can access the clipboard contents as a variable.",
+      "    Returns the clipboard contents.",
+      "    Returns:",
+      "        str",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+  {
+    pythonName: "shortcuts_builtin_device",
+    displayName: "Device",
+    signature: "def shortcuts_builtin_device() -> getdevicedetails_wfdevice_detail:",
+    returnType: "getdevicedetails_wfdevice_detail",
+    documentation: [
+      "Device",
+      "Returns an object containing details about the current device.",
+      "The object has properties like device type (Phone, Mac, etc.) and OS version.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_device() -> getdevicedetails_wfdevice_detail:",
+      "    \"\"\"Device",
+      "    Returns an object containing details about the current device",
+      "    The object has properties like device type (Phone, Mac, etc.) and OS version.",
+      "    Returns:",
+      "        getdevicedetails_wfdevice_detail",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+  {
+    pythonName: "shortcuts_builtin_choose",
+    displayName: "Choose",
+    signature: "def shortcuts_builtin_choose(prompt: Optional[str] = None) -> str:",
+    returnType: "str",
+    parameters: [
+      {
+        pythonName: "prompt",
+        type: "Optional[str]",
+        defaultValue: "None",
+        doc: "Prompt shown to the user to give them context for their choice.",
+      },
+    ],
+    documentation: [
+      "Choose",
+      "Prompts the user to choose from one of several choices.",
+      "This function is only valid when used in a Python match-case construct.",
+      "The cases are presented to the user as choices.",
+    ].join("\n"),
+    definitionBlock: [
+      "def shortcuts_builtin_choose(",
+      "    prompt: Optional[str] = None,",
+      ") -> str:",
+      "    \"\"\"Choose",
+      "    Prompts the user to choose from one of several choices.",
+      "    This function is only valid when used in a Python match-case construct.",
+      "    The cases are presented to the user as choices.",
+      "    Args:",
+      "        prompt: Prompt shown to the user to give them context for their choice",
+      "    Returns:",
+      "        str",
+      "    \"\"\"",
+    ].join("\n"),
+  },
+].map((item) => ({
+  kind: "helper",
+  source: "shortpy-builtin",
+  ...item,
+}));
+
+const SHORTPY_FILTER_TYPES = [
+  {
+    kind: "enum",
+    pythonName: "QUERY_OPERATOR",
+    displayName: "QUERY_OPERATOR",
+    signature: "class QUERY_OPERATOR(Enum):",
+    bases: ["Enum"],
+    cases: [
+      { name: "ANY", pythonName: "QUERY_OPERATOR.ANY", value: "\"ANY\"" },
+      { name: "ALL", pythonName: "QUERY_OPERATOR.ALL", value: "\"ALL\"" },
+    ],
+    definitionBlock: [
+      "class QUERY_OPERATOR(Enum):",
+      "    ANY = \"ANY\"",
+      "    ALL = \"ALL\"",
+    ].join("\n"),
+    documentation: "Controls whether any or all query filters must match.",
+    source: "Shortpy.NativeToolRendererPrelude",
+  },
+  {
+    kind: "enum",
+    pythonName: "QUERY_SORT_ORDER",
+    displayName: "QUERY_SORT_ORDER",
+    signature: "class QUERY_SORT_ORDER(Enum):",
+    bases: ["Enum"],
+    cases: [
+      { name: "ASCENDING", pythonName: "QUERY_SORT_ORDER.ASCENDING", value: "\"ASCENDING\"" },
+      { name: "DESCENDING", pythonName: "QUERY_SORT_ORDER.DESCENDING", value: "\"DESCENDING\"" },
+    ],
+    definitionBlock: [
+      "class QUERY_SORT_ORDER(Enum):",
+      "    ASCENDING = \"ASCENDING\"",
+      "    DESCENDING = \"DESCENDING\"",
+    ].join("\n"),
+    documentation: "Controls the sort direction for query filter actions.",
+    source: "Shortpy.NativeToolRendererPrelude",
+  },
+];
+
+function uniqueStrings(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    if (Array.isArray(value)) {
+      for (const nested of value) {
+        if (typeof nested === "string" && nested && !seen.has(nested)) {
+          seen.add(nested);
+          out.push(nested);
+        }
+      }
+      continue;
+    }
+    if (typeof value === "string" && value && !seen.has(value)) {
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+function allParameterNames(parameter) {
+  if (!parameter || typeof parameter !== "object") {
+    return [];
+  }
+  return uniqueStrings([
+    parameter.pythonName,
+    parameter.name,
+    parameter.key,
+    parameter.rawKey,
+    parameter.aliases,
+    parameter.acceptedNames,
+  ]);
+}
+
+function optionalType(type) {
+  const clean = String(type || "").trim();
+  if (!clean) {
+    return "";
+  }
+  return /^Optional\[/.test(clean) ? clean : `Optional[${clean}]`;
+}
+
+function isQueryFilterAction(item) {
+  const params = Array.isArray(item && item.parameters) ? item.parameters : [];
+  return params.some((parameter) =>
+    (parameter.pythonName === "query" || parameter.name === "query" || parameter.inline) &&
+    /^query_/.test(String(parameter.type || ""))
+  );
+}
+
+function queryFilterScopeParameter(parameters) {
+  return parameters.find((parameter) => {
+    const name = parameter && parameter.pythonName;
+    const type = String(parameter && parameter.type || "");
+    if (!parameter || ["query", "sort_by", "limit", "get"].includes(name)) {
+      return false;
+    }
+    return /_wfcontent_item_input_parameter\b/.test(type) ||
+      allParameterNames(parameter).includes("WFContentItemInputParameter");
+  });
+}
+
+function queryFilterParameter(parameters, name) {
+  return parameters.find((parameter) => allParameterNames(parameter).includes(name));
+}
+
+function filterDocLines(item, parameters) {
+  const lines = [];
+  const displayName = item.displayName || item.pythonName;
+  if (displayName) {
+    lines.push(displayName);
+  }
+  if (item.summary) {
+    lines.push(item.summary);
+  }
+  if (parameters.length > 0) {
+    lines.push("Args:");
+    for (const parameter of parameters) {
+      const doc = parameter.doc || parameter.summary;
+      lines.push(`${parameter.pythonName}: ${doc || `(${parameter.type || "Any"})`}`);
+    }
+  }
+  if (item.returnDocs || item.returnType) {
+    lines.push("Returns:");
+    lines.push(item.returnDocs || item.returnType);
+  }
+  return lines.filter(Boolean);
+}
+
+function filterSignature(item, parameters) {
+  const returnType = item.returnType || parseReturnType(item.signature || "") || "Any";
+  const lines = [`def ${item.pythonName}(`];
+  for (const parameter of parameters) {
+    const type = parameter.type ? `: ${parameter.type}` : "";
+    const defaultValue = parameter.defaultValue !== undefined && parameter.defaultValue !== null && parameter.defaultValue !== ""
+      ? ` = ${parameter.defaultValue}`
+      : "";
+    lines.push(`    ${parameter.pythonName}${type}${defaultValue},`);
+  }
+  lines.push(`) -> ${returnType}:`);
+  return lines.join("\n");
+}
+
+function filterDefinitionBlock(item, parameters) {
+  const lines = [filterSignature(item, parameters), "    \"\"\""];
+  for (const line of filterDocLines(item, parameters)) {
+    lines.push(`    ${line}`);
+  }
+  lines.push("    \"\"\"");
+  return lines.join("\n");
+}
+
+function normalizeQueryFilterAction(item) {
+  if (!isQueryFilterAction(item)) {
+    return item;
+  }
+  const parameters = Array.isArray(item.parameters) ? item.parameters : [];
+  const query = queryFilterParameter(parameters, "query") || parameters.find((parameter) => /^query_/.test(String(parameter.type || "")));
+  if (!query) {
+    return item;
+  }
+  const sortBy = queryFilterParameter(parameters, "sort_by");
+  const nativeLimit = queryFilterParameter(parameters, "limit");
+  const nativeGet = queryFilterParameter(parameters, "get");
+  const nativeScope = queryFilterScopeParameter(parameters);
+  const queryType = String(query.type || "").trim();
+  const outputParameters = [
+    {
+      ...query,
+      pythonName: "query",
+      name: "query",
+      type: `List[${queryType}]`,
+      defaultValue: undefined,
+      inline: false,
+      positional: false,
+      doc: "The filter conditions.",
+      summary: "The filter conditions.",
+      aliases: uniqueStrings(["query", allParameterNames(query), "WFContentItemFilter"]),
+      acceptedNames: uniqueStrings(["query", allParameterNames(query), "WFContentItemFilter"]),
+    },
+    {
+      pythonName: "query_operator",
+      name: "query_operator",
+      type: "QUERY_OPERATOR",
+      defaultValue: "QUERY_OPERATOR.ALL",
+      doc: "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
+      summary: "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
+      aliases: ["query_operator"],
+      acceptedNames: ["query_operator"],
+    },
+  ];
+  if (sortBy) {
+    outputParameters.push({
+      ...sortBy,
+      pythonName: "sort_by",
+      name: "sort_by",
+      type: optionalType(sortBy.type),
+      defaultValue: "None",
+      inline: false,
+      positional: false,
+      aliases: uniqueStrings(["sort_by", allParameterNames(sortBy)]),
+      acceptedNames: uniqueStrings(["sort_by", allParameterNames(sortBy)]),
+    });
+    outputParameters.push({
+      pythonName: "query_sort_order",
+      name: "query_sort_order",
+      type: "QUERY_SORT_ORDER",
+      defaultValue: "QUERY_SORT_ORDER.ASCENDING",
+      doc: "The sort order of the query.",
+      summary: "The sort order of the query.",
+      aliases: ["query_sort_order"],
+      acceptedNames: ["query_sort_order"],
+    });
+  }
+  outputParameters.push({
+    pythonName: "limit",
+    name: "limit",
+    type: "Optional[int]",
+    defaultValue: "None",
+    doc: (nativeGet && (nativeGet.doc || nativeGet.summary)) || "The maximum number of results.",
+    summary: (nativeGet && (nativeGet.doc || nativeGet.summary)) || "The maximum number of results.",
+    aliases: uniqueStrings(["limit", "get", allParameterNames(nativeLimit), allParameterNames(nativeGet)]),
+    acceptedNames: uniqueStrings(["limit", "get", allParameterNames(nativeLimit), allParameterNames(nativeGet)]),
+  });
+  if (nativeScope) {
+    outputParameters.push({
+      ...nativeScope,
+      pythonName: "scope",
+      name: "scope",
+      type: optionalType(nativeScope.type),
+      defaultValue: "None",
+      inline: false,
+      positional: false,
+      doc: nativeScope.doc || nativeScope.summary || "The scope of the query.",
+      summary: nativeScope.summary || nativeScope.doc || "The scope of the query.",
+      aliases: uniqueStrings(["scope", allParameterNames(nativeScope)]),
+      acceptedNames: uniqueStrings(["scope", allParameterNames(nativeScope)]),
+    });
+  }
+  const docLines = filterDocLines(item, outputParameters);
+  return {
+    ...item,
+    parameters: outputParameters,
+    signature: filterSignature(item, outputParameters),
+    definitionBlock: filterDefinitionBlock(item, outputParameters),
+    documentation: docLines.join("\n"),
+    docString: docLines.join("\n"),
+    docSections: parseDocSections(docLines),
+    nativeDefinitionBlock: item.definitionBlock,
+    nativeSignature: item.signature,
+    filterActionSurface: "expanded-query",
+  };
+}
 
 function splitTopLevelCommas(value) {
   const parts = [];
@@ -439,25 +851,21 @@ function isStableEnumWithCases(itemOrName) {
   return STABLE_ENUMS_WITH_CASES.has(name);
 }
 
-function isEnvironmentSpecificEnum(itemOrName) {
-  const name = typeof itemOrName === "string"
-    ? itemOrName
-    : String(itemOrName && itemOrName.pythonName || "");
-  const lower = name.toLowerCase();
-  if (isStableEnumWithCases(name)) {
-    return false;
+function isRuntimeSpecificMetadata(itemOrName) {
+  if (typeof itemOrName === "string") {
+    return itemOrName.toLowerCase().includes("dynamic");
   }
-  return lower.includes("dynamic") ||
-    lower.startsWith("com_") ||
-    lower.startsWith("query_com_") ||
-    lower.startsWith("org_") ||
-    lower.startsWith("net_") ||
-    lower.startsWith("io_") ||
-    lower.startsWith("app_");
+  const item = itemOrName || {};
+  const haystack = [
+    item.pythonName,
+    item.nativeIdentifier,
+    item.id,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return haystack.includes("dynamic");
 }
 
 function shouldExposeEnumCases(item) {
-  return Boolean(item && item.kind === "enum" && !isEnvironmentSpecificEnum(item));
+  return Boolean(item && item.kind === "enum");
 }
 
 function mergeDocSections(item) {
@@ -691,10 +1099,7 @@ function sanitizeToolRendererItem(item) {
   if (Array.isArray(clean.parameters)) {
     clean.parameters = clean.parameters.map(sanitizeToolRendererParameter);
   }
-  if (clean.kind === "enum" && isEnvironmentSpecificEnum(clean)) {
-    clean.cases = [];
-    clean.environmentSpecificCasesOmitted = true;
-  }
+  Object.assign(clean, normalizeQueryFilterAction(clean));
   return mergeDocSections(clean);
 }
 
@@ -774,10 +1179,21 @@ function indexToolRendererMetadata(metadata) {
   const typeByPythonName = new Map();
   const definitionBlocks = new Map();
   const directDependencies = new Map();
-  const actions = Array.isArray(metadata && metadata.actions) ? metadata.actions : [];
+  const actions = (Array.isArray(metadata && metadata.actions) ? metadata.actions : [])
+    .map(normalizeQueryFilterAction);
   const triggers = Array.isArray(metadata && metadata.triggers) ? metadata.triggers : [];
-  const helpers = Array.isArray(metadata && metadata.helpers) ? metadata.helpers : [];
-  const types = Array.isArray(metadata && metadata.types) ? metadata.types : [];
+  const metadataHelpers = Array.isArray(metadata && metadata.helpers) ? metadata.helpers : [];
+  const helperNames = new Set(metadataHelpers.map((item) => item && item.pythonName).filter(Boolean));
+  const helpers = [
+    ...metadataHelpers,
+    ...SHORTPY_BUILTIN_HELPERS.filter((item) => !helperNames.has(item.pythonName)),
+  ].map(normalizeQueryFilterAction);
+  const metadataTypes = Array.isArray(metadata && metadata.types) ? metadata.types : [];
+  const metadataTypeNames = new Set(metadataTypes.map((item) => item && item.pythonName).filter(Boolean));
+  const types = [
+    ...metadataTypes,
+    ...SHORTPY_FILTER_TYPES.filter((item) => !metadataTypeNames.has(item.pythonName)),
+  ];
   for (const type of types) {
     if (type && type.pythonName) {
       typeByPythonName.set(type.pythonName, type);
@@ -792,9 +1208,10 @@ function indexToolRendererMetadata(metadata) {
       }
       directDependencies.set(item.pythonName, directDependenciesForItem(item, typeByPythonName));
       for (const parameter of Array.isArray(item.parameters) ? item.parameters : []) {
-        const parameterName = parameter && (parameter.pythonName || parameter.name);
-        if (parameterName) {
-          parameterByItemAndName.set(`${item.pythonName}.${parameterName}`, { item, parameter });
+        for (const parameterName of allParameterNames(parameter)) {
+          if (parameterName) {
+            parameterByItemAndName.set(`${item.pythonName}.${parameterName}`, { item, parameter });
+          }
         }
       }
       if (shouldExposeEnumCases(item)) {
@@ -919,7 +1336,7 @@ function searchToolRendererMetadata(indexOrMetadata, query, kind = "all", limit 
 
 module.exports = {
   indexToolRendererMetadata,
-  isEnvironmentSpecificEnum,
+  isRuntimeSpecificMetadata,
   isStableEnumWithCases,
   loadToolRendererMetadata,
   parseToolRendererInterface,

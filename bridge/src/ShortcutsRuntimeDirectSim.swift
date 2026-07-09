@@ -2278,6 +2278,7 @@ private func toolRendererPythonInterfacePayload() async throws -> [String: Any] 
         "ok": true,
         "mode": "toolrenderer-python-interface",
         "source": "ToolRenderer.pythonInterface(database:filterProvider:parameterMetadataProvider:shims)",
+        "compatibility_shims": "ToolRenderer.CompatibilityShims.defaultNone",
         "toolrenderer_python_interface_symbol": rendered.symbol,
         "toolrenderer_filter_provider_default_symbol": rendered.defaultArgumentSymbol as Any,
         "database_source": "ToolKit.SharedToolDatabaseProvider.shared.database() via x20 thunk shim",

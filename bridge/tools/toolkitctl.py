@@ -211,6 +211,7 @@ def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
     report = {
         "tables": {},
         "change_count": 0,
+        "source_of_truth_change_count": 0,
     }
     for table in ADJUSTABLE_PYTHON_NAME_TABLES:
         if not adjustable_table(conn, table):
@@ -240,14 +241,253 @@ def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
                     "oldPythonName": old_name,
                     "newPythonName": new_name,
                 })
+            row["finalPythonName"] = new_name
+        source_of_truth = apply_duplicate_python_name_source_of_truth(conn, table, duplicate_rows)
         report["tables"][table] = {
             "duplicate_row_count": len(duplicate_rows),
             "changed_count": len(changes),
             "duplicate_row_ids": sorted(duplicate_ids),
             "changes": changes,
+            "source_of_truth": source_of_truth,
         }
         report["change_count"] += len(changes)
+        report["source_of_truth_change_count"] += source_of_truth.get("changed_count", 0)
     return report
+
+
+def update_duplicate_localization_names(
+    conn: sqlite3.Connection,
+    table: str,
+    localization_table: str,
+    foreign_key: str,
+    duplicate_rows: list[dict],
+) -> dict:
+    if not sqlite_table_exists(conn, localization_table):
+        return {
+            "table": localization_table,
+            "changed_count": 0,
+            "changes": [],
+            "skipped": True,
+            "reason": f"{localization_table} table not found",
+        }
+    changes = []
+    conn.row_factory = sqlite3.Row
+    localization_columns = table_columns(conn, localization_table)
+    has_localization_usage = "localizationUsage" in localization_columns
+    selected_columns = f"{foreign_key}, locale, name"
+    order_columns = "locale"
+    if has_localization_usage:
+        selected_columns = f"{foreign_key}, locale, localizationUsage, name"
+        order_columns = "locale, localizationUsage"
+    for row in duplicate_rows:
+        final_name = row.get("finalPythonName") or row.get("pythonName")
+        if not final_name:
+            continue
+        localization_rows = [
+            dict(localized)
+            for localized in conn.execute(
+                f"""
+                SELECT {selected_columns}
+                FROM {localization_table}
+                WHERE {foreign_key} = ? AND name != ?
+                ORDER BY {order_columns}
+                """,
+                (row["rowId"], final_name),
+            )
+        ]
+        for localized in localization_rows:
+            if has_localization_usage:
+                conn.execute(
+                    f"""
+                    UPDATE {localization_table}
+                    SET name = ?
+                    WHERE {foreign_key} = ? AND locale = ? AND localizationUsage = ?
+                    """,
+                    (final_name, row["rowId"], localized["locale"], localized["localizationUsage"]),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    UPDATE {localization_table}
+                    SET name = ?
+                    WHERE {foreign_key} = ? AND locale = ?
+                    """,
+                    (final_name, row["rowId"], localized["locale"]),
+                )
+            changes.append({
+                "rowId": row["rowId"],
+                "id": identifier_text(row["id"]),
+                "table": table,
+                "localizationTable": localization_table,
+                "locale": localized["locale"],
+                "localizationUsage": localized.get("localizationUsage"),
+                "oldName": localized["name"],
+                "newName": final_name,
+            })
+    return {
+        "table": localization_table,
+        "changed_count": len(changes),
+        "changes": changes,
+    }
+
+
+def neutralize_duplicate_tool_source_containers(
+    conn: sqlite3.Connection,
+    duplicate_rows: list[dict],
+) -> dict:
+    if not duplicate_rows:
+        return {
+            "table": "ContainerMetadata",
+            "changed_count": 0,
+            "changes": [],
+            "localization_changed_count": 0,
+            "localization_changes": [],
+        }
+    if "sourceContainerId" not in table_columns(conn, "Tools") or not sqlite_table_exists(conn, "ContainerMetadata"):
+        return {
+            "table": "ContainerMetadata",
+            "changed_count": 0,
+            "changes": [],
+            "localization_changed_count": 0,
+            "localization_changes": [],
+            "skipped": True,
+            "reason": "Tools.sourceContainerId or ContainerMetadata table not found",
+        }
+    row_ids = [row["rowId"] for row in duplicate_rows]
+    placeholders = ",".join("?" for _ in row_ids)
+    conn.row_factory = sqlite3.Row
+    containers = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT
+              cm.rowId,
+              cm.id,
+              cm.bundleVersion,
+              cm.deviceId
+            FROM Tools t
+            JOIN ContainerMetadata cm ON cm.rowId = t.sourceContainerId
+            WHERE t.rowId IN ({placeholders})
+            ORDER BY cm.rowId
+            """,
+            row_ids,
+        )
+    ]
+    changes = []
+    for container in containers:
+        new_bundle_version = f"shortpy-container-{container['rowId']}"
+        if (
+            container.get("id") == ""
+            and container.get("bundleVersion") == new_bundle_version
+            and container.get("deviceId") == ""
+        ):
+            continue
+        conn.execute(
+            """
+            UPDATE ContainerMetadata
+            SET id = '', bundleVersion = ?, deviceId = ''
+            WHERE rowId = ?
+            """,
+            (new_bundle_version, container["rowId"]),
+        )
+        changes.append({
+            "rowId": container["rowId"],
+            "oldId": container["id"],
+            "oldBundleVersion": container["bundleVersion"],
+            "oldDeviceId": container["deviceId"],
+            "newId": "",
+            "newBundleVersion": new_bundle_version,
+            "newDeviceId": "",
+        })
+
+    localization_changes = []
+    if sqlite_table_exists(conn, "ContainerMetadataLocalizations"):
+        container_ids = [container["rowId"] for container in containers]
+        if container_ids:
+            container_placeholders = ",".join("?" for _ in container_ids)
+            localized_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT containerId, locale, name
+                    FROM ContainerMetadataLocalizations
+                    WHERE containerId IN ({container_placeholders}) AND name != ''
+                    ORDER BY containerId, locale
+                    """,
+                    container_ids,
+                )
+            ]
+            for localized in localized_rows:
+                conn.execute(
+                    """
+                    UPDATE ContainerMetadataLocalizations
+                    SET name = ''
+                    WHERE containerId = ? AND locale = ?
+                    """,
+                    (localized["containerId"], localized["locale"]),
+                )
+                localization_changes.append({
+                    "containerId": localized["containerId"],
+                    "locale": localized["locale"],
+                    "oldName": localized["name"],
+                    "newName": "",
+                })
+    return {
+        "table": "ContainerMetadata",
+        "changed_count": len(changes),
+        "changes": changes,
+        "localization_changed_count": len(localization_changes),
+        "localization_changes": localization_changes,
+    }
+
+
+def apply_duplicate_python_name_source_of_truth(
+    conn: sqlite3.Connection,
+    table: str,
+    duplicate_rows: list[dict],
+) -> dict:
+    if not duplicate_rows:
+        return {
+            "changed_count": 0,
+            "display_name_adjustment": {"changed_count": 0, "changes": []},
+            "source_container_adjustment": {"changed_count": 0, "changes": []},
+        }
+    if table == "Tools":
+        display_name_adjustment = update_duplicate_localization_names(
+            conn,
+            table,
+            "ToolLocalizations",
+            "toolId",
+            duplicate_rows,
+        )
+        source_container_adjustment = neutralize_duplicate_tool_source_containers(conn, duplicate_rows)
+    elif table == "Triggers":
+        display_name_adjustment = update_duplicate_localization_names(
+            conn,
+            table,
+            "TriggerLocalizations",
+            "triggerId",
+            duplicate_rows,
+        )
+        source_container_adjustment = {
+            "changed_count": 0,
+            "changes": [],
+            "skipped": True,
+            "reason": "Triggers do not have sourceContainerId",
+        }
+    else:
+        display_name_adjustment = {"changed_count": 0, "changes": [], "skipped": True}
+        source_container_adjustment = {"changed_count": 0, "changes": [], "skipped": True}
+    changed_count = (
+        display_name_adjustment.get("changed_count", 0)
+        + source_container_adjustment.get("changed_count", 0)
+        + source_container_adjustment.get("localization_changed_count", 0)
+    )
+    return {
+        "changed_count": changed_count,
+        "display_name_adjustment": display_name_adjustment,
+        "source_container_adjustment": source_container_adjustment,
+    }
 
 
 def toolrenderer_visibility_rows(conn: sqlite3.Connection) -> list[dict]:
@@ -472,7 +712,10 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
     created_backup: Path | None = None
     conn = sqlite3.connect(str(source))
     try:
-        needs_adjustment = has_duplicate_python_names(conn) or needs_toolrenderer_visibility_adjustment(conn)
+        needs_adjustment = (
+            has_duplicate_python_names(conn)
+            or needs_toolrenderer_visibility_adjustment(conn)
+        )
     finally:
         conn.close()
     if (needs_adjustment or overlay_path is not None) and backup:
@@ -497,6 +740,7 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
         "restart_required": bool(
             (overlay or {}).get("change_count", 0) > 0
             or adjustment.get("change_count", 0) > 0
+            or adjustment.get("source_of_truth_change_count", 0) > 0
             or visibility_adjustment.get("changed_count", 0) > 0
         ),
     }
@@ -993,6 +1237,7 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="Print a compact response when a command also writes an output file.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("show")
+    sub.add_parser("snapshot", help="Inspect the active simulator ToolKit sqlite row counts and metadata.")
 
     point = sub.add_parser("point", help="Point simulator Library/Shortcuts/ToolKit/Tools-active at a sqlite file.")
     point.add_argument("sqlite", type=Path)
@@ -1036,6 +1281,13 @@ def main() -> int:
     try:
         if args.command == "show":
             payload = show(args.device)
+        elif args.command == "snapshot":
+            payload = {
+                "ok": True,
+                "action": "snapshot",
+                "device": resolve_device(args.device),
+                "snapshot": active_database_snapshot(args.device),
+            }
         elif args.command == "point":
             payload = point_active(args.device, args.sqlite, not args.no_resolve)
         elif args.command == "point-host":

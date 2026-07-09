@@ -131,6 +131,28 @@ def print_response(raw: str, pretty: bool) -> None:
         print(raw)
 
 
+def parse_bridge_json_response(raw: str, mode: str) -> dict:
+    if not raw or not raw.strip():
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": f"{mode} returned an empty response from the bridge socket",
+            "error_type": "EmptyBridgeResponse",
+        }
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": f"{mode} returned a non-JSON response from the bridge socket",
+            "error_type": type(exc).__name__,
+            "decode_error": str(exc),
+            "raw_prefix": raw[:500],
+            "raw_length": len(raw),
+        }
+
+
 def parse_toolrenderer_items(source: str) -> list[dict]:
     lines = str(source or "").splitlines()
     items: list[dict] = []
@@ -562,8 +584,6 @@ VISIBLE_TOOLKIT_ITEM_KEYS = {
     "canonicalizedFrom",
     "canonicalizationSource",
     "customDescription",
-    "id",
-    "nativeIdentifier",
     "toolkitDisplayName",
 }
 
@@ -575,6 +595,244 @@ VISIBLE_TOOLKIT_PARAMETER_KEYS = {
     "rawKey",
     "sortOrder",
 }
+
+FILTER_ENUM_TYPES = [
+    {
+        "kind": "enum",
+        "pythonName": "QUERY_OPERATOR",
+        "displayName": "QUERY_OPERATOR",
+        "signature": "class QUERY_OPERATOR(Enum):",
+        "bases": ["Enum"],
+        "cases": [
+            {"name": "ANY", "pythonName": "QUERY_OPERATOR.ANY", "value": '"ANY"'},
+            {"name": "ALL", "pythonName": "QUERY_OPERATOR.ALL", "value": '"ALL"'},
+        ],
+        "definitionBlock": 'class QUERY_OPERATOR(Enum):\n    ANY = "ANY"\n    ALL = "ALL"',
+        "documentation": "Controls whether any or all query filters must match.",
+        "source": "Shortpy.NativeToolRendererPrelude",
+    },
+    {
+        "kind": "enum",
+        "pythonName": "QUERY_SORT_ORDER",
+        "displayName": "QUERY_SORT_ORDER",
+        "signature": "class QUERY_SORT_ORDER(Enum):",
+        "bases": ["Enum"],
+        "cases": [
+            {"name": "ASCENDING", "pythonName": "QUERY_SORT_ORDER.ASCENDING", "value": '"ASCENDING"'},
+            {"name": "DESCENDING", "pythonName": "QUERY_SORT_ORDER.DESCENDING", "value": '"DESCENDING"'},
+        ],
+        "definitionBlock": 'class QUERY_SORT_ORDER(Enum):\n    ASCENDING = "ASCENDING"\n    DESCENDING = "DESCENDING"',
+        "documentation": "Controls the sort direction for query filter actions.",
+        "source": "Shortpy.NativeToolRendererPrelude",
+    },
+]
+
+
+def unique_strings(values: list[object]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, list):
+            iterable = value
+        else:
+            iterable = [value]
+        for item in iterable:
+            if isinstance(item, str) and item and item not in seen:
+                seen.add(item)
+                output.append(item)
+    return output
+
+
+def parameter_names(parameter: object) -> list[str]:
+    if not isinstance(parameter, dict):
+        return []
+    return unique_strings([
+        parameter.get("pythonName"),
+        parameter.get("name"),
+        parameter.get("key"),
+        parameter.get("rawKey"),
+        parameter.get("aliases"),
+        parameter.get("acceptedNames"),
+    ])
+
+
+def optional_type(type_name: object) -> str:
+    clean = str(type_name or "").strip()
+    if not clean:
+        return ""
+    if clean.startswith("Optional["):
+        return clean
+    return f"Optional[{clean}]"
+
+
+def query_filter_parameter(parameters: list[dict], name: str) -> dict | None:
+    for parameter in parameters:
+        if name in parameter_names(parameter):
+            return parameter
+    return None
+
+
+def query_filter_scope_parameter(parameters: list[dict]) -> dict | None:
+    for parameter in parameters:
+        name = parameter.get("pythonName")
+        type_name = str(parameter.get("type") or "")
+        if name in {"query", "sort_by", "limit", "get"}:
+            continue
+        if "_wfcontent_item_input_parameter" in type_name or "WFContentItemInputParameter" in parameter_names(parameter):
+            return parameter
+    return None
+
+
+def is_query_filter_item(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    for parameter in item.get("parameters") or []:
+        if not isinstance(parameter, dict):
+            continue
+        if (parameter.get("pythonName") == "query" or parameter.get("name") == "query" or parameter.get("inline")) and str(parameter.get("type") or "").startswith("query_"):
+            return True
+    return False
+
+
+def filter_doc_lines(item: dict, parameters: list[dict]) -> list[str]:
+    lines: list[str] = []
+    if item.get("displayName") or item.get("pythonName"):
+        lines.append(str(item.get("displayName") or item.get("pythonName")))
+    if item.get("summary"):
+        lines.append(str(item.get("summary")))
+    if parameters:
+        lines.append("Args:")
+        for parameter in parameters:
+            doc = parameter.get("doc") or parameter.get("summary") or f"({parameter.get('type') or 'Any'})"
+            lines.append(f"{parameter.get('pythonName')}: {doc}")
+    if item.get("returnDocs") or item.get("returnType"):
+        lines.append("Returns:")
+        lines.append(str(item.get("returnDocs") or item.get("returnType")))
+    return [line for line in lines if line]
+
+
+def filter_signature(item: dict, parameters: list[dict]) -> str:
+    return_type = item.get("returnType") or parse_return_type(str(item.get("signature") or "")) or "Any"
+    lines = [f"def {item.get('pythonName')}("]
+    for parameter in parameters:
+        type_text = f": {parameter.get('type')}" if parameter.get("type") else ""
+        default_text = ""
+        if parameter.get("defaultValue") not in {None, ""}:
+            default_text = f" = {parameter.get('defaultValue')}"
+        lines.append(f"    {parameter.get('pythonName')}{type_text}{default_text},")
+    lines.append(f") -> {return_type}:")
+    return "\n".join(lines)
+
+
+def filter_definition_block(item: dict, parameters: list[dict]) -> str:
+    lines = [filter_signature(item, parameters), '    """']
+    for line in filter_doc_lines(item, parameters):
+        lines.append(f"    {line}")
+    lines.append('    """')
+    return "\n".join(lines)
+
+
+def normalize_query_filter_item(item: object) -> object:
+    if not is_query_filter_item(item):
+        return item
+    assert isinstance(item, dict)
+    parameters = [parameter for parameter in item.get("parameters") or [] if isinstance(parameter, dict)]
+    query = query_filter_parameter(parameters, "query")
+    if not query:
+        query = next((parameter for parameter in parameters if str(parameter.get("type") or "").startswith("query_")), None)
+    if not query:
+        return item
+    sort_by = query_filter_parameter(parameters, "sort_by")
+    native_limit = query_filter_parameter(parameters, "limit")
+    native_get = query_filter_parameter(parameters, "get")
+    native_scope = query_filter_scope_parameter(parameters)
+    query_type = str(query.get("type") or "").strip()
+    output_parameters: list[dict] = [
+        {
+            **query,
+            "pythonName": "query",
+            "name": "query",
+            "type": f"List[{query_type}]",
+            "defaultValue": None,
+            "inline": False,
+            "positional": False,
+            "doc": "The filter conditions.",
+            "summary": "The filter conditions.",
+            "aliases": unique_strings(["query", parameter_names(query), "WFContentItemFilter"]),
+            "acceptedNames": unique_strings(["query", parameter_names(query), "WFContentItemFilter"]),
+        },
+        {
+            "pythonName": "query_operator",
+            "name": "query_operator",
+            "type": "QUERY_OPERATOR",
+            "defaultValue": "QUERY_OPERATOR.ALL",
+            "doc": "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
+            "summary": "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
+            "aliases": ["query_operator"],
+            "acceptedNames": ["query_operator"],
+        },
+    ]
+    if sort_by:
+        output_parameters.append({
+            **sort_by,
+            "pythonName": "sort_by",
+            "name": "sort_by",
+            "type": optional_type(sort_by.get("type")),
+            "defaultValue": "None",
+            "inline": False,
+            "positional": False,
+            "aliases": unique_strings(["sort_by", parameter_names(sort_by)]),
+            "acceptedNames": unique_strings(["sort_by", parameter_names(sort_by)]),
+        })
+        output_parameters.append({
+            "pythonName": "query_sort_order",
+            "name": "query_sort_order",
+            "type": "QUERY_SORT_ORDER",
+            "defaultValue": "QUERY_SORT_ORDER.ASCENDING",
+            "doc": "The sort order of the query.",
+            "summary": "The sort order of the query.",
+            "aliases": ["query_sort_order"],
+            "acceptedNames": ["query_sort_order"],
+        })
+    limit_doc = (native_get or {}).get("doc") or (native_get or {}).get("summary") or "The maximum number of results."
+    output_parameters.append({
+        "pythonName": "limit",
+        "name": "limit",
+        "type": "Optional[int]",
+        "defaultValue": "None",
+        "doc": limit_doc,
+        "summary": limit_doc,
+        "aliases": unique_strings(["limit", "get", parameter_names(native_limit), parameter_names(native_get)]),
+        "acceptedNames": unique_strings(["limit", "get", parameter_names(native_limit), parameter_names(native_get)]),
+    })
+    if native_scope:
+        scope_doc = native_scope.get("doc") or native_scope.get("summary") or "The scope of the query."
+        output_parameters.append({
+            **native_scope,
+            "pythonName": "scope",
+            "name": "scope",
+            "type": optional_type(native_scope.get("type")),
+            "defaultValue": "None",
+            "inline": False,
+            "positional": False,
+            "doc": scope_doc,
+            "summary": scope_doc,
+            "aliases": unique_strings(["scope", parameter_names(native_scope)]),
+            "acceptedNames": unique_strings(["scope", parameter_names(native_scope)]),
+        })
+    docs = filter_doc_lines(item, output_parameters)
+    return {
+        **item,
+        "parameters": output_parameters,
+        "signature": filter_signature(item, output_parameters),
+        "definitionBlock": filter_definition_block(item, output_parameters),
+        "documentation": "\n".join(docs),
+        "docString": "\n".join(docs),
+        "docSections": parse_doc_sections(docs),
+        "nativeDefinitionBlock": item.get("definitionBlock"),
+        "nativeSignature": item.get("signature"),
+        "filterActionSurface": "expanded-query",
+    }
 
 
 def visible_toolrenderer_parameter(parameter: object) -> object:
@@ -597,14 +855,7 @@ def visible_toolrenderer_item(item: object) -> object:
     }
     if isinstance(output.get("parameters"), list):
         output["parameters"] = [visible_toolrenderer_parameter(parameter) for parameter in output["parameters"]]
-    return output
-
-
-def item_display_key(item: object) -> str:
-    if not isinstance(item, dict):
-        return ""
-    display = item.get("displayName") or item.get("documentation") or item.get("pythonName") or ""
-    return re.sub(r"\s+", " ", str(display).strip()).lower()
+    return normalize_query_filter_item(output)
 
 
 def rewrite_def_name(text: object, old_name: str, new_name: str) -> object:
@@ -638,175 +889,86 @@ def current_toolkit_metadata() -> dict:
         return {}
 
 
-def toolkit_groups_by_display(kind: str) -> dict[str, list[dict]]:
+def toolkit_items_by_id(kind: str) -> dict[str, dict]:
     metadata = current_toolkit_metadata()
     items = metadata.get(kind, [])
     if not isinstance(items, list):
         return {}
-    by_display: dict[str, list[dict]] = {}
+    by_id: dict[str, dict] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
-        key = item_display_key(item)
-        if not key:
+        identifier = item.get("id")
+        python_name = item.get("pythonName")
+        if not isinstance(identifier, str) or not identifier:
             continue
-        by_display.setdefault(key, []).append(item)
-    return by_display
-
-
-def db_python_names_for_group(group: list[dict]) -> list[str]:
-    names: list[str] = []
-    seen: set[str] = set()
-    for item in group:
-        name = item.get("pythonName")
-        if not isinstance(name, str) or not name or name in seen:
+        if not isinstance(python_name, str) or not python_name:
             continue
-        seen.add(name)
-        names.append(name)
-    return names
-
-
-def parameter_name_set(item: dict) -> set[str]:
-    names: set[str] = set()
-    for parameter in item.get("parameters", []) or []:
-        if not isinstance(parameter, dict):
-            continue
-        name = parameter.get("pythonName") or parameter.get("name")
-        if isinstance(name, str) and name:
-            names.add(name)
-    return names
-
-
-def canonical_identifier_text(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    return re.sub(r"[^0-9a-z]+", "_", value.lower()).strip("_")
-
-
-def toolrenderer_template_score(toolkit_item: dict, candidate: dict) -> tuple[int, int, int, int, int]:
-    toolkit_name = toolkit_item.get("pythonName")
-    candidate_name = candidate.get("pythonName")
-    name_match = int(
-        isinstance(toolkit_name, str)
-        and isinstance(candidate_name, str)
-        and toolkit_name == candidate_name
-    )
-    toolkit_identifier = canonical_identifier_text(toolkit_item.get("id"))
-    candidate_identifier = canonical_identifier_text(candidate.get("nativeIdentifier"))
-    identifier_match = int(
-        bool(toolkit_identifier)
-        and bool(candidate_identifier)
-        and toolkit_identifier == candidate_identifier
-    )
-    toolkit_params = parameter_name_set(toolkit_item)
-    candidate_params = parameter_name_set(candidate)
-    overlap = len(toolkit_params & candidate_params)
-    exact = int(bool(toolkit_params) and toolkit_params == candidate_params)
-    count_delta = -abs(len(toolkit_params) - len(candidate_params))
-    return (name_match, identifier_match, exact, overlap, count_delta)
-
-
-def ordered_templates_for_toolkit_group(toolkit_group: list[dict], candidates: list[dict]) -> list[dict]:
-    if not candidates:
-        return []
-    output: list[dict] = []
-    unused = set(range(len(candidates)))
-    for toolkit_item in toolkit_group:
-        ranked = sorted(
-            (
-                (toolrenderer_template_score(toolkit_item, candidates[index]), index)
-                for index in unused
-            ),
-            reverse=True,
-        )
-        if ranked:
-            index = ranked[0][1]
-            unused.discard(index)
-            output.append(candidates[index])
-        else:
-            output.append(candidates[0])
-    return output
+        by_id[identifier] = item
+    return by_id
 
 
 def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[dict], dict]:
-    by_display: dict[str, list[dict]] = {}
+    toolkit_by_id = toolkit_items_by_id(kind)
+    toolrenderer_by_id: dict[str, dict] = {}
+    toolrenderer_by_name: dict[str, dict | None] = {}
     for item in items:
-        by_display.setdefault(item_display_key(item), []).append(item)
-
-    toolkit_by_display = toolkit_groups_by_display(kind)
-    output: list[dict] = []
-    processed_keys: set[str] = set()
-    changed_groups = 0
-    aliases = 0
-
-    for item in items:
-        key = item_display_key(item)
-        if not key:
-            output.append(item)
-            continue
-        if key in processed_keys:
-            continue
-        processed_keys.add(key)
-        toolkit_group = toolkit_by_display.get(key, [])
-        db_names = db_python_names_for_group(toolkit_group)
-        candidates = by_display.get(key, [])
-        if not db_names:
-            output.extend(candidates)
-            continue
-        db_name_set = set(db_names)
-        matched_names: set[str] = set()
-        matched_candidate_indexes: set[int] = set()
-        clones: list[dict] = []
-        for index, candidate in enumerate(candidates):
-            candidate_name = candidate.get("pythonName")
-            if not isinstance(candidate_name, str) or candidate_name not in db_name_set:
-                continue
-            if candidate_name in matched_names:
-                continue
-            matched_names.add(candidate_name)
-            matched_candidate_indexes.add(index)
-            clones.append(candidate)
-
-        remaining_toolkit_group = [
-            toolkit_item
-            for toolkit_item in toolkit_group
-            if toolkit_item.get("pythonName") in db_name_set - matched_names
-        ]
-        remaining_candidates = [
-            candidate
-            for index, candidate in enumerate(candidates)
-            if index not in matched_candidate_indexes
-        ]
-        templates = ordered_templates_for_toolkit_group(remaining_toolkit_group, remaining_candidates)
-        for index, toolkit_item in enumerate(remaining_toolkit_group):
-            name = toolkit_item.get("pythonName")
-            if not isinstance(name, str) or not name:
-                continue
-            if templates:
-                template = templates[min(index, len(templates) - 1)]
-            elif candidates:
-                template = candidates[0]
+        identifier = item.get("nativeIdentifier") or item.get("id")
+        if isinstance(identifier, str) and identifier:
+            toolrenderer_by_id.setdefault(identifier, item)
+        name = item.get("pythonName")
+        if isinstance(name, str) and name:
+            if name in toolrenderer_by_name:
+                toolrenderer_by_name[name] = None
             else:
-                continue
-            clones.append(clone_toolrenderer_item_with_python_name(template, name))
+                toolrenderer_by_name[name] = item
 
-        if not clones:
-            output.extend(candidates)
+    output: list[dict] = []
+    matched = 0
+    renamed = 0
+    missing_definitions = 0
+
+    for identifier in sorted(toolkit_by_id):
+        toolkit_item = toolkit_by_id[identifier]
+        name = toolkit_item.get("pythonName")
+        if not isinstance(name, str) or not name:
             continue
-        changed = len(candidates) != len(clones) or any(
-            candidate.get("pythonName") != clone.get("pythonName")
-            for candidate, clone in zip(candidates, clones)
-        )
-        if changed:
-            changed_groups += 1
-            aliases += len(clones)
-        output.extend(clones)
+        template = toolrenderer_by_id.get(identifier)
+        match_source = "nativeIdentifier"
+        if not template:
+            by_name = toolrenderer_by_name.get(name)
+            if by_name:
+                template = by_name
+                match_source = "pythonName"
+        if template:
+            clone = clone_toolrenderer_item_with_python_name(template, name)
+            clone["id"] = identifier
+            clone["nativeIdentifier"] = identifier
+            clone["metadataMatchSource"] = match_source
+            output.append(clone)
+            matched += 1
+            if template.get("pythonName") != name:
+                renamed += 1
+            continue
+        missing_definitions += 1
+        output.append({
+            "kind": "action" if kind == "actions" else "trigger",
+            "pythonName": name,
+            "nativeIdentifier": identifier,
+            "id": identifier,
+            "displayName": toolkit_item.get("displayName") or name,
+            "summary": toolkit_item.get("summary") or "",
+            "documentation": toolkit_item.get("summary") or "",
+            "parameters": toolkit_item.get("parameters") or [],
+            "source": "sqlite-pythonName",
+            "definitionMissing": True,
+        })
 
     return output, {
-        "source": "sqlite-pythonName",
-        "groups": changed_groups,
-        "aliases": aliases,
-        "skippedAmbiguousGroups": 0,
+        "source": "sqlite-pythonName-strict-id-or-exact-name",
+        "matchedDefinitions": matched,
+        "renamedDefinitions": renamed,
+        "missingDefinitions": missing_definitions,
     }
 
 
@@ -816,13 +978,13 @@ def canonicalize_toolrenderer_metadata(metadata: dict) -> dict:
     canonical_actions, action_summary = canonicalize_toolrenderer_items(actions, "actions")
     canonical_triggers, trigger_summary = canonicalize_toolrenderer_items(triggers, "triggers")
     summary = {
-        "source": "sqlite-pythonName",
-        "actionGroups": action_summary["groups"],
-        "actionAliases": action_summary["aliases"],
-        "triggerGroups": trigger_summary["groups"],
-        "triggerAliases": trigger_summary["aliases"],
-        "skippedAmbiguousActionGroups": action_summary["skippedAmbiguousGroups"],
-        "skippedAmbiguousTriggerGroups": trigger_summary["skippedAmbiguousGroups"],
+        "source": "sqlite-pythonName-strict-id-or-exact-name",
+        "actionMatchedDefinitions": action_summary["matchedDefinitions"],
+        "actionRenamedDefinitions": action_summary["renamedDefinitions"],
+        "actionMissingDefinitions": action_summary["missingDefinitions"],
+        "triggerMatchedDefinitions": trigger_summary["matchedDefinitions"],
+        "triggerRenamedDefinitions": trigger_summary["renamedDefinitions"],
+        "triggerMissingDefinitions": trigger_summary["missingDefinitions"],
     }
     output = {
         **metadata,
@@ -844,6 +1006,10 @@ def visible_toolrenderer_metadata(metadata: dict) -> dict:
     triggers = [visible_toolrenderer_item(item) for item in output.get("triggers", []) or []]
     helpers = [visible_toolrenderer_item(item) for item in output.get("helpers", []) or []]
     types = [visible_toolrenderer_item(item) for item in output.get("types", []) or []]
+    type_names = {item.get("pythonName") for item in types if isinstance(item, dict)}
+    for enum_type in FILTER_ENUM_TYPES:
+        if enum_type["pythonName"] not in type_names:
+            types.append(enum_type)
     output.update({
         "source": "ToolRenderer.pythonInterface",
         "actions": actions,
@@ -921,8 +1087,18 @@ def enrich_toolrenderer_metadata_from_source(metadata: dict, source: str) -> dic
 def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
     response = None
     if refresh:
-        raw = send_command(socket_path, "toolrenderer-structured-metadata")
-        response = json.loads(raw)
+        try:
+            raw = send_command(socket_path, "toolrenderer-structured-metadata")
+            response = parse_bridge_json_response(raw, "toolrenderer-structured-metadata")
+        except OSError as exc:
+            response = {
+                "ok": False,
+                "mode": "toolrenderer-structured-metadata",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        if not response.get("ok"):
+            return response
         if response.get("ok") and response.get("items"):
             return visible_toolrenderer_metadata(
                 enrich_toolrenderer_metadata_from_source(
@@ -1031,7 +1207,7 @@ def load_toolrenderer_items(socket_path: str, refresh: bool) -> tuple[list[dict]
             return cached, f"cached {source}", response
         return [], "live toolrenderer-structured-metadata", response
     raw = send_command(socket_path, "toolrenderer-python-interface")
-    response = json.loads(raw)
+    response = parse_bridge_json_response(raw, "toolrenderer-python-interface")
     if response.get("ok"):
         return parse_toolrenderer_items(response.get("python_interface", "")), "live ToolRenderer.pythonInterface", None
     cached, source = cached_toolrenderer_items()
@@ -1203,9 +1379,15 @@ def load_toolkit_metadata() -> dict:
     try:
         selection = json.loads(selection_path.read_text())
         if isinstance(selection, dict):
-            for key in ("source", "prepared"):
+            for key in ("target", "active", "prepared", "source"):
                 section = selection.get(key)
-                path_value = section.get("path") if isinstance(section, dict) else None
+                path_value = None
+                if isinstance(section, dict):
+                    for path_key in ("resolved", "path"):
+                        value = section.get(path_key)
+                        if isinstance(value, str) and value:
+                            path_value = value
+                            break
                 if isinstance(path_value, str) and path_value:
                     selected_sqlite = path_value
                     break
@@ -1280,7 +1462,7 @@ def catalog_parameter_info(action_name: str, parameter_name: str) -> dict | None
     is_picked = "Picked[" in compact
     if not is_resolved and not is_picked:
         return None
-    is_list = bool(re.search(r"(?:^|[\[,])List\[(?:Resolved|Picked)\[", compact))
+    is_list = bool(re.search(r"(?:^|[\[,])(?:List|ContentCollection|Collection|Set|Sequence)\[(?:Resolved|Picked)\[", compact))
     return {
         **info,
         "catalogKind": "picked" if is_picked else "resolved",
@@ -2104,19 +2286,39 @@ def local_function_names(tree: ast.AST) -> set[str]:
     }
 
 
+def imported_action_call_name(node: ast.AST, locals_: set[str]) -> ast.Name | None:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        return None
+    name = node.func.id
+    if name in locals_ or name in {"ref", "dict", "list", "set", "tuple", "str", "int", "float", "bool"}:
+        return None
+    if name in {"runnable", "input_fallback"} or name.startswith("when_"):
+        return None
+    return node.func
+
+
 def imported_action_call_candidates(tree: ast.AST, locals_: set[str]) -> list[ast.Name]:
     candidates: list[ast.Name] = []
+
+    def visit_statements(statements: object) -> None:
+        if not isinstance(statements, list):
+            return
+        for statement in statements:
+            candidate = None
+            if isinstance(statement, ast.Expr):
+                candidate = imported_action_call_name(statement.value, locals_)
+            elif isinstance(statement, ast.Assign):
+                candidate = imported_action_call_name(statement.value, locals_)
+            elif isinstance(statement, ast.AnnAssign):
+                candidate = imported_action_call_name(statement.value, locals_)
+            if candidate is not None:
+                candidates.append(candidate)
+            for attribute in ("body", "orelse", "finalbody"):
+                visit_statements(getattr(statement, attribute, None))
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-            continue
-        name = node.func.id
-        if name in locals_ or name in {"ref", "dict", "list", "set", "tuple", "str", "int", "float", "bool"}:
-            continue
-        if name in {"runnable", "input_fallback"} or name.startswith("when_"):
-            continue
-        if "_" not in name:
-            continue
-        candidates.append(node.func)
+        if isinstance(node, ast.FunctionDef):
+            visit_statements(node.body)
     return sorted(candidates, key=lambda item: (item.lineno, item.col_offset))
 
 

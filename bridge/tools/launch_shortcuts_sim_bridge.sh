@@ -37,7 +37,7 @@ runtime_build="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin
 runtime_version="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("targetVersion") or "")' <<<"${runtime_json}")"
 runtime_root="$(/usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("runtimeRoot") or "")' <<<"${runtime_json}")"
 
-if [[ -n "${SIM_RUNTIME_BUILD:-}" ]]; then
+if [[ -n "${runtime_build}" && -n "${runtime_version}" ]]; then
   sdk_name="iphoneos${runtime_version}"
   echo "shortpy-bridge-stage: selecting simulator runtime ${runtime_build} for ${sdk_name}"
   xcrun simctl runtime match set "${sdk_name}" "${runtime_build}" >/dev/null
@@ -53,7 +53,12 @@ for runtime, devices in data.get("devices", {}).items():
         continue
     version_text = runtime.rsplit(".iOS-", 1)[-1].replace("-", ".")
     version = tuple(int(part) for part in re.findall(r"\d+", version_text))
-    preferred_runtime = 1 if version and version[0] == 27 else 0
+    if version[:2] == (27, 0):
+        preferred_runtime = 2
+    elif version and version[0] == 27:
+        preferred_runtime = 1
+    else:
+        preferred_runtime = 0
     for index, device in enumerate(devices):
         if device.get("isAvailable", True) and device.get("state") == "Booted":
             name = device.get("name", "")
@@ -118,7 +123,12 @@ for runtime, devices in data.get("devices", {}).items():
         continue
     version_text = runtime.rsplit(".iOS-", 1)[-1].replace("-", ".")
     version = tuple(int(part) for part in re.findall(r"\d+", version_text))
-    preferred_runtime = 1 if version and version[0] == 27 else 0
+    if version[:2] == (27, 0):
+        preferred_runtime = 2
+    elif version and version[0] == 27:
+        preferred_runtime = 1
+    else:
+        preferred_runtime = 0
     for index, device in enumerate(devices):
         if not device.get("isAvailable", True):
             continue
@@ -233,16 +243,28 @@ fi
 
 if [[ "${toolkit_should_activate}" == "1" ]]; then
   toolkit_wait_log="${LOG_DIR}/toolkit-wait-idle-${stamp}.json"
+  toolkit_prelaunch_snapshot_log="${LOG_DIR}/toolkit-prelaunch-snapshot-${stamp}.json"
   min_wait="${SHORTPY_TOOLKIT_POST_LAUNCH_MIN_WAIT_SECONDS:-45}"
   stable_wait="${SHORTPY_TOOLKIT_IDLE_STABLE_SECONDS:-8}"
   idle_timeout="${SHORTPY_TOOLKIT_IDLE_TIMEOUT_SECONDS:-180}"
-  echo "shortpy-bridge-stage: waiting for launch-time ToolKit indexing to settle"
-  if "${ROOT}/tools/toolkitctl.py" --device "${SIM_UDID}" wait-idle --min-wait "${min_wait}" --stable-seconds "${stable_wait}" --timeout "${idle_timeout}" >"${toolkit_wait_log}"; then
-    cp "${toolkit_wait_log}" "${LOG_DIR}/shortpy-toolkit-wait-idle.json"
+  toolkit_wait_needed=1
+  if "${ROOT}/tools/toolkitctl.py" --device "${SIM_UDID}" snapshot >"${toolkit_prelaunch_snapshot_log}" 2>/dev/null; then
+    cp "${toolkit_prelaunch_snapshot_log}" "${LOG_DIR}/shortpy-toolkit-prelaunch-snapshot.json"
+    if /usr/bin/python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); snap=data.get("snapshot",{}); tools=snap.get("tools"); triggers=snap.get("triggers"); raise SystemExit(0 if isinstance(tools,int) and tools > 0 and isinstance(triggers,int) and triggers >= 0 else 1)' "${toolkit_prelaunch_snapshot_log}"; then
+      toolkit_wait_needed=0
+    fi
+  fi
+  if [[ "${toolkit_wait_needed}" == "1" ]]; then
+    echo "shortpy-bridge-stage: waiting for first ToolKit indexing to settle"
+    if "${ROOT}/tools/toolkitctl.py" --device "${SIM_UDID}" wait-idle --min-wait "${min_wait}" --stable-seconds "${stable_wait}" --timeout "${idle_timeout}" >"${toolkit_wait_log}"; then
+      cp "${toolkit_wait_log}" "${LOG_DIR}/shortpy-toolkit-wait-idle.json"
+    else
+      cat "${toolkit_wait_log}" >&2 || true
+      echo "Timed out waiting for ToolKit indexing to settle." >&2
+      exit 1
+    fi
   else
-    cat "${toolkit_wait_log}" >&2 || true
-    echo "Timed out waiting for ToolKit indexing to settle." >&2
-    exit 1
+    echo "shortpy-bridge-stage: skipping ToolKit indexing wait; active ToolKit is already indexed"
   fi
 
   toolkit_args=(--device "${SIM_UDID}" activate)
@@ -253,7 +275,7 @@ if [[ "${toolkit_should_activate}" == "1" ]]; then
   if "${ROOT}/tools/toolkitctl.py" "${toolkit_args[@]}" >"${toolkit_status_log}"; then
     toolkit_activated=1
     cp "${toolkit_status_log}" "${LOG_DIR}/shortpy-toolkit-selection.json"
-    /usr/bin/python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); names=data.get("duplicate_adjustment",{}).get("change_count",0); vis=data.get("toolrenderer_visibility_adjustment",{}).get("changed_count",0); print("shortpy-bridge-stage: toolkit adjusted {} duplicate python names and {} ToolRenderer visibility rows".format(names, vis))' "${toolkit_status_log}"
+    /usr/bin/python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); names=data.get("duplicate_adjustment",{}).get("change_count",0); sot=data.get("duplicate_adjustment",{}).get("source_of_truth_change_count",0); vis=data.get("toolrenderer_visibility_adjustment",{}).get("changed_count",0); print("shortpy-bridge-stage: toolkit adjusted {} duplicate python names, applied {} source-of-truth metadata changes, and patched {} visibility rows".format(names, sot, vis))' "${toolkit_status_log}"
   elif [[ -n "${toolkit_source}" ]]; then
     cat "${toolkit_status_log}" >&2 || true
     echo "Could not activate custom ToolKit sqlite: ${toolkit_source}" >&2
