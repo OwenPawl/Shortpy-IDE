@@ -25,6 +25,7 @@ const {
   collectToolRendererDiagnostics,
   parameterInfoAt,
 } = require("./shortpyDiagnostics");
+const { syncHostShortcut } = require("./hostShortcuts");
 const {
   CUSTOM_EDITOR_VIEW_TYPE,
   VISIBLE_COMMANDS,
@@ -33,6 +34,7 @@ const {
 
 const COMMAND_NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
 const TOOLKIT_SQLITE_STATE_KEY = "shortcutsRuntimeIDE.toolkitSqlitePath";
+const HOST_SHORTCUT_LINKS_STATE_KEY = "shortcutsRuntimeIDE.hostShortcutLinks.v1";
 
 let runtimeLog;
 let toolRendererIndex = indexToolRendererMetadata({});
@@ -80,6 +82,8 @@ function configOptions() {
     validateDebounceMs: Number(config.get("validateDebounceMs")) || 900,
     offerOpenInShortcutsAfterSave: config.get("offerOpenInShortcutsAfterSave") !== false,
     overwriteSiblingShortcut: Boolean(config.get("overwriteSiblingShortcut")),
+    headlessShortcutsPath: config.get("headlessShortcutsPath") || "",
+    hostCommandTimeoutMs: Number(config.get("hostCommandTimeoutMs")) || 120000,
   };
 }
 
@@ -1079,6 +1083,127 @@ async function compilePythonDocument(document, source, collection, bridgeOptions
   }
 }
 
+function hostShortcutLinkKey(document) {
+  const session = workflowSessionForDocument(document);
+  return (session ? session.workflowUri : document.uri).toString();
+}
+
+function suggestedHostShortcutName(document) {
+  const session = workflowSessionForDocument(document);
+  const file = session ? session.workflowUri.fsPath : document.uri.fsPath;
+  return path.basename(file || "Shortpy Shortcut")
+    .replace(/\.shortcuts\.py$/i, "")
+    .replace(/\.(?:shortcut|plist|py)$/i, "") || "Shortpy Shortcut";
+}
+
+function hostShortcutLinks(context) {
+  const value = context.globalState.get(HOST_SHORTCUT_LINKS_STATE_KEY, {});
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+async function ensureBridgeConnectedForHostSync() {
+  try {
+    return await runBridgeStatus(configOptions());
+  } catch (_) {
+    return connectBridge();
+  }
+}
+
+async function syncPythonDocumentToHost(context, document, collection) {
+  if (!document || document.languageId !== "python") {
+    throw new Error("Open a Shortpy Python editor before syncing to host Shortcuts.");
+  }
+  await ensureBridgeConnectedForHostSync();
+
+  const linkKey = hostShortcutLinkKey(document);
+  const links = hostShortcutLinks(context);
+  let link = links[linkKey];
+  let name = link && link.name;
+  if (!link) {
+    name = await vscode.window.showInputBox({
+      title: "Sync To Host Shortcuts",
+      prompt: "Name for the host shortcut",
+      value: suggestedHostShortcutName(document),
+      ignoreFocusOut: true,
+      validateInput(value) {
+        return String(value || "").trim() ? undefined : "Enter a shortcut name.";
+      },
+    });
+    if (name === undefined) {
+      return undefined;
+    }
+    name = name.trim();
+  }
+
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: link ? `Syncing ${link.name} to host Shortcuts` : `Creating ${name} in host Shortcuts`,
+    cancellable: false,
+  }, async (progress) => {
+    progress.report({ message: "Compiling Shortpy" });
+    const compiled = await compilePythonDocument(
+      document,
+      document.getText(),
+      collection,
+      compileOptionsForValidation()
+    );
+    const request = {
+      plist: bplistBufferFromResponse(compiled),
+      workflowID: link && link.workflowID,
+      name,
+    };
+    const hostOptions = configOptions();
+    const runSync = (currentRequest) => syncHostShortcut(currentRequest, hostOptions, (event) => {
+      progress.report({ message: event.message || "Preparing host runtime" });
+      logRuntime("host sync runtime", event);
+    });
+
+    progress.report({ message: link ? "Updating host workflow record" : "Creating host workflow record" });
+    let result;
+    try {
+      result = await runSync(request);
+    } catch (error) {
+      if (!link || error.code !== "not_found") {
+        throw error;
+      }
+      const choice = await vscode.window.showWarningMessage(
+        `Host shortcut ${link.name} no longer exists.`,
+        "Create Again"
+      );
+      if (choice !== "Create Again") {
+        return undefined;
+      }
+      result = await runSync({ plist: request.plist, name: link.name });
+    }
+
+    const updatedLink = {
+      workflowID: result.workflowID,
+      name: result.name || name,
+      updatedAt: new Date().toISOString(),
+    };
+    await context.globalState.update(HOST_SHORTCUT_LINKS_STATE_KEY, {
+      ...hostShortcutLinks(context),
+      [linkKey]: updatedLink,
+    });
+    setBridgeStatus("connected", `Synced ${updatedLink.name} to host Shortcuts`);
+    logRuntime("host sync complete", {
+      operation: result.operation,
+      workflowID: result.workflowID,
+      name: updatedLink.name,
+      runtimeSource: result.runtime && result.runtime.source,
+    });
+    vscode.window.showInformationMessage(
+      `${result.operation === "create" ? "Created" : "Updated"} ${updatedLink.name} in host Shortcuts.`
+    );
+    return result;
+  });
+}
+
+async function syncToHostShortcuts(context, collection) {
+  const editor = activeEditorOrThrow();
+  return syncPythonDocumentToHost(context, editor.document, collection);
+}
+
 async function offerOpenInShortcuts(uri, message) {
   if (!configOptions().offerOpenInShortcutsAfterSave) {
     vscode.window.showInformationMessage(message);
@@ -1941,6 +2066,24 @@ class WorkflowPythonCustomEditorProvider {
           await vscode.workspace.fs.writeFile(document.uri, bytes);
           postWorkflowSessionStatus(session, `Exported ${bytes.length} bytes to ${path.basename(document.uri.fsPath)}`);
           setBridgeStatus("connected", `Exported ${path.basename(document.uri.fsPath)}`);
+        } else if (commandName === "syncHost") {
+          await ensureImported({ editorOptions: { preserveFocus: true } });
+          const pyDocument = await pythonDocument();
+          const result = await syncPythonDocumentToHost(
+            this.context,
+            pyDocument,
+            this.runtimeDiagnosticsCollection
+          );
+          if (result) {
+            postWorkflowSessionStatus(session, `Synced ${result.name || "shortcut"} to host Shortcuts`);
+            postWorkflowSessionRuntimeResponse(session, {
+              ok: true,
+              source: "Headless Shortcuts",
+              operation: result.operation,
+              workflowID: result.workflowID,
+              name: result.name,
+            });
+          }
         } else if (commandName === "import") {
           await importIntoSession();
         } else if (commandName === "connect") {
@@ -2002,6 +2145,7 @@ function activate(context) {
     saveRuntimePlistFromPython: () => saveRuntimePlistFromPython(diagnostics),
     writeSiblingRuntimePlistFromPython: () => writeSiblingRuntimePlistFromPython(diagnostics),
     validatePython: () => validatePython(diagnostics),
+    syncToHostShortcuts: () => syncToHostShortcuts(context, diagnostics),
     openWorkflowPlistFromPython: () => openWorkflowPlistFromPython(diagnostics),
     pythonToPlistDebugJson: () => pythonToPlistDebugJson(diagnostics),
     loadPythonFromPlist: loadPythonFromPlist,

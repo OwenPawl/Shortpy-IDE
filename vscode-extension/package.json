@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -16,11 +16,11 @@
     "Other"
   ],
   "scripts": {
-    "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js",
-    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/toolrenderer.js && node --check src/extension.js",
+    "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js && node scripts/prepare-bundled-headless-shortcuts.js",
+    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check scripts/prepare-bundled-headless-shortcuts.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/hostShortcuts.js && node --check src/toolrenderer.js && node --check src/extension.js",
     "diagnose-shortpy": "node scripts/diagnose-shortpy.js --pretty",
     "install:local": "node scripts/install-vsix.js",
-    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js"
+    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js && node test/hostShortcuts.test.js"
   },
   "activationEvents": [
     "onStartupFinished",
@@ -30,6 +30,7 @@
     "onCommand:shortcutsRuntimeIDE.saveRuntimePlistFromPython",
     "onCommand:shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
     "onCommand:shortcutsRuntimeIDE.validatePython",
+    "onCommand:shortcutsRuntimeIDE.syncToHostShortcuts",
     "onCommand:shortcutsRuntimeIDE.openWorkflowPlistFromPython",
     "onCommand:shortcutsRuntimeIDE.pythonToPlistDebugJson",
     "onCommand:shortcutsRuntimeIDE.loadPythonFromPlist",
@@ -73,6 +74,10 @@
       {
         "command": "shortcutsRuntimeIDE.validatePython",
         "title": "Shortcuts IDE: Validate With Apple Runtime"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
+        "title": "Shortcuts IDE: Sync To Host Shortcuts"
       },
       {
         "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
@@ -127,6 +132,11 @@
           "command": "shortcutsRuntimeIDE.validatePython",
           "when": "editorLangId == python",
           "group": "navigation@52"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
+          "when": "editorLangId == python",
+          "group": "navigation@49"
         },
         {
           "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
@@ -300,6 +310,16 @@
           "type": "boolean",
           "default": false,
           "description": "Allow Write Sibling Shortcut to overwrite an existing sibling shortcut without prompting."
+        },
+        "shortcutsRuntimeIDE.headlessShortcutsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a prebuilt Headless Shortcuts binary. Leave empty to build and use the runtime bundled with this extension."
+        },
+        "shortcutsRuntimeIDE.hostCommandTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Maximum time in milliseconds for building or running the host Shortcuts sync helper."
         }
       }
     }

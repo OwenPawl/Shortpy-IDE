@@ -12,6 +12,7 @@ Commands:
 - `Shortcuts IDE: Export Python To Shortcut` writes a signed `.shortcut` by default, or raw workflow plist bytes when saving as `.plist`.
 - `Shortcuts IDE: Write Sibling Shortcut` writes `<current-file-name>.shortcut` next to the active Python file.
 - `Shortcuts IDE: Validate With Apple Runtime` compiles the active Python through the runtime bridge and surfaces compiler errors in VS Code Problems.
+- `Shortcuts IDE: Sync To Host Shortcuts` compiles the active Python to an unsigned workflow plist, creates it in the host macOS Shortcuts library on first use, and updates the same workflow ID on later syncs.
 - `Shortcuts IDE: Open Workflow Plist From Python` opens the generated Workflow plist as XML without using JSON as the plist representation.
 - `Shortcuts IDE: Import Plist As Python` opens edit-mode Python from a selected signed `.shortcut`, raw workflow `.plist`, or selected/open iCloud Shortcuts link text.
 - `Shortcuts IDE: Import iCloud Link As Python` prompts for a `https://www.icloud.com/shortcuts/<UUID>` link and opens edit-mode Python.
@@ -26,6 +27,7 @@ Prerequisites:
 - `Shortcuts IDE: Connect To Bridge` needs Xcode command line tools, an iOS Simulator runtime, and the private Shortcuts frameworks available in that simulator runtime. It prefers iOS 27.0 when present.
 - The simulator bridge build discovers the installed iOS Simulator runtime dynamically instead of using a machine-local runtime path.
 - The VSIX bundles the bridge source and stages a buildable copy into extension global storage on first Connect. Set `shortcutsRuntimeIDE.bridgeCtlPath` only when you want to use a specific local bridge checkout.
+- The VSIX also bundles the small Headless Shortcuts source runtime used by Sync To Host Shortcuts. It is built in extension global storage on first sync and saves complete `WFWorkflowRecord` values through host WorkflowKit.
 - Raw workflow plist bytes (`bplist00` or XML plist), signed `.shortcut` files beginning with `AEA1`, and iCloud Shortcuts links can be imported.
 
 The signed `.shortcut` output is produced by the macOS Shortcuts CLI. The simulator bridge still owns compilation and unsigned workflow plist serialization.
@@ -54,6 +56,8 @@ Useful settings:
 - `shortcutsRuntimeIDE.validateOnType`: validate while typing after a debounce.
 - `shortcutsRuntimeIDE.overwriteSiblingShortcut`: allow sibling `.shortcut` writes without an overwrite prompt.
 - `shortcutsRuntimeIDE.offerOpenInShortcutsAfterSave`: offer to open saved shortcut files after writing them.
+- `shortcutsRuntimeIDE.headlessShortcutsPath`: optional path to a prebuilt Headless Shortcuts binary; normally the bundled runtime is used.
+- `shortcutsRuntimeIDE.hostCommandTimeoutMs`: timeout for building or running the host sync helper.
 
 Compiler diagnostics from Apple are parsed for line/column, diagnostic id, hints, and fix-its. Known replacement fix-its are exposed as VS Code Quick Fixes. The extension also writes a `Shortcuts Runtime IDE` output channel, mirrors events into the Debug Console where VS Code exposes one, and keeps bridge status visible in the status bar.
 

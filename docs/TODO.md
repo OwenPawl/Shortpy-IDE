@@ -17,11 +17,12 @@
 - Inline app metadata round trips without exposing `ref(...)` in editable Python for the proven app-trigger case.
 - VS Code extension has native commands for bridge connect, plist import/export, Apple runtime validation, action/trigger search, and ToolRenderer metadata refresh. Bridge status is passive in the status bar rather than a separate UI command.
 - `Shortcuts IDE: Connect To Bridge` can use a bundled bridge runtime from a clean VSIX install: it stages the bridge into extension global storage, builds the simulator dylib when missing, boots/opens Simulator when needed, launches Shortcuts with the bridge, and verifies status.
+- `Shortcuts IDE: Sync To Host Shortcuts` compiles the active Shortpy source to an unsigned plist, uses the bundled Headless Shortcuts runtime to create a host `WFWorkflowRecord`, persists its workflow ID per document, and updates that same record on later syncs. Live host-process create/update/delete visibility is proven without relaunching Shortcuts.
 - The simulator bridge build discovers the installed iOS Simulator runtime dynamically and prefers iOS 27.0 instead of relying on a checked-in machine-local runtime path.
 - Visible VS Code commands are centralized in `vscode-extension/src/commandRegistry.js`; package command contributions, activation events, menus, and custom editor toolbar buttons are synced from that registry.
 - Visible VS Code metadata is ToolRenderer-only. Cached ToolRenderer metadata powers hovers, completions, signature help, action/trigger search, highlighting, and static Shortpy diagnostics without blocking on the bridge after activation.
 - ToolRenderer cache entries preserve exact native Python definition blocks plus parsed Args/Returns sections. Function/decorator hovers show function-level material; keyword hovers show parameter docs/type/default and stable referenced type material.
-- Stable ToolRenderer enum cases such as `RunSurface` and `InputFallback` are visible, while environment-specific/custom enum cases are intentionally omitted from hovers and completions.
+- ToolRenderer-rendered enum/type definitions and cases remain visible. Runtime-shaped definitions receive a simulator-runtime notice rather than being hidden or treated as hard static-diagnostic failures.
 - ToolRenderer action/trigger docs remain the visible metadata source. Prepared ToolKit copies align each tool's normalized sqlite `pythonName` with the native ToolRenderer render name through a neutral naming container; visible definitions require exact name equality and are never rewritten or synthesized.
 - The selected ToolKit sqlite is also adjusted for ToolRenderer generative visibility: action rows missing either `visibleForShortcuts` (`0x1`) or `approved` (`0x4`) have both bits set before refresh, which lets native `ToolRenderer.pythonInterface` render DB-present actions such as `com_apple_shortcuts_search_shortcuts_actions` without a host-side availability overlay.
 - Plist import uses workflow action identifiers to rewrite imported action calls to the current sqlite `pythonName` values while preserving inline catalog metadata.
@@ -42,6 +43,7 @@
 - Tighten VS Code custom editor behavior so plist import/export feels native and does not expose debug-only flows beyond current debug JSON commands.
 - Add focused tests that run against a booted iOS 27.0 simulator bridge from this repo checkout.
 - Add a clearer first-run troubleshooting surface for missing Xcode tools, missing simulator runtime, or missing private Shortcuts frameworks.
+- Add explicit host-link management and conflict handling before attempting bidirectional host-to-editor synchronization.
 
 ## Out Of Primary UI Scope
 

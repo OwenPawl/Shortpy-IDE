@@ -57,3 +57,25 @@ The extension and bridge expose:
 - ToolRenderer metadata retrieval
 - ToolKit-backed fallback metadata for live editor diagnostics
 - top-level action/trigger parameter checks only, leaving nested payload validation to Apple runtime diagnostics
+
+## Host Shortcuts Record Sync
+
+Proven on macOS with the host Shortcuts process already running:
+
+```text
+Shortpy source
+  -> simulator ShortcutsLanguage compiler
+  -> unsigned workflow bplist
+  -> WFWorkflowFile.recordRepresentationWithError:
+  -> WFWorkflowRecord
+  -> WFDatabaseProxy.createWorkflowWithWorkflowRecord:... (first sync)
+  -> WFDatabaseWorkflowStorage.saveRecord:withReference:error: (later syncs)
+```
+
+The edit path preserves the workflow ID and name while saving the complete
+replacement record. A copied-database comparison matched actions, icon,
+unified trigger data including `WFSelectedApps`, input/output classes,
+fallback state, and import questions. The live Shortcuts AppleScript surface
+reported the same workflow ID changing from one to two actions without an app
+relaunch; the disposable test record was then deleted and database integrity
+remained `ok`.

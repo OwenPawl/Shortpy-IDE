@@ -7,7 +7,7 @@ This repository is intentionally small. It contains the current working bridge a
 ## Layout
 
 - `bridge/`: injected iOS Simulator dylib, bridge control CLI, internal catalog-binding helpers, and build files.
-- `vscode-extension/`: VS Code custom editor and Python tooling integration.
+- `vscode-extension/`: VS Code custom editor, Python tooling, and the bundled Headless Shortcuts host-sync runtime.
 - `docs/`: implementation notes, TODO, and selected proof reports.
 
 ## Current Runtime Boundary
@@ -25,6 +25,11 @@ ShortcutsLanguage.pythonToShortcut
 
 This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
 
+`Shortcuts IDE: Sync To Host Shortcuts` sends the unsigned plist to the bundled
+Headless Shortcuts runtime. First sync creates a host `WFWorkflowRecord` and
+stores its workflow ID in VS Code extension state; later syncs save a complete
+replacement record against the same host workflow reference.
+
 Editable Python uses inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge reconstructs any required compiler catalog from that source representation. Ref-free source without inline catalog values compiles with `defaultInitialCatalog`; the compiler no longer silently falls back to the latest imported workflow catalog.
 
 VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then rebuilds the visible cache from that local interface plus the active sqlite names. Live native ToolRenderer refresh is an explicit command because it can occupy the simulator bridge for a long time. Function and decorator hovers show exact native ToolRenderer definition blocks; keyword hovers show the specific parameter type/default/docs plus stable referenced enum/type material. Environment-specific enum cases are omitted because they depend on the active runtime catalog. The prepared ToolKit gives every tool a neutral ToolRenderer naming context and uses its normalized sqlite `pythonName` as the native render name. Visible metadata then accepts definitions only by exact Python-name equality; it does not rewrite or synthesize definition text. The bridge also ensures selected DB rows have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) set before ToolRenderer refresh so native ToolRenderer renders actions that were present in the DB but hidden from the generative surface. ToolKit sqlite data is not a user-facing documentation source; it remains an internal bridge source for compiler names and a temporary fallback for catalog host/key binding until native metadata-provider binding extraction is implemented.
@@ -39,6 +44,8 @@ npm run install-extension
 
 Then open VS Code and run `Shortcuts IDE: Connect To Bridge`, or click the
 Shortcuts status bar item.
+From a Shortpy Python editor, run `Shortcuts IDE: Sync To Host Shortcuts` to
+create the host shortcut. Running it again updates that same shortcut ID.
 The packaged extension bundles the bridge source, stages it into extension
 global storage on first connect, builds the simulator dylib if needed, boots
 an iOS simulator if needed, launches Shortcuts with the bridge, and keeps
@@ -161,6 +168,7 @@ Low-level checks can also be run directly:
 
 ```sh
 node --check vscode-extension/src/bridge.js
+node --check vscode-extension/src/hostShortcuts.js
 node --check vscode-extension/src/toolrenderer.js
 node --check vscode-extension/src/extension.js
 node --check vscode-extension/test/smoke.js
