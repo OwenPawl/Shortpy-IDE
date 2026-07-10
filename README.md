@@ -25,10 +25,12 @@ ShortcutsLanguage.pythonToShortcut
 
 This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
 
-`Shortcuts IDE: Sync To Host Shortcuts` sends the unsigned plist to the bundled
-Headless Shortcuts runtime. First sync creates a host `WFWorkflowRecord` and
-stores its workflow ID in VS Code extension state; later syncs save a complete
-replacement record against the same host workflow reference.
+`Shortcuts IDE: Sync With Host Shortcuts` links the editor to a host workflow
+ID. It automatically pushes when only the editor changed and pulls through the
+simulator plist-to-Python converter when only Shortcuts changed. Simultaneous
+edits show one conflict dialog. Baseline host/compiled plists live only in VS
+Code extension storage and let Shortpy apply Python structural deltas while
+preserving host-owned presentation metadata such as the shortcut icon.
 
 Editable Python uses inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge reconstructs any required compiler catalog from that source representation. Ref-free source without inline catalog values compiles with `defaultInitialCatalog`; the compiler no longer silently falls back to the latest imported workflow catalog.
 
@@ -44,8 +46,8 @@ npm run install-extension
 
 Then open VS Code and run `Shortcuts IDE: Connect To Bridge`, or click the
 Shortcuts status bar item.
-From a Shortpy Python editor, run `Shortcuts IDE: Sync To Host Shortcuts` to
-create the host shortcut. Running it again updates that same shortcut ID.
+From a Shortpy Python editor, run `Shortcuts IDE: Sync With Host Shortcuts` to
+create the host shortcut. Later runs synchronize whichever side changed.
 The packaged extension bundles the bridge source, stages it into extension
 global storage on first connect, builds the simulator dylib if needed, boots
 an iOS simulator if needed, launches Shortcuts with the bridge, and keeps

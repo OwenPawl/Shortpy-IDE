@@ -20,6 +20,9 @@ build/headless-shortcuts create --plist workflow.plist --name "My Shortcut"
 # Replace the complete workflow record while preserving its ID and name
 build/headless-shortcuts edit --id UUID --plist workflow.plist
 
+# Export the complete workflow record as an unsigned plist
+build/headless-shortcuts export --id UUID --output workflow.plist
+
 # Delete
 build/headless-shortcuts delete --id UUID
 ```

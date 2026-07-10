@@ -19,6 +19,10 @@ function workspaceSourceRoot() {
   return path.resolve(__dirname, "..", "..", "..", "Headless-Shortcuts");
 }
 
+function mergeScriptPath() {
+  return path.resolve(__dirname, "..", "scripts", "merge-workflow-plists.py");
+}
+
 function versionedStorageRoot(globalStoragePath, extensionVersion) {
   if (!globalStoragePath) {
     return "";
@@ -208,6 +212,86 @@ async function runHeadless(binary, args, options = {}) {
   }
 }
 
+function hashSource(source) {
+  return crypto.createHash("sha256").update(String(source || ""), "utf8").digest("hex");
+}
+
+async function canonicalPlistHashAtPath(plistPath, options = {}) {
+  const result = await execFile("/usr/bin/plutil", ["-convert", "xml1", "-o", "-", plistPath], {
+    timeoutMs: options.hostCommandTimeoutMs,
+  });
+  return crypto.createHash("sha256").update(result.stdout, "utf8").digest("hex");
+}
+
+function determineSyncAction(link, sourceHash, hostHash) {
+  if (!link || !link.sourceHash || !link.hostHash) {
+    return "initialize";
+  }
+  const localChanged = sourceHash !== link.sourceHash;
+  const hostChanged = hostHash !== link.hostHash;
+  if (!localChanged && !hostChanged) {
+    return "none";
+  }
+  if (localChanged && !hostChanged) {
+    return "push";
+  }
+  if (!localChanged && hostChanged) {
+    return "pull";
+  }
+  return "conflict";
+}
+
+async function exportHostShortcut(workflowID, options = {}, onProgress) {
+  const runtime = await ensureHeadlessRuntime(options, onProgress);
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "shortpy-host-export-"));
+  const outputPath = path.join(directory, "workflow.plist");
+  try {
+    const response = await runHeadless(runtime.binary, [
+      "export",
+      "--id",
+      workflowID,
+      "--output",
+      outputPath,
+    ], options);
+    const plist = await fsp.readFile(outputPath);
+    const hostHash = await canonicalPlistHashAtPath(outputPath, options);
+    return { ...response, hostHash, plist, runtime };
+  } finally {
+    await fsp.rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function mergeWorkflowPlists(request, options = {}) {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "shortpy-host-merge-"));
+  const basePath = path.join(directory, "base.plist");
+  const localPath = path.join(directory, "local.plist");
+  const hostPath = path.join(directory, "host.plist");
+  const outputPath = path.join(directory, "merged.plist");
+  try {
+    await Promise.all([
+      fsp.writeFile(basePath, Buffer.from(request.base)),
+      fsp.writeFile(localPath, Buffer.from(request.local)),
+      fsp.writeFile(hostPath, Buffer.from(request.host)),
+    ]);
+    await execFile(options.pythonPath || "python3", [
+      mergeScriptPath(),
+      "--base",
+      basePath,
+      "--local",
+      localPath,
+      "--host",
+      hostPath,
+      "--output",
+      outputPath,
+      ...(request.preserveKeys || []).flatMap((key) => ["--preserve-key", key]),
+      ...(request.preserveRootKeys || []).flatMap((key) => ["--preserve-root-key", key]),
+    ], { timeoutMs: options.hostCommandTimeoutMs });
+    return await fsp.readFile(outputPath);
+  } finally {
+    await fsp.rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function syncHostShortcut(request, options = {}, onProgress) {
   const runtime = await ensureHeadlessRuntime(options, onProgress);
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "shortpy-host-sync-"));
@@ -228,7 +312,11 @@ async function syncHostShortcut(request, options = {}, onProgress) {
 }
 
 module.exports = {
+  determineSyncAction,
   ensureHeadlessRuntime,
+  exportHostShortcut,
+  hashSource,
+  mergeWorkflowPlists,
   packagedSourceRoot,
   parseResponse,
   syncHostShortcut,

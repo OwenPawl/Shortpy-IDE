@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -77,7 +77,7 @@
       },
       {
         "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
-        "title": "Shortcuts IDE: Sync To Host Shortcuts"
+        "title": "Shortcuts IDE: Sync With Host Shortcuts"
       },
       {
         "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",

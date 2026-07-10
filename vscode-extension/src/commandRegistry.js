@@ -37,9 +37,9 @@ const VISIBLE_COMMANDS = [
   {
     key: "syncToHostShortcuts",
     command: "shortcutsRuntimeIDE.syncToHostShortcuts",
-    title: "Shortcuts IDE: Sync To Host Shortcuts",
+    title: "Shortcuts IDE: Sync With Host Shortcuts",
     editorContext: { when: "editorLangId == python", group: "navigation@49" },
-    customEditor: { message: "syncHost", label: "Sync To Host", primary: true, order: 45 },
+    customEditor: { message: "syncHost", label: "Sync With Host", primary: true, order: 45 },
   },
   {
     key: "openWorkflowPlistFromPython",

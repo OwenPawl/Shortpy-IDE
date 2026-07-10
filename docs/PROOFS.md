@@ -79,3 +79,13 @@ fallback state, and import questions. The live Shortcuts AppleScript surface
 reported the same workflow ID changing from one to two actions without an app
 relaunch; the disposable test record was then deleted and database integrity
 remained `ok`.
+
+Host records can also be exported without mutation through
+`WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:`.
+Repeated binary encodings can differ in object-table order, but canonical XML
+hashes are stable. Two-way sync stores the last host plist and the plist
+compiled from its generated Python. A recursive plist delta applies editor
+changes to the current host record, preserving values not represented by
+Shortpy. `WFWorkflowIcon` is explicitly host-owned because identical compiler
+runs generate different default icon colors and Shortpy has no editable icon
+syntax.

@@ -17,7 +17,7 @@
 - Inline app metadata round trips without exposing `ref(...)` in editable Python for the proven app-trigger case.
 - VS Code extension has native commands for bridge connect, plist import/export, Apple runtime validation, action/trigger search, and ToolRenderer metadata refresh. Bridge status is passive in the status bar rather than a separate UI command.
 - `Shortcuts IDE: Connect To Bridge` can use a bundled bridge runtime from a clean VSIX install: it stages the bridge into extension global storage, builds the simulator dylib when missing, boots/opens Simulator when needed, launches Shortcuts with the bridge, and verifies status.
-- `Shortcuts IDE: Sync To Host Shortcuts` compiles the active Shortpy source to an unsigned plist, uses the bundled Headless Shortcuts runtime to create a host `WFWorkflowRecord`, persists its workflow ID per document, and updates that same record on later syncs. Live host-process create/update/delete visibility is proven without relaunching Shortcuts.
+- `Shortcuts IDE: Sync With Host Shortcuts` persists a workflow ID plus canonical source/host hashes, automatically pushes or pulls one-sided changes, and presents a single conflict dialog for simultaneous edits. Internal baseline host/compiled plists preserve host-only metadata while applying structural Python deltas.
 - The simulator bridge build discovers the installed iOS Simulator runtime dynamically and prefers iOS 27.0 instead of relying on a checked-in machine-local runtime path.
 - Visible VS Code commands are centralized in `vscode-extension/src/commandRegistry.js`; package command contributions, activation events, menus, and custom editor toolbar buttons are synced from that registry.
 - Visible VS Code metadata is ToolRenderer-only. Cached ToolRenderer metadata powers hovers, completions, signature help, action/trigger search, highlighting, and static Shortpy diagnostics without blocking on the bridge after activation.
@@ -43,7 +43,7 @@
 - Tighten VS Code custom editor behavior so plist import/export feels native and does not expose debug-only flows beyond current debug JSON commands.
 - Add focused tests that run against a booted iOS 27.0 simulator bridge from this repo checkout.
 - Add a clearer first-run troubleshooting surface for missing Xcode tools, missing simulator runtime, or missing private Shortcuts frameworks.
-- Add explicit host-link management and conflict handling before attempting bidirectional host-to-editor synchronization.
+- Add command-palette host-link management for intentionally unlinking or attaching an editor to an existing host workflow.
 
 ## Out Of Primary UI Scope
 

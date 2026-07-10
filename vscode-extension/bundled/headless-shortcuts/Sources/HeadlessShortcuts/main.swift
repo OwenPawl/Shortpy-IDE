@@ -6,12 +6,14 @@ private enum Command: String {
   case unknown
   case create
   case edit
+  case export
   case delete
 }
 
 private struct Options {
   var command: Command = .unknown
   var workflowPath: String?
+  var outputPath: String?
   var name: String?
   var workflowID: String?
 }
@@ -96,6 +98,8 @@ private func parse(_ arguments: [String], into options: inout Options) throws {
       options.name = value
     case "--id":
       options.workflowID = value
+    case "--output":
+      options.outputPath = value
     default:
       throw toolError("unknown argument \(argument)")
     }
@@ -105,6 +109,7 @@ private func parse(_ arguments: [String], into options: inout Options) throws {
   case .create:
     guard options.workflowPath?.isEmpty == false,
       options.name?.isEmpty == false,
+      options.outputPath == nil,
       options.workflowID == nil
     else {
       throw toolError("create requires --plist PATH and --name NAME")
@@ -112,13 +117,23 @@ private func parse(_ arguments: [String], into options: inout Options) throws {
   case .edit:
     guard options.workflowID?.isEmpty == false,
       options.workflowPath?.isEmpty == false,
+      options.outputPath == nil,
       options.name == nil
     else {
       throw toolError("edit requires --id UUID and --plist PATH")
     }
+  case .export:
+    guard options.workflowID?.isEmpty == false,
+      options.outputPath?.isEmpty == false,
+      options.workflowPath == nil,
+      options.name == nil
+    else {
+      throw toolError("export requires --id UUID and --output PATH")
+    }
   case .delete:
     guard options.workflowID?.isEmpty == false,
       options.workflowPath == nil,
+      options.outputPath == nil,
       options.name == nil
     else {
       throw toolError("delete requires --id UUID")
@@ -135,6 +150,9 @@ private func parse(_ arguments: [String], into options: inout Options) throws {
   }
   if let workflowPath = options.workflowPath {
     options.workflowPath = standardizedPath(workflowPath)
+  }
+  if let outputPath = options.outputPath {
+    options.outputPath = standardizedPath(outputPath)
   }
 }
 
@@ -157,6 +175,22 @@ private func printSuccess(command: Command, workflowID: String, name: String?) {
     response["name"] = name
   }
   printJSON(response)
+}
+
+private func printExportSuccess(
+  workflowID: String,
+  name: String,
+  outputPath: String,
+  byteCount: Int
+) {
+  printJSON([
+    "bytes": byteCount,
+    "name": name,
+    "ok": true,
+    "operation": Command.export.rawValue,
+    "output": outputPath,
+    "workflowID": workflowID,
+  ])
 }
 
 private func printFailure(command: Command, workflowID: String?, error: NSError, code: String) {
@@ -378,13 +412,12 @@ private func reference(for workflowID: String, proxy: AnyObject) throws -> AnyOb
   return lookup(proxy, referenceSelector, workflowID as NSString)
 }
 
-private func editShortcut(
-  options: Options,
+private func loadedWorkflow(
+  workflowID: String,
   runtime: WorkflowRuntime,
   database: AnyObject,
   proxy: AnyObject
-) throws -> (workflowID: String, name: String) {
-  let workflowID = options.workflowID!
+) throws -> (reference: AnyObject, workflow: AnyObject, name: String) {
   guard let reference = try reference(for: workflowID, proxy: proxy) else {
     throw toolError("shortcut \(workflowID) was not found", code: .notFound)
   }
@@ -397,7 +430,7 @@ private func editShortcut(
     to: WorkflowForReference.self
   )
   guard
-    let existingWorkflow = loadWorkflow(
+    let workflow = loadWorkflow(
       workflowClassObject,
       loadSelector,
       reference,
@@ -407,11 +440,28 @@ private func editShortcut(
   else {
     throw error ?? toolError("workflow load failed")
   }
-  guard let existingName = callObject0(existingWorkflow, selector("name")) as? String,
-    !existingName.isEmpty
-  else {
+  guard let name = callObject0(workflow, selector("name")) as? String, !name.isEmpty else {
     throw toolError("existing shortcut did not provide a name")
   }
+  return (reference, workflow, name)
+}
+
+private func editShortcut(
+  options: Options,
+  runtime: WorkflowRuntime,
+  database: AnyObject,
+  proxy: AnyObject
+) throws -> (workflowID: String, name: String) {
+  let workflowID = options.workflowID!
+  let existing = try loadedWorkflow(
+    workflowID: workflowID,
+    runtime: runtime,
+    database: database,
+    proxy: proxy
+  )
+  let reference = existing.reference
+  let existingWorkflow = existing.workflow
+  let existingName = existing.name
   guard let storageProvider = callObject0(existingWorkflow, selector("storageProvider")) else {
     throw toolError("existing shortcut did not provide a storage provider")
   }
@@ -427,10 +477,47 @@ private func editShortcut(
     try methodImplementation(storageProvider, saveSelector),
     to: SaveRecordWithReference.self
   )
+  var error: NSError?
   if !saveRecord(storageProvider, saveSelector, replacementRecord, reference, &error) {
     throw error ?? toolError("workflow record save failed")
   }
   return (workflowID, existingName)
+}
+
+private func exportShortcut(
+  options: Options,
+  runtime: WorkflowRuntime,
+  database: AnyObject,
+  proxy: AnyObject
+) throws -> (workflowID: String, name: String, outputPath: String, byteCount: Int) {
+  let workflowID = options.workflowID!
+  let existing = try loadedWorkflow(
+    workflowID: workflowID,
+    runtime: runtime,
+    database: database,
+    proxy: proxy
+  )
+  guard let record = callObject0(existing.workflow, selector("record")) else {
+    throw toolError("existing shortcut did not provide a workflow record")
+  }
+  guard let file = callObject0(record, selector("fileRepresentation")) else {
+    throw toolError("workflow record did not provide a file representation")
+  }
+
+  var error: NSError?
+  let dataSelector = selector("fileDataWithError:")
+  let fileData = unsafeBitCast(
+    try methodImplementation(file, dataSelector),
+    to: ObjectError.self
+  )
+  guard let dataObject = fileData(file, dataSelector, &error),
+    let data = dataObject as? Data
+  else {
+    throw error ?? toolError("workflow file serialization failed")
+  }
+  let outputPath = options.outputPath!
+  try data.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+  return (workflowID, existing.name, outputPath, data.count)
 }
 
 private func deleteShortcut(options: Options, database: AnyObject, proxy: AnyObject) throws
@@ -482,6 +569,19 @@ private func run(arguments: [String]) -> Int32 {
         proxy: proxy
       )
       printSuccess(command: .edit, workflowID: result.workflowID, name: result.name)
+    case .export:
+      let result = try exportShortcut(
+        options: options,
+        runtime: runtime,
+        database: database,
+        proxy: proxy
+      )
+      printExportSuccess(
+        workflowID: result.workflowID,
+        name: result.name,
+        outputPath: result.outputPath,
+        byteCount: result.byteCount
+      )
     case .delete:
       let workflowID = try deleteShortcut(options: options, database: database, proxy: proxy)
       printSuccess(command: .delete, workflowID: workflowID, name: nil)
