@@ -11,6 +11,7 @@ const {
   runBridgeCommand,
   runBridgeStatus,
   shortcutBufferFromResponse,
+  validateImportedPythonSource,
 } = require("./bridge");
 const { parseAppleDiagnostic } = require("./diagnostics");
 const {
@@ -860,10 +861,12 @@ async function importWorkflowPlistToSession(context, workflowUri) {
   const bytes = Buffer.from(await vscode.workspace.fs.readFile(workflowUri));
   assertShortcutImportBytes(bytes, path.basename(workflowUri.fsPath));
   const response = await runBridgeCommand("plist-data-to-python", bytes, configOptions());
+  const imported = await validateImportedPythonSource(response, compileOptionsForValidation());
   const session = getOrCreateWorkflowSession(context, workflowUri);
+  await writeWorkflowPythonSource(session, imported.source);
   session.lastImportResponse = response;
+  session.lastImportValidation = imported.validation;
   session.lastImportError = undefined;
-  await writeWorkflowPythonSource(session, response.python_code || "");
   return session;
 }
 
@@ -1860,15 +1863,26 @@ class WorkflowPythonCustomEditorProvider {
       } catch (error) {
         session.lastImportError = error;
         const text = error && error.message ? error.message : String(error);
+        const compilerRejected = Boolean(error && error.bridgeResponse);
         const payload = {
           ok: false,
           source: "Shortcuts Runtime IDE",
-          message: `Could not import workflow. Connect to the bridge, then retry import.`,
+          message: compilerRejected
+            ? "Imported ShortPy failed native validation. Existing editor source was preserved."
+            : "Could not import workflow. Connect to the bridge, then retry import.",
           error: text,
         };
         postWorkflowSessionRuntimeResponse(session, payload);
-        postWorkflowSessionStatus(session, "Bridge required. Click Connect.");
-        setBridgeStatus("disconnected", `Shortcuts bridge is not connected. Click the status bar or run Shortcuts IDE: Connect To Bridge. ${text}`);
+        postWorkflowSessionStatus(
+          session,
+          compilerRejected ? "Import rejected; editor source preserved." : "Bridge required. Click Connect."
+        );
+        setBridgeStatus(
+          compilerRejected ? "error" : "disconnected",
+          compilerRejected
+            ? `Imported ShortPy failed native validation; editor source was preserved. ${text}`
+            : `Shortcuts bridge is not connected. Click the status bar or run Shortcuts IDE: Connect To Bridge. ${text}`
+        );
         logRuntime("Workflow import failed", text);
         return undefined;
       }
@@ -1974,11 +1988,10 @@ function activate(context) {
   bridgeStatusBar.command = "shortcutsRuntimeIDE.connectBridge";
   setBridgeStatus("disconnected", "Shortcuts Runtime IDE bridge is not connected.");
   actionDecoration = vscode.window.createTextEditorDecorationType({
-    textDecoration: "underline dotted",
+    fontWeight: "500",
   });
   triggerDecoration = vscode.window.createTextEditorDecorationType({
     fontWeight: "600",
-    textDecoration: "underline dotted",
   });
   const diagnostics = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDE");
   shortpyDiagnosticsCollection = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDEToolRenderer");

@@ -298,6 +298,18 @@ async function runBridgeCommand(command, input, options = {}) {
   });
 }
 
+async function validateImportedPythonSource(response, options = {}, compile = runBridgeCommand) {
+  const source = response && typeof response.python_code === "string" ? response.python_code : "";
+  if (!source.trim()) {
+    throw new Error("Bridge import did not produce canonical ShortPy source.");
+  }
+  const validation = await compile("python-to-bplist", source, {
+    ...options,
+    signShortcut: false,
+  });
+  return { source, validation };
+}
+
 async function runBridgeCli(args, options = {}) {
   const config = normalizeOptions(options);
   const commandName = Array.isArray(args) && args.length > 0 ? String(args[0]) : "";
@@ -542,5 +554,6 @@ module.exports = {
   runBridgeCommand,
   runBridgeStatus,
   shortcutBufferFromResponse,
+  validateImportedPythonSource,
   versionedStorageBridgeRoot,
 };

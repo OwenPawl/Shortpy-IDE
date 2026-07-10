@@ -18,7 +18,11 @@ const {
   refreshToolRendererMetadata,
   searchToolRendererMetadata,
 } = require("../src/toolrenderer");
-const { collectToolRendererDiagnostics, parameterInfoAt } = require("../src/shortpyDiagnostics");
+const {
+  collectToolRendererDiagnostics,
+  hasClosedParameterSurface,
+  parameterInfoAt,
+} = require("../src/shortpyDiagnostics");
 
 const execFile = util.promisify(cp.execFile);
 
@@ -44,7 +48,7 @@ async function main() {
     live: true,
     bridgeCommandTimeoutMs: 180000,
   };
-  const toolRendererMetadataPath = path.join(logs, "vscode-extension-toolrenderer-interface.json");
+  const toolRendererMetadataPath = path.join(logs, "vscode-extension-smoke-toolrenderer-interface.json");
   const metadataPreReconnect = await ensureLiveBridge(options);
   let toolRendererRefresh;
   try {
@@ -92,6 +96,7 @@ async function main() {
   const inlineArgumentColumn = inlineArgumentLine.indexOf("query") + 2;
   const inlineArgumentHover = parameterInfoAt(inlineArgumentSource, 1, inlineArgumentColumn, [toolRenderer]);
   const inlineArgumentDiagnostics = collectToolRendererDiagnostics(inlineArgumentSource, toolRenderer);
+  const inlineArgumentAction = toolRenderer.byName.get("messages_find_conversation");
   const bridgeCtl = path.join(root, "bridge", "tools", "bridgectl.py");
   const cliActionSearch = JSON.parse((await execFile("python3", [
     bridgeCtl,
@@ -186,7 +191,7 @@ async function main() {
   const showNotification = toolRenderer.byName.get("com_apple_shortcuts_show_notification");
   const thirdPartyShowNotification = toolRenderer.byName.get("com_sindresorhus_actions_show_notification");
   const openApp = toolRenderer.actions.find((item) =>
-    item.displayName === "Open App" &&
+    (item.nativeIdentifier === "com.apple.shortcuts.OpenAppIntent" || item.displayName === "Open App") &&
     (item.parameters || []).some((parameter) => (parameter.pythonName || parameter.name) === "app"));
   const runnable = toolRenderer.byName.get("runnable");
   const openAppParameter = openApp
@@ -258,11 +263,18 @@ async function main() {
     has_native_run_surface_case: toolRenderer.byName.has("RunSurface.SHARE_SHEET"),
     has_native_input_fallback_type: toolRenderer.byName.has("InputFallback"),
     has_toolrenderer_definition_blocks:
-      Boolean(showNotification && showNotification.definitionBlock && showNotification.definitionBlock.includes(`def ${showNotification.pythonName}(`)) &&
+      Boolean(showNotification && (showNotification.definitionMissing ||
+        (showNotification.definitionBlock && showNotification.definitionBlock.includes(`def ${showNotification.pythonName}(`)))) &&
       Boolean(runnable && runnable.definitionBlock && runnable.definitionBlock.includes("def runnable(")),
+    show_notification_parameter_surface_closed: hasClosedParameterSurface(showNotification),
     sqlite_open_app_name_present: Boolean(openApp && toolRenderer.byName.has(openApp.pythonName)),
     sqlite_open_app_python_name: openApp && openApp.pythonName,
-    sqlite_open_app_definition_missing: Boolean(openApp && openApp.definitionMissing),
+    sqlite_open_app_has_exact_definition: Boolean(
+      openApp &&
+      openApp.definitionBlock &&
+      openApp.definitionBlock.includes(`def ${openApp.pythonName}(`) &&
+      !openApp.definitionMissing
+    ),
     open_app_parameter_doc: openAppParameter && openAppParameter.parameter && openAppParameter.parameter.doc,
     runnable_direct_dependencies: toolRenderer.directDependencies.get("runnable") || [],
     exposes_runtime_enum_cases: toolRenderer.byName.has("com_apple_shortcuts_wfapp_in_focus_trigger_wfapp_state.OPENED"),
@@ -282,6 +294,7 @@ async function main() {
       title_parameter_hover: Boolean(titleParameterHover),
       inline_argument_hover: Boolean(inlineArgumentHover),
       inline_argument_type: inlineArgumentHover && inlineArgumentHover.parameter && inlineArgumentHover.parameter.type,
+      inline_argument_definition_missing: Boolean(inlineArgumentAction && inlineArgumentAction.definitionMissing),
       inline_argument_diagnostics: inlineArgumentDiagnostics.map((item) => item.code),
     },
     cli_agent_wrappers: {
@@ -348,12 +361,12 @@ async function main() {
       InputFallback: summary.has_native_input_fallback_type,
     })}`);
   }
-  if (!summary.has_toolrenderer_definition_blocks || !summary.sqlite_open_app_name_present || !summary.sqlite_open_app_definition_missing || !summary.runnable_direct_dependencies.includes("RunSurface") || !summary.exposes_runtime_enum_cases) {
+  if (!summary.has_toolrenderer_definition_blocks || !summary.sqlite_open_app_name_present || !summary.sqlite_open_app_has_exact_definition || !summary.runnable_direct_dependencies.includes("RunSurface") || !summary.exposes_runtime_enum_cases) {
     throw new Error(`ToolRenderer hover bundle metadata failed: ${JSON.stringify({
       definitionBlocks: summary.has_toolrenderer_definition_blocks,
       sqliteOpenAppNamePresent: summary.sqlite_open_app_name_present,
       sqliteOpenAppPythonName: summary.sqlite_open_app_python_name,
-      sqliteOpenAppDefinitionMissing: summary.sqlite_open_app_definition_missing,
+      sqliteOpenAppHasExactDefinition: summary.sqlite_open_app_has_exact_definition,
       openAppParameterDoc: summary.open_app_parameter_doc,
       runnableDependencies: summary.runnable_direct_dependencies,
       exposesRuntimeEnumCases: summary.exposes_runtime_enum_cases,
@@ -371,7 +384,9 @@ async function main() {
       triggers: summary.native_trigger_search_top,
     })}`);
   }
-  if (!summary.static_diagnostics.codes.includes("unknownShortcutsCommand") || !summary.static_diagnostics.codes.includes("unknownShortcutsParameter")) {
+  const hasStaticParameterError = summary.static_diagnostics.codes.includes("unknownShortcutsParameter");
+  if (!summary.static_diagnostics.codes.includes("unknownShortcutsCommand") ||
+      hasStaticParameterError !== summary.show_notification_parameter_surface_closed) {
     throw new Error(`static ToolRenderer diagnostics failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
   if (summary.static_diagnostics.messages.some((message) => message.includes("bogus_nested"))) {
@@ -380,8 +395,11 @@ async function main() {
   if (summary.static_diagnostics.nested_parameter_hover || !summary.static_diagnostics.title_parameter_hover) {
     throw new Error(`static ToolRenderer hover depth handling failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }
+  const inlineArgumentTypeIsValid = summary.static_diagnostics.inline_argument_definition_missing
+    ? summary.static_diagnostics.inline_argument_type === "List[Any]"
+    : summary.static_diagnostics.inline_argument_type === "List[query_com_apple_mobile_sms_conversation_entity]";
   if (!summary.static_diagnostics.inline_argument_hover ||
-      summary.static_diagnostics.inline_argument_type !== "query_com_apple_mobile_sms_conversation_entity" ||
+      !inlineArgumentTypeIsValid ||
       summary.static_diagnostics.inline_argument_diagnostics.includes("unknownShortcutsParameter")) {
     throw new Error(`inline argument hover failed: ${JSON.stringify(summary.static_diagnostics)}`);
   }

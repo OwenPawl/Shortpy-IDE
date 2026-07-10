@@ -2522,7 +2522,7 @@ public func bridge_swift_direct_run(
     let box = ResultBox()
 
     Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source) ?? latestImportCatalogContext()
+        let importContext = importedPythonContext(matchingRefsIn: source)
         let catalogOverride = importContext?.proxyCatalog
         let catalogSource = catalogOverride == nil
             ? "defaultInitialCatalog"
@@ -2850,7 +2850,7 @@ public func bridge_swift_python_to_plist(
     let box = ResultBox()
 
     Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source) ?? latestImportCatalogContext()
+        let importContext = importedPythonContext(matchingRefsIn: source)
         let catalogOverride = importContext?.proxyCatalog
         let catalogSource = catalogOverride == nil
             ? "defaultInitialCatalog"
@@ -2941,7 +2941,7 @@ public func bridge_swift_python_to_bplist(
     let box = ResultBox()
 
     Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source) ?? latestImportCatalogContext()
+        let importContext = importedPythonContext(matchingRefsIn: source)
         let catalogOverride = importContext?.proxyCatalog
         let catalogSource = catalogOverride == nil
             ? "defaultInitialCatalog"
@@ -3119,7 +3119,7 @@ public func bridge_swift_python_record_file_probe(
     let box = ResultBox()
 
     Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source) ?? latestImportCatalogContext()
+        let importContext = importedPythonContext(matchingRefsIn: source)
         let catalogOverride = importContext?.proxyCatalog
         let catalogSource = catalogOverride == nil
             ? "defaultInitialCatalog"

@@ -4,6 +4,7 @@ const assert = require("assert");
 const { parseAppleDiagnostic } = require("../src/diagnostics");
 const { collectToolRendererDiagnostics, parameterInfoAt } = require("../src/shortpyDiagnostics");
 const { indexToolRendererMetadata } = require("../src/toolrenderer");
+const { buildDiagnosticReport } = require("../scripts/diagnose-shortpy");
 
 const message = `Error at Line 2, Column 5
 
@@ -35,16 +36,19 @@ const toolRenderer = indexToolRendererMetadata({
     {
       kind: "action",
       pythonName: "com_visible_action",
+      parameterValidation: "closed",
       parameters: [{ pythonName: "title" }],
     },
     {
       kind: "action",
       pythonName: "com_native_widened_action",
+      parameterValidation: "closed",
       parameters: [{ pythonName: "message" }],
     },
     {
       kind: "action",
       pythonName: "messages_find_conversation",
+      parameterValidation: "closed",
       parameters: [
         {
           pythonName: "query",
@@ -58,6 +62,7 @@ const toolRenderer = indexToolRendererMetadata({
     {
       kind: "action",
       pythonName: "reminders_find_reminders",
+      parameterValidation: "closed",
       parameters: [
         {
           pythonName: "query",
@@ -146,5 +151,45 @@ assert(builtinsIndex.byName.has("shortcuts_builtin_clipboard"), "Shortpy builtin
 assert(!collectToolRendererDiagnostics(builtinSource, [toolRenderer, builtinsIndex]).some((diagnostic) =>
   diagnostic.code === "unknownShortcutsCommand" && /shortcuts_builtin/.test(diagnostic.message)
 ), "Shortpy builtin helpers should not be flagged as unknown actions");
+
+const probeReport = buildDiagnosticReport(
+  "def shortcut() -> None:\n    com_missing_action()\n",
+  toolRenderer,
+  { sourcePath: "fixture.py", metadataPath: "metadata.json" }
+);
+assert.strictEqual(probeReport.diagnosticCount, 1);
+assert.deepStrictEqual(probeReport.diagnostics[0].range, {
+  start: { line: 2, column: 5 },
+  end: { line: 2, column: 23 },
+});
+assert.strictEqual(
+  probeReport.diagnostics[0].highlight,
+  "    com_missing_action()\n    ^^^^^^^^^^^^^^^^^^"
+);
+
+const incompleteIndex = indexToolRendererMetadata({
+  actions: [
+    {
+      kind: "action",
+      pythonName: "com_incomplete_action",
+      definitionMissing: true,
+      parameters: [{ pythonName: "value" }],
+    },
+    {
+      kind: "action",
+      pythonName: "calculator_calculate",
+      definitionBlock: "def calculator_calculate(operand=None, operand=None):",
+      parameters: [{ pythonName: "operand" }, { pythonName: "operand" }],
+    },
+  ],
+});
+const incompleteDiagnostics = collectToolRendererDiagnostics([
+  "def shortcut() -> None:",
+  "    com_incomplete_action(exported_alias=True)",
+  "    calculator_calculate(math_operand=1)",
+  "    rich_text(_from=source)",
+  "",
+].join("\n"), incompleteIndex);
+assert.strictEqual(incompleteDiagnostics.length, 0, "incomplete ToolRenderer surfaces and conversion helpers must fail open");
 
 console.log("diagnostics-ok");

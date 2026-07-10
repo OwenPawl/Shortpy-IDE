@@ -669,6 +669,12 @@ def query_filter_parameter(parameters: list[dict], name: str) -> dict | None:
     for parameter in parameters:
         if name in parameter_names(parameter):
             return parameter
+        if name == "query" and (
+            parameter.get("key") == "WFContentItemFilter"
+            or parameter.get("rawKey") == "WFContentItemFilter"
+            or "wfcontentitemfilter" in parameter_names(parameter)
+        ):
+            return parameter
     return None
 
 
@@ -680,56 +686,33 @@ def query_filter_scope_parameter(parameters: list[dict]) -> dict | None:
             continue
         if "_wfcontent_item_input_parameter" in type_name or "WFContentItemInputParameter" in parameter_names(parameter):
             return parameter
-    return None
+    compound_index = next((
+        index
+        for index, parameter in enumerate(parameters)
+        if parameter.get("key") == "WFCompoundType"
+        or parameter.get("rawKey") == "WFCompoundType"
+        or "wfcompoundtype" in parameter_names(parameter)
+    ), -1)
+    return parameters[compound_index + 1] if 0 <= compound_index < len(parameters) - 1 else None
 
 
 def is_query_filter_item(item: object) -> bool:
     if not isinstance(item, dict):
+        return False
+    if item.get("filterActionSurface") == "expanded-query":
         return False
     for parameter in item.get("parameters") or []:
         if not isinstance(parameter, dict):
             continue
         if (parameter.get("pythonName") == "query" or parameter.get("name") == "query" or parameter.get("inline")) and str(parameter.get("type") or "").startswith("query_"):
             return True
+        if (
+            parameter.get("key") == "WFContentItemFilter"
+            or parameter.get("rawKey") == "WFContentItemFilter"
+            or "wfcontentitemfilter" in parameter_names(parameter)
+        ):
+            return True
     return False
-
-
-def filter_doc_lines(item: dict, parameters: list[dict]) -> list[str]:
-    lines: list[str] = []
-    if item.get("displayName") or item.get("pythonName"):
-        lines.append(str(item.get("displayName") or item.get("pythonName")))
-    if item.get("summary"):
-        lines.append(str(item.get("summary")))
-    if parameters:
-        lines.append("Args:")
-        for parameter in parameters:
-            doc = parameter.get("doc") or parameter.get("summary") or f"({parameter.get('type') or 'Any'})"
-            lines.append(f"{parameter.get('pythonName')}: {doc}")
-    if item.get("returnDocs") or item.get("returnType"):
-        lines.append("Returns:")
-        lines.append(str(item.get("returnDocs") or item.get("returnType")))
-    return [line for line in lines if line]
-
-
-def filter_signature(item: dict, parameters: list[dict]) -> str:
-    return_type = item.get("returnType") or parse_return_type(str(item.get("signature") or "")) or "Any"
-    lines = [f"def {item.get('pythonName')}("]
-    for parameter in parameters:
-        type_text = f": {parameter.get('type')}" if parameter.get("type") else ""
-        default_text = ""
-        if parameter.get("defaultValue") not in {None, ""}:
-            default_text = f" = {parameter.get('defaultValue')}"
-        lines.append(f"    {parameter.get('pythonName')}{type_text}{default_text},")
-    lines.append(f") -> {return_type}:")
-    return "\n".join(lines)
-
-
-def filter_definition_block(item: dict, parameters: list[dict]) -> str:
-    lines = [filter_signature(item, parameters), '    """']
-    for line in filter_doc_lines(item, parameters):
-        lines.append(f"    {line}")
-    lines.append('    """')
-    return "\n".join(lines)
 
 
 def normalize_query_filter_item(item: object) -> object:
@@ -746,7 +729,7 @@ def normalize_query_filter_item(item: object) -> object:
     native_limit = query_filter_parameter(parameters, "limit")
     native_get = query_filter_parameter(parameters, "get")
     native_scope = query_filter_scope_parameter(parameters)
-    query_type = str(query.get("type") or "").strip()
+    query_type = str(query.get("type") or "Any").strip()
     output_parameters: list[dict] = [
         {
             **query,
@@ -758,8 +741,8 @@ def normalize_query_filter_item(item: object) -> object:
             "positional": False,
             "doc": "The filter conditions.",
             "summary": "The filter conditions.",
-            "aliases": unique_strings(["query", parameter_names(query), "WFContentItemFilter"]),
-            "acceptedNames": unique_strings(["query", parameter_names(query), "WFContentItemFilter"]),
+            "aliases": unique_strings(["query", visible_compiler_parameter_names(query)]),
+            "acceptedNames": unique_strings(["query", visible_compiler_parameter_names(query)]),
         },
         {
             "pythonName": "query_operator",
@@ -781,8 +764,8 @@ def normalize_query_filter_item(item: object) -> object:
             "defaultValue": "None",
             "inline": False,
             "positional": False,
-            "aliases": unique_strings(["sort_by", parameter_names(sort_by)]),
-            "acceptedNames": unique_strings(["sort_by", parameter_names(sort_by)]),
+            "aliases": unique_strings(["sort_by", visible_compiler_parameter_names(sort_by)]),
+            "acceptedNames": unique_strings(["sort_by", visible_compiler_parameter_names(sort_by)]),
         })
         output_parameters.append({
             "pythonName": "query_sort_order",
@@ -802,8 +785,8 @@ def normalize_query_filter_item(item: object) -> object:
         "defaultValue": "None",
         "doc": limit_doc,
         "summary": limit_doc,
-        "aliases": unique_strings(["limit", "get", parameter_names(native_limit), parameter_names(native_get)]),
-        "acceptedNames": unique_strings(["limit", "get", parameter_names(native_limit), parameter_names(native_get)]),
+        "aliases": unique_strings(["limit", "get", visible_compiler_parameter_names(native_limit or {}), visible_compiler_parameter_names(native_get or {})]),
+        "acceptedNames": unique_strings(["limit", "get", visible_compiler_parameter_names(native_limit or {}), visible_compiler_parameter_names(native_get or {})]),
     })
     if native_scope:
         scope_doc = native_scope.get("doc") or native_scope.get("summary") or "The scope of the query."
@@ -817,37 +800,52 @@ def normalize_query_filter_item(item: object) -> object:
             "positional": False,
             "doc": scope_doc,
             "summary": scope_doc,
-            "aliases": unique_strings(["scope", parameter_names(native_scope)]),
-            "acceptedNames": unique_strings(["scope", parameter_names(native_scope)]),
+            "aliases": unique_strings(["scope", visible_compiler_parameter_names(native_scope)]),
+            "acceptedNames": unique_strings(["scope", visible_compiler_parameter_names(native_scope)]),
         })
-    docs = filter_doc_lines(item, output_parameters)
     return {
         **item,
         "parameters": output_parameters,
-        "signature": filter_signature(item, output_parameters),
-        "definitionBlock": filter_definition_block(item, output_parameters),
-        "documentation": "\n".join(docs),
-        "docString": "\n".join(docs),
-        "docSections": parse_doc_sections(docs),
-        "nativeDefinitionBlock": item.get("definitionBlock"),
-        "nativeSignature": item.get("signature"),
         "filterActionSurface": "expanded-query",
     }
+
+
+def visible_compiler_parameter_names(parameter: dict) -> list[str]:
+    names = [
+        name
+        for name in unique_strings([
+            parameter.get("pythonName"),
+            parameter.get("name"),
+            parameter.get("aliases"),
+            parameter.get("acceptedNames"),
+        ])
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", name)
+    ]
+    for raw_name in unique_strings([parameter.get("key"), parameter.get("rawKey")]):
+        normalized = python_name_from_label(raw_name[2:] if raw_name.startswith("WF") else raw_name)
+        if normalized and normalized not in names:
+            names.append(normalized)
+    return names
 
 
 def visible_toolrenderer_parameter(parameter: object) -> object:
     if not isinstance(parameter, dict):
         return parameter
-    return {
+    output = {
         key: value
         for key, value in parameter.items()
         if key not in VISIBLE_TOOLKIT_PARAMETER_KEYS
     }
+    accepted_names = visible_compiler_parameter_names(parameter)
+    if accepted_names:
+        output["acceptedNames"] = accepted_names
+    return output
 
 
 def visible_toolrenderer_item(item: object) -> object:
     if not isinstance(item, dict):
         return item
+    item = normalize_query_filter_item(item)
     output = {
         key: value
         for key, value in item.items()
@@ -855,31 +853,54 @@ def visible_toolrenderer_item(item: object) -> object:
     }
     if isinstance(output.get("parameters"), list):
         output["parameters"] = [visible_toolrenderer_parameter(parameter) for parameter in output["parameters"]]
-    return normalize_query_filter_item(output)
+    return output
 
 
-def rewrite_def_name(text: object, old_name: str, new_name: str) -> object:
-    if not isinstance(text, str) or not old_name or not new_name or old_name == new_name:
-        return text
-    return re.sub(
-        rf"(\bdef\s+){re.escape(old_name)}(\s*\()",
-        rf"\1{new_name}\2",
-        text,
-        count=1,
-    )
-
-
-def clone_toolrenderer_item_with_python_name(item: dict, python_name: str) -> dict:
-    old_name = str(item.get("pythonName") or "")
-    if not python_name or old_name == python_name:
+def merge_toolkit_parameter_aliases(item: dict, toolkit_item: dict) -> dict:
+    rendered = item.get("parameters")
+    toolkit = toolkit_item.get("parameters")
+    if not isinstance(rendered, list) or not isinstance(toolkit, list):
         return item
-    clone = dict(item)
-    clone["pythonName"] = python_name
-    clone["canonicalizedFrom"] = old_name
-    clone["canonicalizationSource"] = "sqlite-pythonName"
-    clone["signature"] = rewrite_def_name(clone.get("signature"), old_name, python_name)
-    clone["definitionBlock"] = rewrite_def_name(clone.get("definitionBlock"), old_name, python_name)
-    return clone
+
+    toolkit_by_name: dict[str, list[dict]] = {}
+    for toolkit_parameter in toolkit:
+        if not isinstance(toolkit_parameter, dict):
+            continue
+        for name in visible_compiler_parameter_names(toolkit_parameter):
+            toolkit_by_name.setdefault(name, []).append(toolkit_parameter)
+
+    rendered_names = [parameter.get("pythonName") if isinstance(parameter, dict) else None for parameter in rendered]
+    toolkit_names = [parameter.get("pythonName") if isinstance(parameter, dict) else None for parameter in toolkit]
+    positionally_aligned = len(rendered) == len(toolkit) and rendered_names == toolkit_names
+
+    parameters = []
+    for index, rendered_parameter in enumerate(rendered):
+        if not isinstance(rendered_parameter, dict):
+            return item
+        parameter = dict(rendered_parameter)
+        if positionally_aligned:
+            toolkit_parameter = toolkit[index]
+        else:
+            candidates: dict[int, dict] = {}
+            for name in visible_compiler_parameter_names(rendered_parameter):
+                for candidate in toolkit_by_name.get(name, []):
+                    candidates[id(candidate)] = candidate
+            toolkit_parameter = next(iter(candidates.values())) if len(candidates) == 1 else None
+        if not toolkit_parameter:
+            parameters.append(parameter)
+            continue
+
+        accepted_names = unique_strings([
+            visible_compiler_parameter_names(rendered_parameter),
+            visible_compiler_parameter_names(toolkit_parameter),
+        ])
+        if accepted_names:
+            parameter["acceptedNames"] = accepted_names
+        raw_key = toolkit_parameter.get("key") or toolkit_parameter.get("rawKey")
+        if isinstance(raw_key, str) and raw_key:
+            parameter["rawKey"] = raw_key
+        parameters.append(parameter)
+    return {**item, "parameters": parameters}
 
 
 def current_toolkit_metadata() -> dict:
@@ -908,14 +929,10 @@ def toolkit_items_by_id(kind: str) -> dict[str, dict]:
     return by_id
 
 
-def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[dict], dict]:
+def align_toolrenderer_items_by_exact_name(items: list[dict], kind: str) -> tuple[list[dict], dict]:
     toolkit_by_id = toolkit_items_by_id(kind)
-    toolrenderer_by_id: dict[str, dict] = {}
     toolrenderer_by_name: dict[str, dict | None] = {}
     for item in items:
-        identifier = item.get("nativeIdentifier") or item.get("id")
-        if isinstance(identifier, str) and identifier:
-            toolrenderer_by_id.setdefault(identifier, item)
         name = item.get("pythonName")
         if isinstance(name, str) and name:
             if name in toolrenderer_by_name:
@@ -925,7 +942,6 @@ def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[
 
     output: list[dict] = []
     matched = 0
-    renamed = 0
     missing_definitions = 0
 
     for identifier in sorted(toolkit_by_id):
@@ -933,22 +949,15 @@ def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[
         name = toolkit_item.get("pythonName")
         if not isinstance(name, str) or not name:
             continue
-        template = toolrenderer_by_id.get(identifier)
-        match_source = "nativeIdentifier"
-        if not template:
-            by_name = toolrenderer_by_name.get(name)
-            if by_name:
-                template = by_name
-                match_source = "pythonName"
+        template = toolrenderer_by_name.get(name)
         if template:
-            clone = clone_toolrenderer_item_with_python_name(template, name)
+            clone = dict(template)
+            clone = merge_toolkit_parameter_aliases(clone, toolkit_item)
             clone["id"] = identifier
             clone["nativeIdentifier"] = identifier
-            clone["metadataMatchSource"] = match_source
+            clone["metadataMatchSource"] = "exact-pythonName"
             output.append(clone)
             matched += 1
-            if template.get("pythonName") != name:
-                renamed += 1
             continue
         missing_definitions += 1
         output.append({
@@ -965,38 +974,35 @@ def canonicalize_toolrenderer_items(items: list[dict], kind: str) -> tuple[list[
         })
 
     return output, {
-        "source": "sqlite-pythonName-strict-id-or-exact-name",
+        "source": "ToolRenderer.pythonInterface exact pythonName",
         "matchedDefinitions": matched,
-        "renamedDefinitions": renamed,
         "missingDefinitions": missing_definitions,
     }
 
 
-def canonicalize_toolrenderer_metadata(metadata: dict) -> dict:
+def align_toolrenderer_metadata_by_exact_name(metadata: dict) -> dict:
     actions = [item for item in metadata.get("actions", []) or [] if isinstance(item, dict)]
     triggers = [item for item in metadata.get("triggers", []) or [] if isinstance(item, dict)]
-    canonical_actions, action_summary = canonicalize_toolrenderer_items(actions, "actions")
-    canonical_triggers, trigger_summary = canonicalize_toolrenderer_items(triggers, "triggers")
+    aligned_actions, action_summary = align_toolrenderer_items_by_exact_name(actions, "actions")
+    aligned_triggers, trigger_summary = align_toolrenderer_items_by_exact_name(triggers, "triggers")
     summary = {
-        "source": "sqlite-pythonName-strict-id-or-exact-name",
+        "source": "ToolRenderer.pythonInterface exact pythonName",
         "actionMatchedDefinitions": action_summary["matchedDefinitions"],
-        "actionRenamedDefinitions": action_summary["renamedDefinitions"],
         "actionMissingDefinitions": action_summary["missingDefinitions"],
         "triggerMatchedDefinitions": trigger_summary["matchedDefinitions"],
-        "triggerRenamedDefinitions": trigger_summary["renamedDefinitions"],
         "triggerMissingDefinitions": trigger_summary["missingDefinitions"],
     }
     output = {
         **metadata,
-        "actions": canonical_actions,
-        "triggers": canonical_triggers,
-        "nameCanonicalization": summary,
+        "actions": aligned_actions,
+        "triggers": aligned_triggers,
+        "nativeNameAlignment": summary,
     }
     return output
 
 
 def visible_toolrenderer_metadata(metadata: dict) -> dict:
-    metadata = canonicalize_toolrenderer_metadata(metadata)
+    metadata = align_toolrenderer_metadata_by_exact_name(metadata)
     output = {
         key: value
         for key, value in metadata.items()
@@ -2235,47 +2241,224 @@ def replace_refs_with_inline_metadata(source: str, metadata_by_tag: dict[str, ob
     return re.sub(r"ref\((0x[0-9a-fA-F]+)\)", repl, source), replacements
 
 
-def action_identifiers_from_plist_object(value: object) -> list[str]:
+def action_origins_from_plist_object(value: object) -> list[dict]:
     if not isinstance(value, dict):
         return []
     actions = value.get("WFWorkflowActions")
     if not isinstance(actions, list):
         return []
-    identifiers = []
-    for action in actions:
+    origins = []
+    for index, action in enumerate(actions):
         if not isinstance(action, dict):
             continue
         identifier = action.get("WFWorkflowActionIdentifier")
-        if isinstance(identifier, str) and identifier:
-            identifiers.append(identifier)
-    return identifiers
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        uuid = action.get("WFWorkflowActionUUID")
+        parameters = action.get("WFWorkflowActionParameters")
+        origins.append({
+            "actionIndex": index,
+            "actionIdentifier": identifier,
+            "actionUUID": uuid if isinstance(uuid, str) and uuid else None,
+            "actionParameters": parameters if isinstance(parameters, dict) else {},
+        })
+    return origins
+
+
+def action_identifiers_from_plist_object(value: object) -> list[str]:
+    return [origin["actionIdentifier"] for origin in action_origins_from_plist_object(value)]
+
+
+def action_origins_from_plist_data(data: bytes) -> list[dict]:
+    try:
+        return action_origins_from_plist_object(plistlib.loads(data))
+    except Exception:
+        return []
 
 
 def action_identifiers_from_plist_data(data: bytes) -> list[str]:
+    return [origin["actionIdentifier"] for origin in action_origins_from_plist_data(data)]
+
+
+def action_origins_from_plist_json(data: bytes) -> list[dict]:
     try:
-        return action_identifiers_from_plist_object(plistlib.loads(data))
+        return action_origins_from_plist_object(json.loads(data.decode("utf-8")))
     except Exception:
         return []
 
 
 def action_identifiers_from_plist_json(data: bytes) -> list[str]:
-    try:
-        return action_identifiers_from_plist_object(json.loads(data.decode("utf-8")))
-    except Exception:
-        return []
+    return [origin["actionIdentifier"] for origin in action_origins_from_plist_json(data)]
 
 
-def toolkit_action_python_names_by_identifier() -> dict[str, str]:
+def toolkit_action_items_by_identifier() -> dict[str, dict]:
     metadata = current_toolkit_metadata()
-    output: dict[str, str] = {}
+    output: dict[str, dict] = {}
     for item in metadata.get("actions", []) or []:
         if not isinstance(item, dict):
             continue
         identifier = item.get("id")
         python_name = item.get("pythonName")
         if isinstance(identifier, str) and isinstance(python_name, str) and identifier and python_name:
-            output[identifier] = python_name
+            output[identifier] = item
     return output
+
+
+def toolkit_action_previous_python_names_by_identifier() -> dict[str, str]:
+    selection_path = Path(__file__).resolve().parents[1] / "logs" / "shortpy-toolkit-selection.json"
+    try:
+        selection = json.loads(selection_path.read_text())
+        changes = selection.get("duplicate_adjustment", {}).get("tables", {}).get("Tools", {}).get("changes", [])
+    except Exception:
+        return {}
+    output = {}
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        identifier = change.get("id")
+        old_name = change.get("oldPythonName")
+        if isinstance(identifier, str) and identifier and isinstance(old_name, str) and old_name:
+            output[identifier] = old_name
+    return output
+
+
+def toolrenderer_action_native_aliases_by_identifier() -> dict[str, set[str]]:
+    metadata_path = Path(__file__).resolve().parents[1] / "logs" / "vscode-extension-toolrenderer-interface.json"
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except Exception:
+        return {}
+    output: dict[str, set[str]] = {}
+    for item in metadata.get("actions", []) or []:
+        if not isinstance(item, dict):
+            continue
+        identifier = item.get("nativeIdentifier") or item.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        development = item.get("developmentProperties")
+        if not isinstance(development, dict):
+            development = {}
+        aliases = unique_strings([
+            item.get("canonicalizedFrom"),
+            item.get("nativePythonName"),
+            development.get("function_name"),
+            development.get("functionName"),
+        ])
+        if aliases:
+            output.setdefault(identifier, set()).update(aliases)
+    return output
+
+
+def python_name_from_label(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    words = []
+    for token in re.findall(r"[0-9A-Za-z]+", value):
+        if token.isupper() or (len(token) > 1 and token[:-1].isupper() and token[-1] == "s"):
+            words.append(token.lower())
+            continue
+        token = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", token)
+        token = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", token)
+        words.extend(part.lower() for part in token.split("_") if part)
+    return "_".join(words)
+
+
+def parameter_aliases(parameter: object) -> set[str]:
+    if not isinstance(parameter, dict):
+        return set()
+    values = unique_strings([
+        parameter.get("pythonName"),
+        parameter.get("name"),
+        parameter.get("key"),
+        parameter.get("rawKey"),
+        parameter.get("aliases"),
+        parameter.get("acceptedNames"),
+    ])
+    aliases = set(values)
+    for value in values:
+        aliases.add(python_name_from_label(value))
+        if value.startswith("WF") and len(value) > 2:
+            aliases.add(python_name_from_label(value[2:]))
+    return {alias for alias in aliases if alias}
+
+
+def action_canonicalization_descriptors(action_origins: list[object]) -> list[dict]:
+    toolkit_items = toolkit_action_items_by_identifier()
+    previous_names = toolkit_action_previous_python_names_by_identifier()
+    native_aliases = toolrenderer_action_native_aliases_by_identifier()
+    descriptors = []
+    for fallback_index, origin_value in enumerate(action_origins):
+        if isinstance(origin_value, str):
+            origin = {
+                "actionIndex": fallback_index,
+                "actionIdentifier": origin_value,
+                "actionUUID": None,
+            }
+        elif isinstance(origin_value, dict):
+            origin = {
+                "actionIndex": origin_value.get("actionIndex", fallback_index),
+                "actionIdentifier": origin_value.get("actionIdentifier"),
+                "actionUUID": origin_value.get("actionUUID"),
+                "actionParameters": origin_value.get("actionParameters", {}),
+            }
+        else:
+            continue
+        identifier = origin.get("actionIdentifier")
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        item = toolkit_items.get(identifier)
+        if not item:
+            continue
+        canonical_name = item.get("pythonName")
+        if not isinstance(canonical_name, str) or not canonical_name:
+            continue
+        aliases = {canonical_name, python_name_from_label(item.get("displayName"))}
+        aliases.update(native_aliases.get(identifier, set()))
+        previous_name = previous_names.get(identifier)
+        if previous_name:
+            aliases.add(previous_name)
+        parameters = item.get("parameters")
+        has_parameter_metadata = isinstance(parameters, list)
+        action_parameters = origin.get("actionParameters")
+        if not isinstance(action_parameters, dict):
+            action_parameters = {}
+        accepted_parameters = set()
+        present_parameter_names = set()
+        for parameter in parameters or []:
+            accepted_parameters.update(parameter_aliases(parameter))
+            if not isinstance(parameter, dict):
+                continue
+            raw_keys = unique_strings([parameter.get("key"), parameter.get("rawKey")])
+            if not any(key in action_parameters for key in raw_keys):
+                continue
+            python_name = parameter.get("pythonName")
+            if not isinstance(python_name, str) or not python_name:
+                python_name = python_name_from_label(parameter.get("name") or parameter.get("key"))
+            if python_name:
+                present_parameter_names.add(python_name)
+        raw_parameter_keys = {
+            parameter.get("key")
+            for parameter in parameters or []
+            if isinstance(parameter, dict)
+        }
+        if "WFContentItemFilter" in raw_parameter_keys:
+            accepted_parameters.update({"query", "query_operator", "query_sort_order", "scope"})
+        output_aliases = {
+            python_name_from_label(item.get("displayName")),
+        }
+        for key in ("CustomOutputName", "WFCustomOutputName"):
+            output_aliases.add(python_name_from_label(action_parameters.get(key)))
+        descriptors.append({
+            **origin,
+            "canonicalName": canonical_name,
+            "nativeAliases": {alias for alias in aliases if alias},
+            "outputAliases": {alias for alias in output_aliases if alias},
+            "acceptedParameters": accepted_parameters,
+            "presentParameterNames": present_parameter_names,
+            "hasParameterMetadata": has_parameter_metadata,
+            "isStructural": "WFControlFlowMode" in action_parameters or "GroupingIdentifier" in action_parameters,
+        })
+    return descriptors
 
 
 def local_function_names(tree: ast.AST) -> set[str]:
@@ -2297,82 +2480,747 @@ def imported_action_call_name(node: ast.AST, locals_: set[str]) -> ast.Name | No
     return node.func
 
 
-def imported_action_call_candidates(tree: ast.AST, locals_: set[str]) -> list[ast.Name]:
-    candidates: list[ast.Name] = []
-
-    def visit_statements(statements: object) -> None:
-        if not isinstance(statements, list):
-            return
-        for statement in statements:
-            candidate = None
-            if isinstance(statement, ast.Expr):
-                candidate = imported_action_call_name(statement.value, locals_)
-            elif isinstance(statement, ast.Assign):
-                candidate = imported_action_call_name(statement.value, locals_)
-            elif isinstance(statement, ast.AnnAssign):
-                candidate = imported_action_call_name(statement.value, locals_)
-            if candidate is not None:
-                candidates.append(candidate)
-            for attribute in ("body", "orelse", "finalbody"):
-                visit_statements(getattr(statement, attribute, None))
-
+def imported_action_call_candidates(tree: ast.AST, locals_: set[str]) -> list[tuple[ast.Call, ast.Name]]:
+    candidates = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            visit_statements(node.body)
-    return sorted(candidates, key=lambda item: (item.lineno, item.col_offset))
+        candidate = imported_action_call_name(node, locals_)
+        if candidate is not None:
+            assert isinstance(node, ast.Call)
+            candidates.append((node, candidate))
+    return sorted(candidates, key=lambda item: (item[1].lineno, item[1].col_offset))
 
 
-def canonicalize_imported_action_names(source: str, action_identifiers: list[str]) -> tuple[str, list[dict]]:
-    if not source or not action_identifiers:
-        return source, []
-    by_identifier = toolkit_action_python_names_by_identifier()
-    canonical_names = [
-        by_identifier[identifier]
-        for identifier in action_identifiers
-        if identifier in by_identifier
+def call_matches_action_descriptor(call: ast.Call, descriptor: dict) -> bool:
+    keyword_names = {keyword.arg for keyword in call.keywords if isinstance(keyword.arg, str)}
+    if not keyword_names:
+        return True
+    if not descriptor["hasParameterMetadata"]:
+        return False
+    return keyword_names.issubset(descriptor["acceptedParameters"])
+
+
+def monotonic_feasible_action_indexes(entries: list[dict]) -> list[set[int]] | None:
+    if not entries:
+        return []
+    forward: list[set[int]] = []
+    for offset, entry in enumerate(entries):
+        previous = forward[offset - 1] if offset else None
+        reachable = {
+            descriptor["actionIndex"]
+            for descriptor in entry["descriptors"]
+            if previous is None or any(previous_index < descriptor["actionIndex"] for previous_index in previous)
+        }
+        forward.append(reachable)
+
+    backward: list[set[int]] = [set() for _entry in entries]
+    for offset in range(len(entries) - 1, -1, -1):
+        following = backward[offset + 1] if offset + 1 < len(entries) else None
+        backward[offset] = {
+            descriptor["actionIndex"]
+            for descriptor in entries[offset]["descriptors"]
+            if following is None or any(following_index > descriptor["actionIndex"] for following_index in following)
+        }
+
+    feasible = [
+        forward[offset].intersection(backward[offset])
+        for offset in range(len(entries))
     ]
-    if not canonical_names:
-        return source, []
+    return feasible if all(feasible) else None
+
+
+def canonicalize_imported_action_names(source: str, action_origins: list[object]) -> tuple[str, dict]:
+    report = {
+        "present": False,
+        "source": "workflow action identities and ToolKit action metadata",
+        "strategy": "callee-alias-or-monotonic-parameter-consensus",
+        "status": "skipped",
+        "replacement_count": 0,
+        "matched_call_count": 0,
+        "unresolved_call_count": 0,
+        "ignored_call_count": 0,
+        "replacements": [],
+        "unresolved_calls": [],
+        "ignored_calls": [],
+    }
+    if not source or not action_origins:
+        report["reason"] = "source or workflow action identities are unavailable"
+        return source, report
+    descriptors = action_canonicalization_descriptors(action_origins)
+    if not descriptors:
+        report["reason"] = "no workflow actions resolved to ToolKit action metadata"
+        return source, report
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return source, []
+        report["reason"] = "native Python could not be parsed"
+        return source, report
     calls = imported_action_call_candidates(tree, local_function_names(tree))
     if not calls:
-        return source, []
+        report["reason"] = "native Python contains no named call candidates"
+        return source, report
+
+    call_matches = []
+    for call, func_node in calls:
+        alias_descriptors = [
+            descriptor
+            for descriptor in descriptors
+            if func_node.id in descriptor["nativeAliases"]
+        ]
+        compatible = [
+            descriptor
+            for descriptor in alias_descriptors
+            if call_matches_action_descriptor(call, descriptor)
+        ]
+        inferred_descriptors = []
+        if not alias_descriptors and func_node.id.startswith("com_"):
+            inferred_descriptors = [
+                descriptor
+                for descriptor in descriptors
+                if not descriptor["isStructural"] and call_matches_action_descriptor(call, descriptor)
+            ]
+        if alias_descriptors or func_node.id.startswith("com_"):
+            call_matches.append({
+                "call": call,
+                "func": func_node,
+                "aliasDescriptors": alias_descriptors,
+                "compatibleDescriptors": compatible,
+                "inferredDescriptors": inferred_descriptors,
+            })
+    if not call_matches:
+        report["reason"] = "no named calls match the workflow action metadata"
+        return source, report
+
+    compatible_counts = {}
+    descriptor_capacity = {}
+    for match in call_matches:
+        name = match["func"].id
+        if match["compatibleDescriptors"]:
+            compatible_counts[name] = compatible_counts.get(name, 0) + 1
+    for descriptor in descriptors:
+        for alias in descriptor["nativeAliases"]:
+            descriptor_capacity.setdefault(alias, set()).add(descriptor["actionIndex"])
+
     line_offsets = line_offsets_for(source)
     replacements: list[tuple[int, int, str, str]] = []
-    for func_node, canonical_name in zip(calls, canonical_names):
+    replacement_details = []
+    unresolved = []
+    ignored = []
+    monotonic_entries = []
+    matched_call_count = 0
+    for match in call_matches:
+        func_node = match["func"]
         old_name = func_node.id
+        if not match["aliasDescriptors"]:
+            keyword_names = {
+                keyword.arg
+                for keyword in match["call"].keywords
+                if isinstance(keyword.arg, str)
+            }
+            if keyword_names == {"_from"}:
+                ignored.append({
+                    "name": old_name,
+                    "line": func_node.lineno,
+                    "column": func_node.col_offset,
+                    "reason": "conversion helper is not a workflow action call",
+                    "candidateActionIdentifiers": [],
+                })
+                continue
+            inferred = match["inferredDescriptors"]
+            if not inferred:
+                unresolved.append({
+                    "name": old_name,
+                    "line": func_node.lineno,
+                    "column": func_node.col_offset,
+                    "reason": "reserved native call has no parameter-compatible workflow action",
+                    "candidateActionIdentifiers": [],
+                })
+                continue
+            monotonic_entries.append({
+                "match": match,
+                "descriptors": inferred,
+                "inferred": True,
+            })
+            continue
+        compatible = match["compatibleDescriptors"]
+        if not compatible:
+            detail = {
+                "name": old_name,
+                "line": func_node.lineno,
+                "column": func_node.col_offset,
+                "reason": "call parameters do not match the workflow action metadata",
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"]
+                    for descriptor in match["aliasDescriptors"]
+                }),
+            }
+            keyword_names = {
+                keyword.arg
+                for keyword in match["call"].keywords
+                if isinstance(keyword.arg, str)
+            }
+            if keyword_names == {"_from"}:
+                detail["reason"] = "conversion helper is not a workflow action call"
+                ignored.append(detail)
+            else:
+                unresolved.append(detail)
+            continue
+        if compatible_counts.get(old_name, 0) > len(descriptor_capacity.get(old_name, set())):
+            unresolved.append({
+                "name": old_name,
+                "line": func_node.lineno,
+                "column": func_node.col_offset,
+                "reason": "more compatible calls than workflow action instances",
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"] for descriptor in compatible
+                }),
+            })
+            continue
+        canonical_names = {descriptor["canonicalName"] for descriptor in compatible}
+        if len(canonical_names) != 1:
+            unresolved.append({
+                "name": old_name,
+                "line": func_node.lineno,
+                "column": func_node.col_offset,
+                "reason": "workflow action identities disagree on the canonical name",
+                "candidateCanonicalNames": sorted(canonical_names),
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"] for descriptor in compatible
+                }),
+            })
+            continue
+        canonical_name = next(iter(canonical_names))
+        monotonic_entries.append({
+            "match": match,
+            "descriptors": compatible,
+            "inferred": False,
+        })
+        matched_call_count += 1
         if old_name == canonical_name:
             continue
         start, end = node_span(func_node, line_offsets)
         replacements.append((start, end, old_name, canonical_name))
+        replacement_details.append({
+            "from": old_name,
+            "to": canonical_name,
+            "line": func_node.lineno,
+            "column": func_node.col_offset,
+            "actionIdentifiers": sorted({
+                descriptor["actionIdentifier"] for descriptor in compatible
+            }),
+            "actionIndexes": sorted({
+                descriptor["actionIndex"] for descriptor in compatible
+            }),
+            "matchSource": "callee-alias-parameter-consensus",
+        })
+
+    monotonic_entries.sort(key=lambda entry: (
+        entry["match"]["func"].lineno,
+        entry["match"]["func"].col_offset,
+    ))
+    feasible_indexes = monotonic_feasible_action_indexes(monotonic_entries)
+    for offset, entry in enumerate(monotonic_entries):
+        if not entry["inferred"]:
+            continue
+        match = entry["match"]
+        func_node = match["func"]
+        old_name = func_node.id
+        if feasible_indexes is None:
+            unresolved.append({
+                "name": old_name,
+                "line": func_node.lineno,
+                "column": func_node.col_offset,
+                "reason": "reserved native call has no complete monotonic workflow alignment",
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"] for descriptor in entry["descriptors"]
+                }),
+            })
+            continue
+        matching = [
+            descriptor
+            for descriptor in entry["descriptors"]
+            if descriptor["actionIndex"] in feasible_indexes[offset]
+        ]
+        canonical_names = {descriptor["canonicalName"] for descriptor in matching}
+        if len(canonical_names) != 1:
+            unresolved.append({
+                "name": old_name,
+                "line": func_node.lineno,
+                "column": func_node.col_offset,
+                "reason": "monotonic workflow provenance does not identify one canonical name",
+                "candidateCanonicalNames": sorted(canonical_names),
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"] for descriptor in matching
+                }),
+                "candidateActionIndexes": sorted(feasible_indexes[offset]),
+            })
+            continue
+        canonical_name = next(iter(canonical_names))
+        matched_call_count += 1
+        start, end = node_span(func_node, line_offsets)
+        replacements.append((start, end, old_name, canonical_name))
+        replacement_details.append({
+            "from": old_name,
+            "to": canonical_name,
+            "line": func_node.lineno,
+            "column": func_node.col_offset,
+            "actionIdentifiers": sorted({
+                descriptor["actionIdentifier"] for descriptor in matching
+            }),
+            "actionIndexes": sorted(feasible_indexes[offset]),
+            "matchSource": "monotonic-parameter-provenance",
+        })
     rewritten = source
-    details: list[dict] = []
-    for start, end, old_name, canonical_name in sorted(replacements, key=lambda item: item[0], reverse=True):
+    for start, end, _old_name, canonical_name in sorted(replacements, key=lambda item: item[0], reverse=True):
         rewritten = rewritten[:start] + canonical_name + rewritten[end:]
-        details.append({"from": old_name, "to": canonical_name})
-    details.reverse()
-    return rewritten, details
+    status = "partial" if unresolved else ("applied" if matched_call_count else "skipped")
+    report.update({
+        "present": bool(replacements),
+        "status": status,
+        "replacement_count": len(replacement_details),
+        "matched_call_count": matched_call_count,
+        "unresolved_call_count": len(unresolved),
+        "ignored_call_count": len(ignored),
+        "replacements": replacement_details,
+        "unresolved_calls": unresolved,
+        "ignored_calls": ignored,
+    })
+    if status == "skipped":
+        report["reason"] = "matching aliases were conversion helpers, not workflow action calls"
+    return rewritten, report
 
 
-def canonicalize_import_response(response: dict, action_identifiers: list[str]) -> dict:
+def value_assignment_target(node: ast.AST) -> tuple[ast.Name, ast.AST] | None:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        return node.targets[0], node.value
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+        return node.target, node.value
+    return None
+
+
+def output_name_matches_alias(name: str, alias: str) -> bool:
+    if name == alias:
+        return True
+    suffix = name[len(alias):] if name.startswith(alias) else ""
+    return bool(suffix) and suffix.isdigit()
+
+
+def monotonic_assignments(candidate_indexes: list[list[int]], limit: int = 512) -> tuple[list[list[int]], bool]:
+    solutions: list[list[int]] = []
+    truncated = False
+
+    def visit(offset: int, previous: int, path: list[int]) -> None:
+        nonlocal truncated
+        if truncated:
+            return
+        if offset == len(candidate_indexes):
+            solutions.append(path.copy())
+            if len(solutions) >= limit:
+                truncated = True
+            return
+        for index in candidate_indexes[offset]:
+            if index <= previous:
+                continue
+            path.append(index)
+            visit(offset + 1, index, path)
+            path.pop()
+
+    visit(0, -1, [])
+    return solutions, truncated
+
+
+def call_action_index_evidence(tree: ast.AST, descriptors: list[dict]) -> tuple[list[tuple[tuple[int, int], int]], set[int]]:
+    calls = []
+    uncertain_indexes = set()
+    for call, func in imported_action_call_candidates(tree, local_function_names(tree)):
+        compatible = [
+            descriptor
+            for descriptor in descriptors
+            if func.id in descriptor["nativeAliases"] and call_matches_action_descriptor(call, descriptor)
+        ]
+        canonical_names = {descriptor["canonicalName"] for descriptor in compatible}
+        if len(canonical_names) != 1:
+            uncertain_indexes.update(descriptor["actionIndex"] for descriptor in compatible)
+            continue
+        indexes = sorted({descriptor["actionIndex"] for descriptor in compatible})
+        if not indexes:
+            continue
+        calls.append({
+            "position": (func.lineno, func.col_offset),
+            "indexes": indexes,
+        })
+
+    if not calls:
+        return [], uncertain_indexes
+    calls.sort(key=lambda item: item["position"])
+
+    forward = []
+    for offset, item in enumerate(calls):
+        previous = forward[offset - 1] if offset else None
+        reachable = {
+            index
+            for index in item["indexes"]
+            if previous is None or any(previous_index < index for previous_index in previous)
+        }
+        forward.append(reachable)
+
+    backward: list[set[int]] = [set() for _ in calls]
+    for offset in range(len(calls) - 1, -1, -1):
+        following = backward[offset + 1] if offset + 1 < len(calls) else None
+        backward[offset] = {
+            index
+            for index in calls[offset]["indexes"]
+            if following is None or any(following_index > index for following_index in following)
+        }
+
+    feasible = [
+        forward[offset].intersection(backward[offset])
+        for offset in range(len(calls))
+    ]
+    if any(not indexes for indexes in feasible):
+        all_indexes = {
+            index
+            for item in calls
+            for index in item["indexes"]
+        }
+        return [], uncertain_indexes.union(all_indexes)
+
+    anchors = [
+        (calls[offset]["position"], next(iter(indexes)))
+        for offset, indexes in enumerate(feasible)
+        if len(indexes) == 1
+    ]
+    possible_used_indexes = uncertain_indexes.union(*feasible)
+    return anchors, possible_used_indexes
+
+
+def docstring_expression_ids(tree: ast.AST) -> set[int]:
+    output = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            output.add(id(first))
+    return output
+
+
+def reify_imported_value_actions(source: str, action_origins: list[object]) -> tuple[str, dict]:
+    report = {
+        "present": False,
+        "source": "workflow action identities, serialized parameter presence, and ToolKit action metadata",
+        "strategy": "output-alias-or-monotonic-value-parameter-consensus",
+        "status": "skipped",
+        "replacement_count": 0,
+        "candidate_count": 0,
+        "unresolved_count": 0,
+        "replacements": [],
+        "unresolved": [],
+    }
+    if not source or not action_origins:
+        report["reason"] = "source or workflow action identities are unavailable"
+        return source, report
+    descriptors = action_canonicalization_descriptors(action_origins)
+    if not descriptors:
+        report["reason"] = "no workflow actions resolved to ToolKit action metadata"
+        return source, report
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        report["reason"] = "native Python could not be parsed"
+        return source, report
+
+    anchors, possible_call_indexes = call_action_index_evidence(tree, descriptors)
+    eligible_descriptors = [
+        descriptor
+        for descriptor in descriptors
+        if len(descriptor["presentParameterNames"]) == 1
+        and not descriptor["isStructural"]
+        and descriptor["canonicalName"] not in descriptor["outputAliases"]
+        and descriptor["actionIndex"] not in possible_call_indexes
+    ]
+    docstring_ids = docstring_expression_ids(tree)
+    candidates = []
+    for node in ast.walk(tree):
+        assignment = value_assignment_target(node)
+        target = None
+        if assignment is not None:
+            target, value = assignment
+            if isinstance(value, ast.Call):
+                continue
+        elif isinstance(node, ast.Expr) and id(node) not in docstring_ids and not isinstance(node.value, ast.Call):
+            value = node.value
+        else:
+            continue
+        position = (value.lineno, value.col_offset)
+        previous_indexes = [index for anchor_position, index in anchors if anchor_position < position]
+        next_indexes = [index for anchor_position, index in anchors if anchor_position > position]
+        lower_bound = max(previous_indexes) if previous_indexes else -1
+        upper_bound = min(next_indexes) if next_indexes else None
+        matching_descriptors = [
+            descriptor
+            for descriptor in eligible_descriptors
+            if descriptor["actionIndex"] > lower_bound
+            and (upper_bound is None or descriptor["actionIndex"] < upper_bound)
+            and (
+                target is None
+                or any(output_name_matches_alias(target.id, alias) for alias in descriptor["outputAliases"])
+            )
+        ]
+        if matching_descriptors:
+            candidates.append({
+                "target": target,
+                "value": value,
+                "descriptors": matching_descriptors,
+            })
+    candidates.sort(key=lambda item: (item["value"].lineno, item["value"].col_offset))
+    if not candidates:
+        report["reason"] = "native Python contains no value expressions matching unclaimed workflow actions"
+        return source, report
+
+    descriptor_by_index = {descriptor["actionIndex"]: descriptor for descriptor in eligible_descriptors}
+    solutions, truncated = monotonic_assignments([
+        sorted({descriptor["actionIndex"] for descriptor in candidate["descriptors"]})
+        for candidate in candidates
+    ])
+
+    line_offsets = line_offsets_for(source)
+    replacements: list[tuple[int, int, str]] = []
+    replacement_details = []
+    unresolved = []
+    for candidate_offset, candidate in enumerate(candidates):
+        target = candidate["target"]
+        possible_descriptors = [] if truncated else [
+            descriptor_by_index[index]
+            for index in sorted({solution[candidate_offset] for solution in solutions})
+            if index in descriptor_by_index
+        ]
+        pairs = {
+            (descriptor["canonicalName"], next(iter(descriptor["presentParameterNames"])))
+            for descriptor in possible_descriptors
+        }
+        display_target = target.id if target is not None else None
+        if truncated or not solutions or len(pairs) != 1:
+            unresolved.append({
+                "target": display_target,
+                "line": candidate["value"].lineno,
+                "column": candidate["value"].col_offset,
+                "reason": "workflow action order and metadata do not identify exactly one canonical action and present parameter",
+                "candidateCanonicalCalls": sorted(f"{name}({parameter}=...)" for name, parameter in pairs),
+                "candidateActionIdentifiers": sorted({
+                    descriptor["actionIdentifier"] for descriptor in possible_descriptors
+                }),
+            })
+            continue
+        canonical_name, parameter_name = next(iter(pairs))
+        value = candidate["value"]
+        start, end = node_span(value, line_offsets)
+        original_value = source[start:end]
+        replacement = f"{canonical_name}({parameter_name}={original_value})"
+        matching = [descriptor for descriptor in possible_descriptors if descriptor["canonicalName"] == canonical_name]
+        replacements.append((start, end, replacement))
+        replacement_details.append({
+            "target": display_target,
+            "parameter": parameter_name,
+            "to": canonical_name,
+            "line": value.lineno,
+            "column": value.col_offset,
+            "actionIdentifiers": sorted({descriptor["actionIdentifier"] for descriptor in matching}),
+            "actionIndexes": sorted({descriptor["actionIndex"] for descriptor in matching}),
+        })
+
+    rewritten = source
+    for start, end, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    report.update({
+        "present": bool(replacements),
+        "status": "partial" if unresolved else ("applied" if replacements else "skipped"),
+        "replacement_count": len(replacement_details),
+        "candidate_count": len(candidates),
+        "unresolved_count": len(unresolved),
+        "replacements": replacement_details,
+        "unresolved": unresolved,
+    })
+    if not replacements and not unresolved:
+        report["reason"] = "no value assignments could be reified"
+    return rewritten, report
+
+
+def expression_loads_name(node: ast.AST, name: str) -> bool:
+    return any(
+        isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id == name
+        for item in ast.walk(node)
+    )
+
+
+def pure_reference_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        return node.id
+    if (
+        isinstance(node, ast.JoinedStr)
+        and len(node.values) == 1
+        and isinstance(node.values[0], ast.FormattedValue)
+        and isinstance(node.values[0].value, ast.Name)
+        and isinstance(node.values[0].value.ctx, ast.Load)
+    ):
+        return node.values[0].value.id
+    return None
+
+
+def loop_assignment_calls(loop: ast.For) -> dict[str, list[ast.Call]]:
+    output: dict[str, list[ast.Call]] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def visit_For(self, node: ast.For) -> None:
+            return
+
+        def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+            return
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
+                output.setdefault(node.targets[0].id, []).append(node.value)
+            self.generic_visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name) and isinstance(node.value, ast.Call):
+                output.setdefault(node.target.id, []).append(node.value)
+            if node.value is not None:
+                self.generic_visit(node.value)
+
+    visitor = Visitor()
+    for statement in loop.body:
+        visitor.visit(statement)
+    return output
+
+
+def initialize_imported_loop_carried_values(source: str) -> tuple[str, dict]:
+    report = {
+        "present": False,
+        "source": "native Python AST control-flow recurrence",
+        "strategy": "same-call-keyword-recurrence-seed-consensus",
+        "status": "skipped",
+        "initialization_count": 0,
+        "initializations": [],
+    }
+    if not source:
+        report["reason"] = "source is unavailable"
+        return source, report
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        report["reason"] = "native Python could not be parsed"
+        return source, report
+
+    function_arguments = set()
+    for function in [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        function_arguments.update(argument.arg for argument in function.args.args)
+        function_arguments.update(argument.arg for argument in function.args.posonlyargs)
+        function_arguments.update(argument.arg for argument in function.args.kwonlyargs)
+        if function.args.vararg is not None:
+            function_arguments.add(function.args.vararg.arg)
+        if function.args.kwarg is not None:
+            function_arguments.add(function.args.kwarg.arg)
+
+    line_offsets = line_offsets_for(source)
+    insertions: dict[int, list[tuple[str, str, int]]] = {}
+    for loop in [node for node in ast.walk(tree) if isinstance(node, ast.For)]:
+        defined_before = set(function_arguments)
+        defined_before.update(
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and getattr(node, "lineno", loop.lineno) < loop.lineno
+        )
+        for target, calls in loop_assignment_calls(loop).items():
+            if target in defined_before:
+                continue
+            seeds = set()
+            for recursive_call in calls:
+                recursive_function = ast.dump(recursive_call.func, include_attributes=False)
+                for keyword in recursive_call.keywords:
+                    if not isinstance(keyword.arg, str) or not expression_loads_name(keyword.value, target):
+                        continue
+                    for seed_call in calls:
+                        if seed_call is recursive_call:
+                            continue
+                        if ast.dump(seed_call.func, include_attributes=False) != recursive_function:
+                            continue
+                        seed_keyword = next(
+                            (
+                                candidate
+                                for candidate in seed_call.keywords
+                                if candidate.arg == keyword.arg
+                                and not expression_loads_name(candidate.value, target)
+                            ),
+                            None,
+                        )
+                        if seed_keyword is None:
+                            continue
+                        seed_name = pure_reference_name(seed_keyword.value)
+                        if seed_name in defined_before:
+                            seeds.add(seed_name)
+            if len(seeds) == 1:
+                insertions.setdefault(line_offsets[loop.lineno - 1], []).append(
+                    (target, next(iter(seeds)), loop.lineno)
+                )
+
+    rewritten = source
+    details = []
+    for offset, values in sorted(insertions.items(), reverse=True):
+        line_end = source.find("\n", offset)
+        if line_end < 0:
+            line_end = len(source)
+        line = source[offset:line_end]
+        indent = re.match(r"[ \t]*", line).group(0)
+        unique_values = sorted(set(values))
+        text = "".join(f"{indent}{target} = {seed}\n" for target, seed, _line in unique_values)
+        rewritten = rewritten[:offset] + text + rewritten[offset:]
+        details.extend({
+            "target": target,
+            "seed": seed,
+            "beforeLine": line_number,
+        } for target, seed, line_number in unique_values)
+
+    report.update({
+        "present": bool(details),
+        "status": "applied" if details else "skipped",
+        "initialization_count": len(details),
+        "initializations": sorted(details, key=lambda item: (item["beforeLine"], item["target"])),
+    })
+    if not details:
+        report["reason"] = "no uninitialized loop-carried recurrence has a unique existing seed"
+    return rewritten, report
+
+
+def canonicalize_import_response(response: dict, action_origins: list[object]) -> dict:
     source = response.get("python_code")
     if not isinstance(source, str):
         return response
-    rewritten, replacements = canonicalize_imported_action_names(source, action_identifiers)
-    if not replacements:
-        return response
-    response.setdefault("raw_python_code_before_name_canonicalization", source)
-    response["python_code"] = rewritten
-    response["python_length"] = len(rewritten.encode("utf-8"))
-    response["name_canonicalization"] = {
-        "present": True,
-        "source": "workflow action identifiers",
-        "replacement_count": len(replacements),
-        "replacements": replacements,
-    }
+    rewritten, report = canonicalize_imported_action_names(source, action_origins)
+    if rewritten != source:
+        response.setdefault("raw_python_code_before_name_canonicalization", source)
+    response["name_canonicalization"] = report
+    reified, value_report = reify_imported_value_actions(rewritten, action_origins)
+    if reified != rewritten:
+        response.setdefault("raw_python_code_before_value_reification", rewritten)
+    response["value_action_reification"] = value_report
+    initialized, control_flow_report = initialize_imported_loop_carried_values(reified)
+    if initialized != reified:
+        response.setdefault("raw_python_code_before_control_flow_initialization", reified)
+    response["python_code"] = initialized
+    response["python_length"] = len(initialized.encode("utf-8"))
+    response["control_flow_initialization"] = control_flow_report
     return response
 
 
@@ -2741,22 +3589,22 @@ def main() -> int:
 
     if args.command == "plist-to-python":
         plist_json = read_source(args)
-        action_identifiers = action_identifiers_from_plist_json(plist_json)
+        action_origins = action_origins_from_plist_json(plist_json)
         payload = base64.b64encode(plist_json).decode("ascii")
         response = json.loads(send_command(args.socket, f"plist-to-python-b64 {payload}"))
         response = inline_catalog_import_response(args.socket, response)
-        response = canonicalize_import_response(response, action_identifiers)
+        response = canonicalize_import_response(response, action_origins)
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0
 
     if args.command == "plist-data-to-python":
         try:
             plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
-            action_identifiers = action_identifiers_from_plist_data(plist_data)
+            action_origins = action_origins_from_plist_data(plist_data)
             payload = base64.b64encode(plist_data).decode("ascii")
             response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
             response = inline_catalog_import_response(args.socket, response)
-            response = canonicalize_import_response(response, action_identifiers)
+            response = canonicalize_import_response(response, action_origins)
             if signed_import is not None:
                 response["signed_shortcut_import"] = signed_import
             if icloud_import is not None:

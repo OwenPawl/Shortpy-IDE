@@ -275,7 +275,7 @@ if [[ "${toolkit_should_activate}" == "1" ]]; then
   if "${ROOT}/tools/toolkitctl.py" "${toolkit_args[@]}" >"${toolkit_status_log}"; then
     toolkit_activated=1
     cp "${toolkit_status_log}" "${LOG_DIR}/shortpy-toolkit-selection.json"
-    /usr/bin/python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); names=data.get("duplicate_adjustment",{}).get("change_count",0); sot=data.get("duplicate_adjustment",{}).get("source_of_truth_change_count",0); vis=data.get("toolrenderer_visibility_adjustment",{}).get("changed_count",0); print("shortpy-bridge-stage: toolkit adjusted {} duplicate python names, applied {} source-of-truth metadata changes, and patched {} visibility rows".format(names, sot, vis))' "${toolkit_status_log}"
+    /usr/bin/python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); closure=data.get("referential_closure_repair",{}).get("case_count",0); names=data.get("duplicate_adjustment",{}).get("change_count",0); intrinsic=data.get("shortcuts_language_intrinsic_name_repair",{}).get("change_count",0); native_names=data.get("toolrenderer_name_alignment",{}).get("changed_count",0); vis=data.get("toolrenderer_visibility_adjustment",{}).get("changed_count",0); print("shortpy-bridge-stage: toolkit repaired {} referenced enum cases, adjusted {} duplicate python names, aligned {} language intrinsic names, applied {} native naming changes, and patched {} visibility rows".format(closure, names, intrinsic, native_names, vis))' "${toolkit_status_log}"
   elif [[ -n "${toolkit_source}" ]]; then
     cat "${toolkit_status_log}" >&2 || true
     echo "Could not activate custom ToolKit sqlite: ${toolkit_source}" >&2

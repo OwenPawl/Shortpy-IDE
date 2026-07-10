@@ -7,6 +7,7 @@ const {
   indexToolRendererMetadata,
   isRuntimeSpecificMetadata,
   parseToolRendererInterface,
+  sanitizeToolRendererMetadata,
 } = require("../src/toolrenderer");
 
 const promptFixture = "/Users/owenpawling/Documents/codex-long-runs/20260619-110431-shortcuts-ai-ide-re/full-transcript-lower-20260623-0040/normalized_prompt_pass2.txt";
@@ -106,6 +107,58 @@ assert(dynamicEnum, "runtime-shaped enum type should be indexed");
 assert(isRuntimeSpecificMetadata(dynamicEnum), "dynamic enum should be classified for simulator-runtime notices");
 assert(index.byName.has("com_example_dynamic_choices.ONE"), "dynamic enum cases should be indexed for completion/hover");
 assert(index.byName.has("com_apple_mobile_sms_conversation_entity_wfcontent_item_input_parameter.CONVERSATION"), "com_* enum cases should be indexed for completion/hover");
+
+const rawKeyIndex = indexToolRendererMetadata(sanitizeToolRendererMetadata({
+  actions: [
+    {
+      kind: "action",
+      pythonName: "calculator_calculate",
+      definitionMissing: true,
+      parameters: [
+        { pythonName: "operand", key: "WFMathOperand" },
+        { pythonName: "operand", key: "WFScientificMathOperand" },
+      ],
+    },
+    {
+      kind: "action",
+      pythonName: "com_apple_shortcuts_filter_files",
+      definitionMissing: true,
+      parameters: [
+        { pythonName: "wfcontentitemfilter", key: "WFContentItemFilter" },
+        { pythonName: "sort_by", key: "WFContentItemSortProperty" },
+        { pythonName: "order", key: "WFContentItemSortOrder" },
+        { pythonName: "limit", key: "WFContentItemLimitEnabled" },
+        { pythonName: "get", key: "WFContentItemLimitNumber" },
+        { pythonName: "wfcompoundtype", key: "WFCompoundType" },
+        { pythonName: "files", key: "WFContentItemInputParameter" },
+      ],
+    },
+    {
+      kind: "action",
+      pythonName: "com_apple_shortcuts_get_network_details",
+      definitionMissing: true,
+      parameters: [
+        { pythonName: "detail", key: "WFWiFiDetail" },
+        { pythonName: "detail", key: "WFCellularDetail" },
+        { pythonName: "detail", key: "WFEthernetDetail" },
+      ],
+    },
+  ],
+}));
+assert(rawKeyIndex.parameterByItemAndName.has("calculator_calculate.math_operand"));
+assert(rawKeyIndex.parameterByItemAndName.has("calculator_calculate.scientific_math_operand"));
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_get_network_details.wi_fi_detail"));
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_get_network_details.cellular_detail"));
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_get_network_details.ethernet_detail"));
+const rawKeyFilter = rawKeyIndex.byName.get("com_apple_shortcuts_filter_files");
+assert.strictEqual(rawKeyFilter.filterActionSurface, "expanded-query");
+assert.strictEqual(rawKeyFilter.parameters[0].type, "List[Any]");
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_filter_files.query"));
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_filter_files.query_sort_order"));
+assert(rawKeyIndex.parameterByItemAndName.has("com_apple_shortcuts_filter_files.scope"));
+assert(!/WFContentItem/.test(JSON.stringify(rawKeyFilter)), "visible filter metadata must not retain raw ToolKit keys");
+assert(!rawKeyIndex.byName.get("com_apple_shortcuts_get_network_details").definitionBlock);
+assert(openApp.definitionBlock.includes("def com_apple_shortcuts_open_app("), "native definitions remain exact");
 
 const cachePath = path.join(__dirname, "..", "..", "bridge", "logs", "vscode-extension-toolrenderer-interface.json");
 if (fs.existsSync(cachePath)) {

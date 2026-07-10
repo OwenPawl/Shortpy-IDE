@@ -285,6 +285,43 @@ function allParameterNames(parameter) {
   ]);
 }
 
+function pythonNameFromLabel(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const words = [];
+  for (let token of value.match(/[0-9A-Za-z]+/g) || []) {
+    if (/^[A-Z0-9]+$/.test(token) || (/^[A-Z0-9]+s$/.test(token) && token.length > 1)) {
+      words.push(token.toLowerCase());
+      continue;
+    }
+    token = token.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2");
+    token = token.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+    words.push(...token.split("_").filter(Boolean).map((part) => part.toLowerCase()));
+  }
+  return words.join("_");
+}
+
+function compilerParameterNames(parameter) {
+  if (!parameter || typeof parameter !== "object") {
+    return [];
+  }
+  const names = uniqueStrings([
+    parameter.pythonName,
+    parameter.name,
+    parameter.aliases,
+    parameter.acceptedNames,
+  ]).filter((name) => /^[a-z_][a-z0-9_]*$/.test(name));
+  for (const rawName of uniqueStrings([parameter.key, parameter.rawKey])) {
+    const withoutPrefix = rawName.startsWith("WF") ? rawName.slice(2) : rawName;
+    const normalized = pythonNameFromLabel(withoutPrefix);
+    if (normalized && !names.includes(normalized)) {
+      names.push(normalized);
+    }
+  }
+  return names;
+}
+
 function optionalType(type) {
   const clean = String(type || "").trim();
   if (!clean) {
@@ -294,15 +331,21 @@ function optionalType(type) {
 }
 
 function isQueryFilterAction(item) {
+  if (item && item.filterActionSurface === "expanded-query") {
+    return false;
+  }
   const params = Array.isArray(item && item.parameters) ? item.parameters : [];
   return params.some((parameter) =>
-    (parameter.pythonName === "query" || parameter.name === "query" || parameter.inline) &&
-    /^query_/.test(String(parameter.type || ""))
+    ((parameter.pythonName === "query" || parameter.name === "query" || parameter.inline) &&
+      /^query_/.test(String(parameter.type || ""))) ||
+    compilerParameterNames(parameter).includes("wfcontentitemfilter") ||
+    parameter.key === "WFContentItemFilter" ||
+    parameter.rawKey === "WFContentItemFilter"
   );
 }
 
 function queryFilterScopeParameter(parameters) {
-  return parameters.find((parameter) => {
+  const explicit = parameters.find((parameter) => {
     const name = parameter && parameter.pythonName;
     const type = String(parameter && parameter.type || "");
     if (!parameter || ["query", "sort_by", "limit", "get"].includes(name)) {
@@ -311,56 +354,28 @@ function queryFilterScopeParameter(parameters) {
     return /_wfcontent_item_input_parameter\b/.test(type) ||
       allParameterNames(parameter).includes("WFContentItemInputParameter");
   });
+  if (explicit) {
+    return explicit;
+  }
+  const compoundIndex = parameters.findIndex((parameter) =>
+    compilerParameterNames(parameter).includes("wfcompoundtype") ||
+    parameter.key === "WFCompoundType" ||
+    parameter.rawKey === "WFCompoundType"
+  );
+  return compoundIndex >= 0 ? parameters[compoundIndex + 1] : undefined;
 }
 
 function queryFilterParameter(parameters, name) {
-  return parameters.find((parameter) => allParameterNames(parameter).includes(name));
-}
-
-function filterDocLines(item, parameters) {
-  const lines = [];
-  const displayName = item.displayName || item.pythonName;
-  if (displayName) {
-    lines.push(displayName);
-  }
-  if (item.summary) {
-    lines.push(item.summary);
-  }
-  if (parameters.length > 0) {
-    lines.push("Args:");
-    for (const parameter of parameters) {
-      const doc = parameter.doc || parameter.summary;
-      lines.push(`${parameter.pythonName}: ${doc || `(${parameter.type || "Any"})`}`);
+  return parameters.find((parameter) => {
+    if (allParameterNames(parameter).includes(name) || compilerParameterNames(parameter).includes(name)) {
+      return true;
     }
-  }
-  if (item.returnDocs || item.returnType) {
-    lines.push("Returns:");
-    lines.push(item.returnDocs || item.returnType);
-  }
-  return lines.filter(Boolean);
-}
-
-function filterSignature(item, parameters) {
-  const returnType = item.returnType || parseReturnType(item.signature || "") || "Any";
-  const lines = [`def ${item.pythonName}(`];
-  for (const parameter of parameters) {
-    const type = parameter.type ? `: ${parameter.type}` : "";
-    const defaultValue = parameter.defaultValue !== undefined && parameter.defaultValue !== null && parameter.defaultValue !== ""
-      ? ` = ${parameter.defaultValue}`
-      : "";
-    lines.push(`    ${parameter.pythonName}${type}${defaultValue},`);
-  }
-  lines.push(`) -> ${returnType}:`);
-  return lines.join("\n");
-}
-
-function filterDefinitionBlock(item, parameters) {
-  const lines = [filterSignature(item, parameters), "    \"\"\""];
-  for (const line of filterDocLines(item, parameters)) {
-    lines.push(`    ${line}`);
-  }
-  lines.push("    \"\"\"");
-  return lines.join("\n");
+    return name === "query" && (
+      compilerParameterNames(parameter).includes("wfcontentitemfilter") ||
+      parameter.key === "WFContentItemFilter" ||
+      parameter.rawKey === "WFContentItemFilter"
+    );
+  });
 }
 
 function normalizeQueryFilterAction(item) {
@@ -376,7 +391,7 @@ function normalizeQueryFilterAction(item) {
   const nativeLimit = queryFilterParameter(parameters, "limit");
   const nativeGet = queryFilterParameter(parameters, "get");
   const nativeScope = queryFilterScopeParameter(parameters);
-  const queryType = String(query.type || "").trim();
+  const queryType = String(query.type || "Any").trim();
   const outputParameters = [
     {
       ...query,
@@ -388,8 +403,8 @@ function normalizeQueryFilterAction(item) {
       positional: false,
       doc: "The filter conditions.",
       summary: "The filter conditions.",
-      aliases: uniqueStrings(["query", allParameterNames(query), "WFContentItemFilter"]),
-      acceptedNames: uniqueStrings(["query", allParameterNames(query), "WFContentItemFilter"]),
+      aliases: uniqueStrings(["query", compilerParameterNames(query)]),
+      acceptedNames: uniqueStrings(["query", compilerParameterNames(query)]),
     },
     {
       pythonName: "query_operator",
@@ -411,8 +426,8 @@ function normalizeQueryFilterAction(item) {
       defaultValue: "None",
       inline: false,
       positional: false,
-      aliases: uniqueStrings(["sort_by", allParameterNames(sortBy)]),
-      acceptedNames: uniqueStrings(["sort_by", allParameterNames(sortBy)]),
+      aliases: uniqueStrings(["sort_by", compilerParameterNames(sortBy)]),
+      acceptedNames: uniqueStrings(["sort_by", compilerParameterNames(sortBy)]),
     });
     outputParameters.push({
       pythonName: "query_sort_order",
@@ -432,8 +447,8 @@ function normalizeQueryFilterAction(item) {
     defaultValue: "None",
     doc: (nativeGet && (nativeGet.doc || nativeGet.summary)) || "The maximum number of results.",
     summary: (nativeGet && (nativeGet.doc || nativeGet.summary)) || "The maximum number of results.",
-    aliases: uniqueStrings(["limit", "get", allParameterNames(nativeLimit), allParameterNames(nativeGet)]),
-    acceptedNames: uniqueStrings(["limit", "get", allParameterNames(nativeLimit), allParameterNames(nativeGet)]),
+    aliases: uniqueStrings(["limit", "get", compilerParameterNames(nativeLimit), compilerParameterNames(nativeGet)]),
+    acceptedNames: uniqueStrings(["limit", "get", compilerParameterNames(nativeLimit), compilerParameterNames(nativeGet)]),
   });
   if (nativeScope) {
     outputParameters.push({
@@ -446,21 +461,13 @@ function normalizeQueryFilterAction(item) {
       positional: false,
       doc: nativeScope.doc || nativeScope.summary || "The scope of the query.",
       summary: nativeScope.summary || nativeScope.doc || "The scope of the query.",
-      aliases: uniqueStrings(["scope", allParameterNames(nativeScope)]),
-      acceptedNames: uniqueStrings(["scope", allParameterNames(nativeScope)]),
+      aliases: uniqueStrings(["scope", compilerParameterNames(nativeScope)]),
+      acceptedNames: uniqueStrings(["scope", compilerParameterNames(nativeScope)]),
     });
   }
-  const docLines = filterDocLines(item, outputParameters);
   return {
     ...item,
     parameters: outputParameters,
-    signature: filterSignature(item, outputParameters),
-    definitionBlock: filterDefinitionBlock(item, outputParameters),
-    documentation: docLines.join("\n"),
-    docString: docLines.join("\n"),
-    docSections: parseDocSections(docLines),
-    nativeDefinitionBlock: item.definitionBlock,
-    nativeSignature: item.signature,
     filterActionSurface: "expanded-query",
   };
 }
@@ -1083,6 +1090,10 @@ function sanitizeToolRendererParameter(parameter) {
       clean[key] = value;
     }
   }
+  const acceptedNames = compilerParameterNames(parameter);
+  if (acceptedNames.length > 0) {
+    clean.acceptedNames = acceptedNames;
+  }
   return clean;
 }
 
@@ -1090,8 +1101,9 @@ function sanitizeToolRendererItem(item) {
   if (!item || typeof item !== "object") {
     return item;
   }
+  const normalized = normalizeQueryFilterAction(item);
   const clean = {};
-  for (const [key, value] of Object.entries(item)) {
+  for (const [key, value] of Object.entries(normalized)) {
     if (!VISIBLE_ITEM_DENYLIST.has(key)) {
       clean[key] = value;
     }
@@ -1099,7 +1111,6 @@ function sanitizeToolRendererItem(item) {
   if (Array.isArray(clean.parameters)) {
     clean.parameters = clean.parameters.map(sanitizeToolRendererParameter);
   }
-  Object.assign(clean, normalizeQueryFilterAction(clean));
   return mergeDocSections(clean);
 }
 

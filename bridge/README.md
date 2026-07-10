@@ -5,7 +5,7 @@ This bridge loads into the iOS Simulator Shortcuts process and exposes the nativ
 Current target:
 
 - iOS Simulator 27.0
-- `ToolVisibilityFilter.any` for compiler validation, with launch-time ToolKit sqlite visibility/approval adjustment for ToolRenderer exposure
+- `ToolVisibilityFilter.any` for compiler validation, with typed-reference enum closure repair, ShortcutsLanguage intrinsic-name closure, and ToolKit sqlite visibility/approval adjustment for ToolRenderer exposure
 - launch-time `DYLD_INSERT_LIBRARIES`
 - private Apple frameworks from the selected simulator runtime
 
@@ -73,9 +73,43 @@ The host CLI unwraps AEA1 envelopes with the macOS `aea`, `aa`, and `openssl` to
 
 For iCloud links, the host CLI calls `https://www.icloud.com/shortcuts/api/records/<UUID>`, handles `{"error":true,"reason":"..."}` as an import diagnostic, downloads `fields.shortcut.value.downloadURL`, and sends those unsigned workflow plist bytes to the simulator bridge.
 
+Post-import action-name canonicalization is semantic and fail-closed. Named AST
+calls are matched against workflow action identities, retained ToolRenderer
+native function names, ToolKit aliases, and parameter names. A global monotonic
+semantic alignment permits literal/control-flow gaps without positional shifts;
+ambiguous matches remain unchanged with structured diagnostics.
+
+Python-syntax actions use the finite intrinsic names reserved during ToolKit
+preparation (`dictionary`, `list`, `text`, `nothing`, and
+`get_dictionary_value`) and stay as native literals/subscripts. Other
+value-rendered actions are reified only when one canonical action and one
+serialized parameter agree. Loop-carried branch results receive an alias-only
+seed assignment when same-call keyword recurrence identifies one existing seed;
+ambiguous control flow remains unchanged.
+
+Compilation uses an imported `WFParameterStateCatalog` only while legacy source
+still contains matching `ref(...)` handles. Editable inline metadata rebuilds
+its catalog from the source text, and ordinary ref-free source uses
+`defaultInitialCatalog` even when an import context is resident in the bridge.
+
 ## Metadata Boundary
 
 `toolrenderer-structured-metadata` is the visible IDE metadata surface. It returns ToolRenderer Python-interface actions, triggers, helpers, and types with raw ToolKit keys, host/key bindings, and ToolKit source labels stripped so old caches cannot leak internal catalog details into the UI.
+
+Prepared ToolKit copies normalize tool `pythonName` values and route tools
+through a dedicated neutral naming container before ToolRenderer runs. The
+host retains callable definitions only when the native rendered name exactly
+matches the selected ToolKit name. It never renames a native `def` block or
+synthesizes a missing definition; triggers retain their native naming metadata.
+
+Visible parameter metadata retains compiler-facing aliases derived from the
+loaded ToolKit's parameter-key closure. Matched ToolRenderer definitions merge
+those aliases by exact sequence when duplicate names require positional
+pairing, or by a unique parameter-name match when the native and ToolKit
+surfaces differ. Ambiguous matches remain open for native compiler validation.
+Filter actions use the finite ShortcutsLanguage query surface
+(`query`, operators, sort order, limit, and scope) for parameter metadata while
+their displayed definition block remains native ToolRenderer text.
 
 Inline catalog metadata compilation goes through a separate binding adapter. The adapter is shaped for native `WFParameterMetadataProvider.binding(toolID:)` / `binding(triggerID:)` extraction and currently falls back internally to ToolKit-derived host/key data only when no native binding has been proven. That fallback is not a VS Code documentation or completion source.
 

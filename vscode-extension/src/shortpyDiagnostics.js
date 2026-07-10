@@ -51,7 +51,25 @@ function actionLikeName(name, decorator) {
   if (decorator) {
     return name.startsWith("when_");
   }
-  return name.startsWith("com_") || name.startsWith("when_") || name.includes("_");
+  return name.startsWith("com_") ||
+    name.startsWith("when_") ||
+    name.startsWith("shortcuts_builtin_");
+}
+
+function hasClosedParameterSurface(item) {
+  if (!item || item.parameterValidation === "open") {
+    return false;
+  }
+  if (item.parameterValidation === "closed") {
+    return true;
+  }
+  if (item.definitionMissing || (!item.definitionBlock && !item.signature)) {
+    return false;
+  }
+  const names = (Array.isArray(item.parameters) ? item.parameters : [])
+    .map((parameter) => parameter && parameter.pythonName)
+    .filter(Boolean);
+  return new Set(names).size === names.length;
 }
 
 function signatureEnd(line, openIndex) {
@@ -183,11 +201,11 @@ function collectToolRendererDiagnostics(source, index) {
       if (!at && locals.has(name)) {
         continue;
       }
-      if (!actionLikeName(name, at)) {
-        continue;
-      }
       const item = combinedItem(indexes, name);
       if (!item) {
+        if (!actionLikeName(name, at)) {
+          continue;
+        }
         diagnostics.push({
           code: "unknownShortcutsCommand",
           message: `Unknown Shortcuts ${at || name.startsWith("when_") ? "trigger" : "action"} '${name}'.`,
@@ -196,6 +214,9 @@ function collectToolRendererDiagnostics(source, index) {
           start: nameStart,
           end: nameStart + name.length,
         });
+        continue;
+      }
+      if (!hasClosedParameterSurface(item)) {
         continue;
       }
       const params = parameterMap(item);
@@ -364,5 +385,6 @@ function parameterInfoAt(source, lineNumber, character, indexes) {
 
 module.exports = {
   collectToolRendererDiagnostics,
+  hasClosedParameterSurface,
   parameterInfoAt,
 };

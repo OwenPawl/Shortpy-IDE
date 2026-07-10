@@ -2,7 +2,10 @@
 
 ## Implemented
 
-- Simulator bridge uses the standard `visibleForShortcuts` filter; after Shortcuts launch-time ToolKit indexing settles, selected ToolKit sqlite rows are copied into an adjusted prepared sqlite so DB-present actions have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) bits, then the simulator's resolved `Tools-active` target file is backed up, replaced, and WAL-primed.
+- Simulator bridge uses the standard `visibleForShortcuts` filter; after Shortcuts launch-time ToolKit indexing settles, the prepared-copy path repairs missing enum rows named by typed action/trigger parameter relationships and type instances, reserves the finite ShortcutsLanguage intrinsic action names used by Python literal/subscript syntax, sets DB-present actions to both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`), then backs up, replaces, and WAL-primes the simulator's resolved `Tools-active` target.
+- Plist-to-Python action-name canonicalization resolves named AST calls by workflow action identity, retained ToolRenderer native function names, ToolKit aliases, and accepted parameters. Global monotonic semantic alignment allows literal/control-flow gaps; ambiguous or over-capacity matches are reported and left unchanged.
+- Intrinsic-backed value actions remain native Python syntax. Other assigned and unused bare values are reified only under canonical action/parameter/output consensus. A fail-closed loop recurrence pass inserts alias-only seed assignments when recursive and nonrecursive branches agree on one existing state seed.
+- Ref-free source compiles with `defaultInitialCatalog` rather than an unrelated latest-import fallback. Inline parameter-state values reconstruct an ephemeral compiler catalog from the source itself, while legacy unresolved `ref(...)` source can still use its matching import catalog.
 - Production `python-to-bplist` uses the native whole-workflow record serializer:
   `ShortcutsLanguage.pythonToShortcut -> WFWorkflow.saveToRecord -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:`.
 - Host-side `python-to-bplist` signs `.shortcut` output by default with macOS `shortcuts sign --mode anyone` while preserving the unsigned `plist_payload`.
@@ -19,14 +22,16 @@
 - Visible VS Code metadata is ToolRenderer-only. Cached ToolRenderer metadata powers hovers, completions, signature help, action/trigger search, highlighting, and static Shortpy diagnostics without blocking on the bridge after activation.
 - ToolRenderer cache entries preserve exact native Python definition blocks plus parsed Args/Returns sections. Function/decorator hovers show function-level material; keyword hovers show parameter docs/type/default and stable referenced type material.
 - Stable ToolRenderer enum cases such as `RunSurface` and `InputFallback` are visible, while environment-specific/custom enum cases are intentionally omitted from hovers and completions.
-- ToolRenderer action/trigger docs remain the visible metadata source, but editable Python names now come from the active ToolKit sqlite `pythonName` fields. Generated ToolRenderer names are fallback only when no sqlite name is available.
+- ToolRenderer action/trigger docs remain the visible metadata source. Prepared ToolKit copies align each tool's normalized sqlite `pythonName` with the native ToolRenderer render name through a neutral naming container; visible definitions require exact name equality and are never rewritten or synthesized.
 - The selected ToolKit sqlite is also adjusted for ToolRenderer generative visibility: action rows missing either `visibleForShortcuts` (`0x1`) or `approved` (`0x4`) have both bits set before refresh, which lets native `ToolRenderer.pythonInterface` render DB-present actions such as `com_apple_shortcuts_search_shortcuts_actions` without a host-side availability overlay.
 - Plist import uses workflow action identifiers to rewrite imported action calls to the current sqlite `pythonName` values while preserving inline catalog metadata.
-- Static Shortpy diagnostics validate action/trigger names and top-level keyword parameters only.
+- Static Shortpy diagnostics validate explicit action/trigger namespaces and top-level keyword parameters only when ToolRenderer proves a closed signature. Incomplete or overloaded metadata fails open, while the native compiler remains authoritative. A reusable CLI probe returns the exact VS Code ranges for arbitrary ShortPy input.
 - Inline catalog expansion now goes through a binding-adapter boundary that can be replaced by native `WFParameterMetadataProvider.binding(...)` extraction; the current ToolKit-derived binding is an internal compile fallback only.
 - Selected proof reports are in `docs/reports/`.
 
 ## Next
+
+- Preserve Comment actions and native dictionary-aggrandizement/repeat-result representations without materializing equivalent extra actions during reverse compilation.
 
 - Finish replacing legacy sidecar/ref UI paths with inline parameter-state metadata everywhere.
 - Generalize inline parameter-state metadata across all catalog-like action and trigger parameters.

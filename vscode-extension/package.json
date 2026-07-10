@@ -17,7 +17,8 @@
   ],
   "scripts": {
     "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js",
-    "check": "node scripts/sync-package-commands.js --check && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/toolrenderer.js && node --check src/extension.js",
+    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/toolrenderer.js && node --check src/extension.js",
+    "diagnose-shortpy": "node scripts/diagnose-shortpy.js --pretty",
     "install:local": "node scripts/install-vsix.js",
     "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js"
   },

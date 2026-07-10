@@ -16,11 +16,27 @@ from pathlib import Path
 DEFAULT_DEVICE = "booted"
 HOST_TOOLKIT_ACTIVE = Path.home() / "Library/Shortcuts/ToolKit/Tools-active"
 ADJUSTABLE_PYTHON_NAME_TABLES = ("Tools", "Triggers")
+SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES = {
+    "is.workflow.actions.dictionary": "dictionary",
+    "is.workflow.actions.gettext": "text",
+    "is.workflow.actions.getvalueforkey": "get_dictionary_value",
+    "is.workflow.actions.list": "list",
+    "is.workflow.actions.nothing": "nothing",
+}
 TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS = 0x1
 TOOL_VISIBILITY_APPROVED = 0x4
 REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS = (
     TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS | TOOL_VISIBILITY_APPROVED
 )
+TYPE_KIND_ENUMERATION = 4
+PROTOBUF_WIRE_VARINT = 0
+PROTOBUF_WIRE_FIXED64 = 1
+PROTOBUF_WIRE_LENGTH_DELIMITED = 2
+PROTOBUF_WIRE_FIXED32 = 5
+
+
+class ProtobufDecodeError(ValueError):
+    pass
 
 
 def run_json(command: list[str]) -> dict:
@@ -83,9 +99,11 @@ def target_description(path: Path) -> dict:
 
 def canonical_python_name(identifier: str, fallback: str) -> str:
     source = str(identifier or fallback or "").strip()
-    name = re.sub(r"[^0-9A-Za-z_]+", "_", source).strip("_")
+    source = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", source)
+    source = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", source)
+    name = re.sub(r"[^0-9A-Za-z_]+", "_", source).strip("_").lower()
     if not name:
-        name = re.sub(r"[^0-9A-Za-z_]+", "_", str(fallback or "item")).strip("_") or "item"
+        name = re.sub(r"[^0-9A-Za-z_]+", "_", str(fallback or "item")).strip("_").lower() or "item"
     if name[0].isdigit():
         name = f"_{name}"
     return name
@@ -130,6 +148,386 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     except sqlite3.DatabaseError:
         return set()
+
+
+def read_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(data) and shift < 70:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, offset
+        shift += 7
+    raise ProtobufDecodeError("invalid protobuf varint")
+
+
+def protobuf_fields(data: bytes) -> list[tuple[int, int, object]]:
+    payload = bytes(data)
+    fields = []
+    offset = 0
+    while offset < len(payload):
+        tag, offset = read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x7
+        if field_number == 0:
+            raise ProtobufDecodeError("protobuf field number is zero")
+        if wire_type == PROTOBUF_WIRE_VARINT:
+            value, offset = read_protobuf_varint(payload, offset)
+        elif wire_type == PROTOBUF_WIRE_FIXED64:
+            end = offset + 8
+            if end > len(payload):
+                raise ProtobufDecodeError("truncated protobuf fixed64 field")
+            value = payload[offset:end]
+            offset = end
+        elif wire_type == PROTOBUF_WIRE_LENGTH_DELIMITED:
+            length, offset = read_protobuf_varint(payload, offset)
+            end = offset + length
+            if end > len(payload):
+                raise ProtobufDecodeError("truncated protobuf length-delimited field")
+            value = payload[offset:end]
+            offset = end
+        elif wire_type == PROTOBUF_WIRE_FIXED32:
+            end = offset + 4
+            if end > len(payload):
+                raise ProtobufDecodeError("truncated protobuf fixed32 field")
+            value = payload[offset:end]
+            offset = end
+        else:
+            raise ProtobufDecodeError(f"unsupported protobuf wire type {wire_type}")
+        fields.append((field_number, wire_type, value))
+    return fields
+
+
+def protobuf_messages(data: bytes, field_number: int) -> list[bytes]:
+    return [
+        value
+        for number, wire_type, value in protobuf_fields(data)
+        if number == field_number and wire_type == PROTOBUF_WIRE_LENGTH_DELIMITED
+    ]
+
+
+def protobuf_text(data: bytes, label: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProtobufDecodeError(f"invalid UTF-8 in {label}") from exc
+
+
+def protobuf_values_at_path(data: bytes, path: tuple[int, ...]) -> list[bytes]:
+    values = [bytes(data)]
+    for field_number in path:
+        values = [value for parent in values for value in protobuf_messages(parent, field_number)]
+    return values
+
+
+def relationship_enumeration_references(data: bytes) -> list[tuple[str, str]]:
+    references = set()
+    for relationship in protobuf_messages(data, 1):
+        parent_keys = [protobuf_text(value, "parameter key") for value in protobuf_messages(relationship, 1)]
+        for condition in protobuf_messages(relationship, 2):
+            comparisons = protobuf_messages(condition, 3) + protobuf_messages(condition, 4)
+            for comparison in comparisons:
+                for operands in protobuf_messages(comparison, 1):
+                    for typed_value in protobuf_messages(operands, 1):
+                        for raw_value in protobuf_messages(typed_value, 6):
+                            value = protobuf_text(raw_value, "enumeration value")
+                            for parent_key in parent_keys:
+                                if parent_key and value:
+                                    references.add((parent_key, value))
+    return sorted(references)
+
+
+def type_instance_enumeration_values(data: bytes) -> list[str]:
+    values = set()
+    paths = (
+        (3, 2, 2, 2),
+        (3, 2, 4, 2, 2, 2),
+    )
+    for path in paths:
+        for raw_value in protobuf_values_at_path(data, path):
+            value = protobuf_text(raw_value, "type-instance enumeration value")
+            if value:
+                values.add(value)
+    return sorted(values)
+
+
+def enumeration_type_ids_for_relationship(
+    conn: sqlite3.Connection,
+    source_table: str,
+    owner_id: object,
+    parent_key: str,
+) -> list[str]:
+    if source_table == "Parameters":
+        rows = conn.execute(
+            """
+            SELECT types.rowId
+            FROM ToolParameterTypes AS parameterTypes
+            JOIN Types AS types ON types.rowId = parameterTypes.typeId
+            WHERE parameterTypes.toolId = ?
+              AND parameterTypes.key = ?
+              AND types.kind = ?
+            ORDER BY types.rowId
+            """,
+            (owner_id, parent_key, TYPE_KIND_ENUMERATION),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT types.rowId
+            FROM TriggerParameters AS parameters
+            JOIN Types AS types ON types.rowId = parameters.typeId
+            WHERE parameters.triggerId = ?
+              AND parameters.key = ?
+              AND types.kind = ?
+            ORDER BY types.rowId
+            """,
+            (owner_id, parent_key, TYPE_KIND_ENUMERATION),
+        ).fetchall()
+    return [identifier_text(row[0]) for row in rows]
+
+
+def relationship_enumeration_candidates(conn: sqlite3.Connection) -> dict:
+    candidates: dict[tuple[str, str], list[dict]] = {}
+    report = {
+        "relationship_parameter_count": 0,
+        "reference_count": 0,
+        "resolved_reference_count": 0,
+        "non_enumeration_reference_count": 0,
+        "decode_errors": [],
+    }
+    sources = (
+        ("Parameters", "toolId"),
+        ("TriggerParameters", "triggerId"),
+    )
+    for source_table, owner_column in sources:
+        required = {owner_column, "key", "relationships"}
+        if not required.issubset(table_columns(conn, source_table)):
+            continue
+        rows = conn.execute(
+            f"SELECT {owner_column}, key, relationships FROM {source_table} WHERE length(relationships) > 0"
+        ).fetchall()
+        report["relationship_parameter_count"] += len(rows)
+        for owner_id, dependent_key, relationships in rows:
+            try:
+                references = relationship_enumeration_references(relationships)
+            except ProtobufDecodeError as exc:
+                report["decode_errors"].append({
+                    "sourceTable": source_table,
+                    "ownerId": identifier_text(owner_id),
+                    "dependentKey": dependent_key,
+                    "error": str(exc),
+                })
+                continue
+            report["reference_count"] += len(references)
+            for parent_key, value in references:
+                type_ids = enumeration_type_ids_for_relationship(
+                    conn,
+                    source_table,
+                    owner_id,
+                    parent_key,
+                )
+                if not type_ids:
+                    report["non_enumeration_reference_count"] += 1
+                    continue
+                report["resolved_reference_count"] += 1
+                source = {
+                    "sourceTable": source_table,
+                    "ownerId": identifier_text(owner_id),
+                    "dependentKey": dependent_key,
+                    "parentKey": parent_key,
+                    "sourceField": "relationships",
+                }
+                for type_id in type_ids:
+                    candidates.setdefault((type_id, value), []).append(source)
+    report["decode_error_count"] = len(report["decode_errors"])
+    return {"candidates": candidates, "report": report}
+
+
+def type_instance_enumeration_candidates(conn: sqlite3.Connection) -> dict:
+    candidates: dict[tuple[str, str], list[dict]] = {}
+    report = {
+        "type_instance_parameter_count": 0,
+        "type_instance_reference_count": 0,
+        "type_instance_decode_errors": [],
+    }
+    sources = (
+        (
+            "Parameters",
+            "toolId",
+            """
+            SELECT parameters.toolId, parameters.key, parameters.typeInstance, types.rowId
+            FROM Parameters AS parameters
+            JOIN ToolParameterTypes AS parameterTypes
+              ON parameterTypes.toolId = parameters.toolId
+             AND parameterTypes.key = parameters.key
+            JOIN Types AS types ON types.rowId = parameterTypes.typeId
+            WHERE types.kind = ? AND length(parameters.typeInstance) > 0
+            """,
+        ),
+        (
+            "TriggerParameters",
+            "triggerId",
+            """
+            SELECT parameters.triggerId, parameters.key, parameters.typeInstance, types.rowId
+            FROM TriggerParameters AS parameters
+            JOIN Types AS types ON types.rowId = parameters.typeId
+            WHERE types.kind = ? AND length(parameters.typeInstance) > 0
+            """,
+        ),
+    )
+    for source_table, owner_column, query in sources:
+        required = {owner_column, "key", "typeInstance"}
+        if not required.issubset(table_columns(conn, source_table)):
+            continue
+        if source_table == "Parameters" and not table_columns(conn, "ToolParameterTypes"):
+            continue
+        rows = conn.execute(query, (TYPE_KIND_ENUMERATION,)).fetchall()
+        report["type_instance_parameter_count"] += len(rows)
+        for owner_id, parameter_key, type_instance, type_id in rows:
+            try:
+                values = type_instance_enumeration_values(type_instance)
+            except ProtobufDecodeError as exc:
+                report["type_instance_decode_errors"].append({
+                    "sourceTable": source_table,
+                    "ownerId": identifier_text(owner_id),
+                    "parameterKey": parameter_key,
+                    "error": str(exc),
+                })
+                continue
+            report["type_instance_reference_count"] += len(values)
+            source = {
+                "sourceTable": source_table,
+                "ownerId": identifier_text(owner_id),
+                "dependentKey": parameter_key,
+                "parentKey": parameter_key,
+                "sourceField": "typeInstance",
+            }
+            for value in values:
+                candidates.setdefault((identifier_text(type_id), value), []).append(source)
+    report["type_instance_decode_error_count"] = len(report["type_instance_decode_errors"])
+    return {"candidates": candidates, "report": report}
+
+
+def merge_enumeration_candidates(*candidate_sets: dict) -> dict:
+    merged: dict[tuple[str, str], list[dict]] = {}
+    for candidates in candidate_sets:
+        for key, sources in candidates.items():
+            merged.setdefault(key, []).extend(sources)
+    return merged
+
+
+def insert_enumeration_case(
+    conn: sqlite3.Connection,
+    type_id: str,
+    locale: str,
+    case_id: str,
+    title: str,
+) -> bool:
+    available = table_columns(conn, "EnumerationCases")
+    columns = ["typeId", "locale", "id"]
+    values: list[object] = [type_id, locale, case_id]
+    if "title" in available:
+        columns.append("title")
+        values.append(title)
+    if "synonyms" in available:
+        columns.append("synonyms")
+        values.append(sqlite3.Binary(b""))
+    placeholders = ",".join("?" for _ in columns)
+    cursor = conn.execute(
+        f"INSERT OR IGNORE INTO EnumerationCases ({','.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+    return cursor.rowcount > 0
+
+
+def repair_referential_enumeration_closure(conn: sqlite3.Connection) -> dict:
+    required_tables = {"EnumerationCases", "Types"}
+    if not all(table_columns(conn, table) for table in required_tables):
+        return {
+            "changed_count": 0,
+            "case_count": 0,
+            "inserted_row_count": 0,
+            "pass_count": 0,
+            "skipped": True,
+            "reason": "ToolKit enumeration schema is unavailable",
+            "additions": [],
+        }
+
+    relationship_discovery = relationship_enumeration_candidates(conn)
+    type_instance_discovery = type_instance_enumeration_candidates(conn)
+    candidates = merge_enumeration_candidates(
+        relationship_discovery["candidates"],
+        type_instance_discovery["candidates"],
+    )
+    global_locales = [
+        row[0]
+        for row in conn.execute(
+            "SELECT DISTINCT locale FROM EnumerationCases ORDER BY locale"
+        )
+    ]
+    additions = []
+    added_cases = set()
+    inserted_row_count = 0
+    pass_count = 0
+    while True:
+        pass_count += 1
+        pass_insertions = 0
+        for (type_id, case_id), sources in sorted(candidates.items()):
+            type_locales = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT locale FROM EnumerationCases WHERE typeId = ? ORDER BY locale",
+                    (type_id,),
+                )
+            ]
+            target_locales = type_locales or global_locales
+            existing_rows = conn.execute(
+                "SELECT locale, title FROM EnumerationCases WHERE typeId = ? AND id = ? ORDER BY locale",
+                (type_id, case_id),
+            ).fetchall()
+            existing_locales = {row[0] for row in existing_rows}
+            fallback_title = next((row[1] for row in existing_rows if row[1]), case_id)
+            inserted_locales = []
+            for locale in target_locales:
+                if locale in existing_locales:
+                    continue
+                if insert_enumeration_case(conn, type_id, locale, case_id, fallback_title):
+                    inserted_locales.append(locale)
+                    pass_insertions += 1
+                    inserted_row_count += 1
+            if inserted_locales:
+                added_cases.add((type_id, case_id))
+                additions.append({
+                    "typeId": type_id,
+                    "id": case_id,
+                    "locales": inserted_locales,
+                    "sources": sorted(
+                        sources,
+                        key=lambda item: (
+                            item["sourceTable"],
+                            item["ownerId"],
+                            item["dependentKey"],
+                            item["parentKey"],
+                        ),
+                    ),
+                })
+        if pass_insertions == 0:
+            break
+        if pass_count >= 8:
+            raise RuntimeError("referential enumeration closure did not converge")
+
+    return {
+        **relationship_discovery["report"],
+        **type_instance_discovery["report"],
+        "candidate_case_count": len(candidates),
+        "changed_count": inserted_row_count,
+        "case_count": len(added_cases),
+        "inserted_row_count": inserted_row_count,
+        "pass_count": pass_count,
+        "additions": additions,
+    }
 
 
 def adjustable_table(conn: sqlite3.Connection, table: str) -> bool:
@@ -211,7 +609,6 @@ def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
     report = {
         "tables": {},
         "change_count": 0,
-        "source_of_truth_change_count": 0,
     }
     for table in ADJUSTABLE_PYTHON_NAME_TABLES:
         if not adjustable_table(conn, table):
@@ -242,252 +639,315 @@ def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
                     "newPythonName": new_name,
                 })
             row["finalPythonName"] = new_name
-        source_of_truth = apply_duplicate_python_name_source_of_truth(conn, table, duplicate_rows)
         report["tables"][table] = {
             "duplicate_row_count": len(duplicate_rows),
             "changed_count": len(changes),
             "duplicate_row_ids": sorted(duplicate_ids),
             "changes": changes,
-            "source_of_truth": source_of_truth,
         }
         report["change_count"] += len(changes)
-        report["source_of_truth_change_count"] += source_of_truth.get("changed_count", 0)
     return report
 
 
-def update_duplicate_localization_names(
-    conn: sqlite3.Connection,
-    table: str,
-    localization_table: str,
-    foreign_key: str,
-    duplicate_rows: list[dict],
-) -> dict:
-    if not sqlite_table_exists(conn, localization_table):
-        return {
-            "table": localization_table,
-            "changed_count": 0,
-            "changes": [],
-            "skipped": True,
-            "reason": f"{localization_table} table not found",
-        }
-    changes = []
-    conn.row_factory = sqlite3.Row
-    localization_columns = table_columns(conn, localization_table)
-    has_localization_usage = "localizationUsage" in localization_columns
-    selected_columns = f"{foreign_key}, locale, name"
-    order_columns = "locale"
-    if has_localization_usage:
-        selected_columns = f"{foreign_key}, locale, localizationUsage, name"
-        order_columns = "locale, localizationUsage"
-    for row in duplicate_rows:
-        final_name = row.get("finalPythonName") or row.get("pythonName")
-        if not final_name:
-            continue
-        localization_rows = [
-            dict(localized)
-            for localized in conn.execute(
-                f"""
-                SELECT {selected_columns}
-                FROM {localization_table}
-                WHERE {foreign_key} = ? AND name != ?
-                ORDER BY {order_columns}
-                """,
-                (row["rowId"], final_name),
-            )
-        ]
-        for localized in localization_rows:
-            if has_localization_usage:
-                conn.execute(
-                    f"""
-                    UPDATE {localization_table}
-                    SET name = ?
-                    WHERE {foreign_key} = ? AND locale = ? AND localizationUsage = ?
-                    """,
-                    (final_name, row["rowId"], localized["locale"], localized["localizationUsage"]),
-                )
-            else:
-                conn.execute(
-                    f"""
-                    UPDATE {localization_table}
-                    SET name = ?
-                    WHERE {foreign_key} = ? AND locale = ?
-                    """,
-                    (final_name, row["rowId"], localized["locale"]),
-                )
-            changes.append({
-                "rowId": row["rowId"],
-                "id": identifier_text(row["id"]),
-                "table": table,
-                "localizationTable": localization_table,
-                "locale": localized["locale"],
-                "localizationUsage": localized.get("localizationUsage"),
-                "oldName": localized["name"],
-                "newName": final_name,
-            })
-    return {
-        "table": localization_table,
-        "changed_count": len(changes),
-        "changes": changes,
+def repair_shortcuts_language_intrinsic_python_names(conn: sqlite3.Connection) -> dict:
+    report = {
+        "source": "ShortcutsLanguage AST intrinsic action names",
+        "candidate_count": len(SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES),
+        "matched_count": 0,
+        "change_count": 0,
+        "collision_rename_count": 0,
+        "changes": [],
+        "collision_renames": [],
+        "missing_action_ids": [],
     }
+    if not adjustable_table(conn, "Tools"):
+        report["skipped"] = True
+        report["reason"] = "Tools table does not expose rowId, id, and pythonName"
+        return report
 
-
-def neutralize_duplicate_tool_source_containers(
-    conn: sqlite3.Connection,
-    duplicate_rows: list[dict],
-) -> dict:
-    if not duplicate_rows:
-        return {
-            "table": "ContainerMetadata",
-            "changed_count": 0,
-            "changes": [],
-            "localization_changed_count": 0,
-            "localization_changes": [],
-        }
-    if "sourceContainerId" not in table_columns(conn, "Tools") or not sqlite_table_exists(conn, "ContainerMetadata"):
-        return {
-            "table": "ContainerMetadata",
-            "changed_count": 0,
-            "changes": [],
-            "localization_changed_count": 0,
-            "localization_changes": [],
-            "skipped": True,
-            "reason": "Tools.sourceContainerId or ContainerMetadata table not found",
-        }
-    row_ids = [row["rowId"] for row in duplicate_rows]
-    placeholders = ",".join("?" for _ in row_ids)
     conn.row_factory = sqlite3.Row
-    containers = [
-        dict(row)
+    used = {
+        row[0]
         for row in conn.execute(
-            f"""
-            SELECT DISTINCT
-              cm.rowId,
-              cm.id,
-              cm.bundleVersion,
-              cm.deviceId
-            FROM Tools t
-            JOIN ContainerMetadata cm ON cm.rowId = t.sourceContainerId
-            WHERE t.rowId IN ({placeholders})
-            ORDER BY cm.rowId
-            """,
-            row_ids,
+            "SELECT pythonName FROM Tools WHERE pythonName IS NOT NULL AND pythonName != ''"
         )
-    ]
-    changes = []
-    for container in containers:
-        new_bundle_version = f"shortpy-container-{container['rowId']}"
-        if (
-            container.get("id") == ""
-            and container.get("bundleVersion") == new_bundle_version
-            and container.get("deviceId") == ""
-        ):
+    }
+    for identifier, intrinsic_name in SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES.items():
+        target = conn.execute(
+            "SELECT rowId, id, pythonName FROM Tools WHERE id = ? ORDER BY rowId LIMIT 1",
+            (identifier,),
+        ).fetchone()
+        if target is None:
+            report["missing_action_ids"].append(identifier)
+            continue
+        report["matched_count"] += 1
+
+        collisions = list(conn.execute(
+            "SELECT rowId, id, pythonName FROM Tools WHERE pythonName = ? AND rowId != ? ORDER BY rowId",
+            (intrinsic_name, target["rowId"]),
+        ))
+        if collisions:
+            used.discard(intrinsic_name)
+        for collision in collisions:
+            collision_id = identifier_text(collision["id"])
+            replacement = unique_python_name(
+                canonical_python_name(collision_id, collision["pythonName"]),
+                used,
+                collision["rowId"],
+            )
+            conn.execute(
+                "UPDATE Tools SET pythonName = ? WHERE rowId = ?",
+                (replacement, collision["rowId"]),
+            )
+            report["collision_renames"].append({
+                "rowId": collision["rowId"],
+                "id": collision_id,
+                "oldPythonName": collision["pythonName"],
+                "newPythonName": replacement,
+                "reservedForActionId": identifier,
+            })
+
+        old_name = target["pythonName"]
+        used.add(intrinsic_name)
+        if old_name == intrinsic_name:
             continue
         conn.execute(
-            """
-            UPDATE ContainerMetadata
-            SET id = '', bundleVersion = ?, deviceId = ''
-            WHERE rowId = ?
-            """,
-            (new_bundle_version, container["rowId"]),
+            "UPDATE Tools SET pythonName = ? WHERE rowId = ?",
+            (intrinsic_name, target["rowId"]),
         )
-        changes.append({
-            "rowId": container["rowId"],
-            "oldId": container["id"],
-            "oldBundleVersion": container["bundleVersion"],
-            "oldDeviceId": container["deviceId"],
-            "newId": "",
-            "newBundleVersion": new_bundle_version,
-            "newDeviceId": "",
+        report["changes"].append({
+            "rowId": target["rowId"],
+            "id": identifier,
+            "oldPythonName": old_name,
+            "newPythonName": intrinsic_name,
         })
 
-    localization_changes = []
-    if sqlite_table_exists(conn, "ContainerMetadataLocalizations"):
-        container_ids = [container["rowId"] for container in containers]
-        if container_ids:
-            container_placeholders = ",".join("?" for _ in container_ids)
-            localized_rows = [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT containerId, locale, name
-                    FROM ContainerMetadataLocalizations
-                    WHERE containerId IN ({container_placeholders}) AND name != ''
-                    ORDER BY containerId, locale
-                    """,
-                    container_ids,
-                )
-            ]
-            for localized in localized_rows:
-                conn.execute(
-                    """
-                    UPDATE ContainerMetadataLocalizations
-                    SET name = ''
-                    WHERE containerId = ? AND locale = ?
-                    """,
-                    (localized["containerId"], localized["locale"]),
-                )
-                localization_changes.append({
-                    "containerId": localized["containerId"],
-                    "locale": localized["locale"],
-                    "oldName": localized["name"],
-                    "newName": "",
-                })
-    return {
-        "table": "ContainerMetadata",
-        "changed_count": len(changes),
-        "changes": changes,
-        "localization_changed_count": len(localization_changes),
-        "localization_changes": localization_changes,
-    }
+    report["change_count"] = len(report["changes"])
+    report["collision_rename_count"] = len(report["collision_renames"])
+    return report
 
 
-def apply_duplicate_python_name_source_of_truth(
-    conn: sqlite3.Connection,
-    table: str,
-    duplicate_rows: list[dict],
-) -> dict:
-    if not duplicate_rows:
+def needs_shortcuts_language_intrinsic_name_repair(conn: sqlite3.Connection) -> bool:
+    if not adjustable_table(conn, "Tools"):
+        return False
+    for identifier, intrinsic_name in SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES.items():
+        row = conn.execute(
+            "SELECT pythonName FROM Tools WHERE id = ? ORDER BY rowId LIMIT 1",
+            (identifier,),
+        ).fetchone()
+        if row is not None and row[0] != intrinsic_name:
+            return True
+    return False
+
+
+TOOLRENDERER_NEUTRAL_CONTAINER_BUNDLE_VERSION = "shortpy-toolrenderer-names-v1"
+
+
+def normalize_tool_python_names(conn: sqlite3.Connection) -> dict:
+    if not adjustable_table(conn, "Tools"):
         return {
-            "changed_count": 0,
-            "display_name_adjustment": {"changed_count": 0, "changes": []},
-            "source_container_adjustment": {"changed_count": 0, "changes": []},
-        }
-    if table == "Tools":
-        display_name_adjustment = update_duplicate_localization_names(
-            conn,
-            table,
-            "ToolLocalizations",
-            "toolId",
-            duplicate_rows,
-        )
-        source_container_adjustment = neutralize_duplicate_tool_source_containers(conn, duplicate_rows)
-    elif table == "Triggers":
-        display_name_adjustment = update_duplicate_localization_names(
-            conn,
-            table,
-            "TriggerLocalizations",
-            "triggerId",
-            duplicate_rows,
-        )
-        source_container_adjustment = {
             "changed_count": 0,
             "changes": [],
             "skipped": True,
-            "reason": "Triggers do not have sourceContainerId",
+            "reason": "Tools table does not expose rowId, id, and pythonName",
         }
-    else:
-        display_name_adjustment = {"changed_count": 0, "changes": [], "skipped": True}
-        source_container_adjustment = {"changed_count": 0, "changes": [], "skipped": True}
-    changed_count = (
-        display_name_adjustment.get("changed_count", 0)
-        + source_container_adjustment.get("changed_count", 0)
-        + source_container_adjustment.get("localization_changed_count", 0)
+    conn.row_factory = sqlite3.Row
+    rows_to_normalize = list(conn.execute(
+        """
+        SELECT rowId, id, pythonName
+        FROM Tools
+        WHERE pythonName IS NOT NULL AND pythonName != ''
+        ORDER BY rowId
+        """
+    ))
+    used: set[str] = set()
+    changes = []
+    for row in rows_to_normalize:
+        base = canonical_python_name(row["pythonName"], identifier_text(row["id"]))
+        normalized = unique_python_name(base, used, row["rowId"])
+        if normalized == row["pythonName"]:
+            continue
+        conn.execute(
+            "UPDATE Tools SET pythonName = ? WHERE rowId = ?",
+            (normalized, row["rowId"]),
+        )
+        changes.append({
+            "rowId": row["rowId"],
+            "id": identifier_text(row["id"]),
+            "oldPythonName": row["pythonName"],
+            "newPythonName": normalized,
+        })
+    return {
+        "changed_count": len(changes),
+        "changes": changes,
+    }
+
+
+def ensure_toolrenderer_neutral_container(conn: sqlite3.Connection) -> dict:
+    required_columns = {
+        "rowId", "id", "bundleVersion", "teamId", "deviceId", "origin", "containerType",
+    }
+    if not required_columns.issubset(table_columns(conn, "ContainerMetadata")):
+        return {
+            "changed_count": 0,
+            "containerId": None,
+            "skipped": True,
+            "reason": "ContainerMetadata schema is unavailable",
+        }
+    row = conn.execute(
+        """
+        SELECT rowId
+        FROM ContainerMetadata
+        WHERE id = '' AND bundleVersion = ? AND deviceId = ''
+        ORDER BY rowId
+        LIMIT 1
+        """,
+        (TOOLRENDERER_NEUTRAL_CONTAINER_BUNDLE_VERSION,),
+    ).fetchone()
+    if row is not None:
+        return {
+            "changed_count": 0,
+            "containerId": int(row[0]),
+            "created": False,
+        }
+    cursor = conn.execute(
+        """
+        INSERT INTO ContainerMetadata(id, bundleVersion, teamId, deviceId, origin, containerType)
+        VALUES('', ?, '', '', -1, 1)
+        """,
+        (TOOLRENDERER_NEUTRAL_CONTAINER_BUNDLE_VERSION,),
     )
     return {
-        "changed_count": changed_count,
-        "display_name_adjustment": display_name_adjustment,
-        "source_container_adjustment": source_container_adjustment,
+        "changed_count": 1,
+        "containerId": int(cursor.lastrowid),
+        "created": True,
     }
+
+
+def align_toolrenderer_python_names(conn: sqlite3.Connection) -> dict:
+    normalized_names = normalize_tool_python_names(conn)
+    report = {
+        "source": "ToolKit pythonName rendered through a neutral ToolRenderer naming container",
+        "normalized_names": normalized_names,
+        "container": {"changed_count": 0, "containerId": None, "skipped": True},
+        "source_container_changed_count": 0,
+        "attribution_container_changed_count": 0,
+        "localization_changed_count": 0,
+        "changed_count": normalized_names.get("changed_count", 0),
+    }
+    tool_columns = table_columns(conn, "Tools")
+    if not {"sourceContainerId", "attributionContainerId"}.issubset(tool_columns):
+        report["skipped"] = True
+        report["reason"] = "Tools naming-container columns are unavailable"
+        return report
+
+    container = ensure_toolrenderer_neutral_container(conn)
+    report["container"] = container
+    container_id = container.get("containerId")
+    if not isinstance(container_id, int):
+        report["skipped"] = True
+        report["reason"] = container.get("reason") or "neutral naming container is unavailable"
+        return report
+
+    source_count = conn.execute(
+        "SELECT COUNT(*) FROM Tools WHERE sourceContainerId IS NULL OR sourceContainerId != ?",
+        (container_id,),
+    ).fetchone()[0]
+    attribution_count = conn.execute(
+        "SELECT COUNT(*) FROM Tools WHERE attributionContainerId IS NOT NULL AND attributionContainerId != ?",
+        (container_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE Tools SET sourceContainerId = ? WHERE sourceContainerId IS NULL OR sourceContainerId != ?",
+        (container_id, container_id),
+    )
+    conn.execute(
+        "UPDATE Tools SET attributionContainerId = ? WHERE attributionContainerId IS NOT NULL AND attributionContainerId != ?",
+        (container_id, container_id),
+    )
+    report["source_container_changed_count"] = int(source_count)
+    report["attribution_container_changed_count"] = int(attribution_count)
+
+    if {"toolId", "name"}.issubset(table_columns(conn, "ToolLocalizations")):
+        localization_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM ToolLocalizations l
+            JOIN Tools t ON t.rowId = l.toolId
+            WHERE l.name != t.pythonName
+            """
+        ).fetchone()[0]
+        conn.execute(
+            """
+            UPDATE ToolLocalizations
+            SET name = (SELECT t.pythonName FROM Tools t WHERE t.rowId = ToolLocalizations.toolId)
+            WHERE EXISTS (
+              SELECT 1
+              FROM Tools t
+              WHERE t.rowId = ToolLocalizations.toolId AND ToolLocalizations.name != t.pythonName
+            )
+            """
+        )
+        report["localization_changed_count"] = int(localization_count)
+
+    report["changed_count"] = (
+        normalized_names.get("changed_count", 0)
+        + container.get("changed_count", 0)
+        + int(source_count)
+        + int(attribution_count)
+        + report["localization_changed_count"]
+    )
+    report.pop("skipped", None)
+    report.pop("reason", None)
+    return report
+
+
+def needs_toolrenderer_name_alignment(conn: sqlite3.Connection) -> bool:
+    if not adjustable_table(conn, "Tools"):
+        return False
+    for row_id, identifier, python_name in conn.execute(
+        "SELECT rowId, id, pythonName FROM Tools WHERE pythonName IS NOT NULL AND pythonName != '' ORDER BY rowId"
+    ):
+        if python_name != canonical_python_name(python_name, identifier_text(identifier)):
+            return True
+    if not {"sourceContainerId", "attributionContainerId"}.issubset(table_columns(conn, "Tools")):
+        return False
+    if not sqlite_table_exists(conn, "ContainerMetadata"):
+        return False
+    row = conn.execute(
+        """
+        SELECT rowId
+        FROM ContainerMetadata
+        WHERE id = '' AND bundleVersion = ? AND deviceId = ''
+        ORDER BY rowId
+        LIMIT 1
+        """,
+        (TOOLRENDERER_NEUTRAL_CONTAINER_BUNDLE_VERSION,),
+    ).fetchone()
+    if row is None:
+        return True
+    container_id = int(row[0])
+    if conn.execute(
+        "SELECT 1 FROM Tools WHERE sourceContainerId IS NULL OR sourceContainerId != ? LIMIT 1",
+        (container_id,),
+    ).fetchone() is not None:
+        return True
+    if conn.execute(
+        "SELECT 1 FROM Tools WHERE attributionContainerId IS NOT NULL AND attributionContainerId != ? LIMIT 1",
+        (container_id,),
+    ).fetchone() is not None:
+        return True
+    if {"toolId", "name"}.issubset(table_columns(conn, "ToolLocalizations")):
+        return conn.execute(
+            """
+            SELECT 1
+            FROM ToolLocalizations l
+            JOIN Tools t ON t.rowId = l.toolId
+            WHERE l.name != t.pythonName
+            LIMIT 1
+            """
+        ).fetchone() is not None
+    return False
 
 
 def toolrenderer_visibility_rows(conn: sqlite3.Connection) -> list[dict]:
@@ -714,6 +1174,8 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
     try:
         needs_adjustment = (
             has_duplicate_python_names(conn)
+            or needs_shortcuts_language_intrinsic_name_repair(conn)
+            or needs_toolrenderer_name_alignment(conn)
             or needs_toolrenderer_visibility_adjustment(conn)
         )
     finally:
@@ -724,6 +1186,8 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
     try:
         overlay = overlay_python_names(conn, overlay_path) if overlay_path else None
         adjustment = adjust_duplicate_python_names(conn)
+        intrinsic_name_repair = repair_shortcuts_language_intrinsic_python_names(conn)
+        toolrenderer_name_alignment = align_toolrenderer_python_names(conn)
         visibility_adjustment = adjust_toolrenderer_visibility(conn)
         conn.commit()
     finally:
@@ -736,11 +1200,15 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
         "backup": target_description(created_backup) if created_backup else None,
         "python_name_overlay": overlay,
         "duplicate_adjustment": adjustment,
+        "shortcuts_language_intrinsic_name_repair": intrinsic_name_repair,
+        "toolrenderer_name_alignment": toolrenderer_name_alignment,
         "toolrenderer_visibility_adjustment": visibility_adjustment,
         "restart_required": bool(
             (overlay or {}).get("change_count", 0) > 0
             or adjustment.get("change_count", 0) > 0
-            or adjustment.get("source_of_truth_change_count", 0) > 0
+            or intrinsic_name_repair.get("change_count", 0) > 0
+            or intrinsic_name_repair.get("collision_rename_count", 0) > 0
+            or toolrenderer_name_alignment.get("changed_count", 0) > 0
             or visibility_adjustment.get("changed_count", 0) > 0
         ),
     }
@@ -754,8 +1222,11 @@ def prepare_adjusted_sqlite(sqlite_path: Path, out: Path | None, out_dir: Path |
     copy_sqlite_database(copy_source, destination)
     conn = sqlite3.connect(str(destination))
     try:
+        referential_closure_repair = repair_referential_enumeration_closure(conn)
         overlay = overlay_python_names(conn, source) if base else None
         adjustment = adjust_duplicate_python_names(conn)
+        intrinsic_name_repair = repair_shortcuts_language_intrinsic_python_names(conn)
+        toolrenderer_name_alignment = align_toolrenderer_python_names(conn)
         visibility_adjustment = adjust_toolrenderer_visibility(conn)
         conn.commit()
     finally:
@@ -766,8 +1237,11 @@ def prepare_adjusted_sqlite(sqlite_path: Path, out: Path | None, out_dir: Path |
         "source": target_description(source),
         "base": target_description(copy_source) if base else None,
         "prepared": target_description(destination),
+        "referential_closure_repair": referential_closure_repair,
         "python_name_overlay": overlay,
         "duplicate_adjustment": adjustment,
+        "shortcuts_language_intrinsic_name_repair": intrinsic_name_repair,
+        "toolrenderer_name_alignment": toolrenderer_name_alignment,
         "toolrenderer_visibility_adjustment": visibility_adjustment,
     }
 
@@ -902,8 +1376,11 @@ def activate_adjusted(device: str, sqlite_path: Path, out_dir: Path | None, out:
         "source": prepared["source"],
         "base": prepared["base"],
         "prepared": prepared["prepared"],
+        "referential_closure_repair": prepared["referential_closure_repair"],
         "python_name_overlay": prepared["python_name_overlay"],
         "duplicate_adjustment": prepared["duplicate_adjustment"],
+        "shortcuts_language_intrinsic_name_repair": prepared["shortcuts_language_intrinsic_name_repair"],
+        "toolrenderer_name_alignment": prepared["toolrenderer_name_alignment"],
         "toolrenderer_visibility_adjustment": prepared["toolrenderer_visibility_adjustment"],
         "replacement": replacement,
         "restart_required": True,
@@ -1246,7 +1723,7 @@ def main() -> int:
     point_host = sub.add_parser("point-host", help="Point simulator Tools-active at the host mac Tools-active target.")
     point_host.add_argument("--no-resolve", action="store_true", help="Keep the host Tools-active symlink path instead of resolving it.")
 
-    prepare = sub.add_parser("prepare", help="Copy a ToolKit sqlite and rewrite duplicate Python names in the copy.")
+    prepare = sub.add_parser("prepare", help="Copy a ToolKit sqlite, repair typed references, and rewrite duplicate Python names.")
     prepare.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
     prepare.add_argument("--base", type=Path, help="Base sqlite to copy before overlaying Python names from --sqlite.")
     prepare.add_argument("--out", type=Path, help="Adjusted sqlite output path.")
@@ -1256,7 +1733,7 @@ def main() -> int:
     adjust.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
     adjust.add_argument("--no-backup", action="store_true", help="Do not create a sqlite backup before making changes.")
 
-    activate = sub.add_parser("activate", help="Prepare an adjusted sqlite copy and replace the simulator Tools-active target with it.")
+    activate = sub.add_parser("activate", help="Prepare a closure-repaired sqlite copy and replace the simulator Tools-active target with it.")
     activate.add_argument("--sqlite", type=Path, default=HOST_TOOLKIT_ACTIVE, help="SQLite path. Defaults to host ~/Library/Shortcuts/ToolKit/Tools-active.")
     activate.add_argument("--base", type=Path, help="Debug only: base sqlite to copy before overlaying Python names from --sqlite.")
     activate.add_argument("--out", type=Path, help="Debug only: adjusted sqlite output path.")
