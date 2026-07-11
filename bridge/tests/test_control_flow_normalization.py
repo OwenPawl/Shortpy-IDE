@@ -36,6 +36,24 @@ def main() -> None:
     assert len(normalized["report"]["transformations"]) == 1
     ast.parse(rewritten)
 
+    nested_expression = nested.replace(
+        b"repeat_results.append(repeat_results1)",
+        b"repeat_results.append(combine(text=repeat_results1))",
+    )
+    normalized_expression = bridgectl.normalize_nested_repeat_results(
+        nested_expression
+    )
+    expression_source = normalized_expression["source"].decode("utf-8")
+    assert (
+        "__shortpy_control_flow_value_1 = combine(text=repeat_results1); "
+        in expression_source
+    )
+    assert "repeat_results.append(__shortpy_control_flow_value_1)" in expression_source
+    assert normalized_expression["report"]["transformations"][0][
+        "childAccumulators"
+    ] == ["repeat_results1"]
+    ast.parse(expression_source)
+
     collision = nested.replace(
         b"    repeat_results = []\n",
         b"    __shortpy_control_flow_value_1 = []\n    repeat_results = []\n",

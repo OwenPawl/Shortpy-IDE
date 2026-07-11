@@ -1785,7 +1785,7 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
     report = {
         "present": False,
         "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "same-line nested-repeat-result alias",
+        "strategy": "same-line nested-control-flow-dependent value alias",
         "line_count_preserved": True,
         "transformations": [],
     }
@@ -1827,12 +1827,14 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
 
     for parent in candidates:
         argument = parent["argument"]
-        if not isinstance(argument, ast.Name):
-            continue
-        child = producers.get(
-            (id(parent["loop"].body), argument.id)
-        )
-        if child is None or child["index"] >= parent["append_index"]:
+        child_dependencies: dict[str, dict] = {}
+        for node in ast.walk(argument):
+            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+                continue
+            child = producers.get((id(parent["loop"].body), node.id))
+            if child is not None and child["index"] < parent["append_index"]:
+                child_dependencies[node.id] = child
+        if not child_dependencies:
             continue
 
         suffix = 1
@@ -1851,15 +1853,23 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
             (
                 append_start,
                 append_start,
-                f"{alias} = {argument.id}; ".encode("utf-8"),
+                alias.encode("utf-8")
+                + b" = "
+                + source[argument_start:argument_end]
+                + b"; ",
             )
         )
         edits.append((argument_start, argument_end, alias.encode("utf-8")))
+        child_names = sorted(child_dependencies)
+        child_kinds = sorted(
+            {child["kind"] for child in child_dependencies.values()}
+        )
         report["transformations"].append(
             {
                 "line": parent["append_statement"].lineno,
                 "parentAccumulator": parent["accumulator"],
-                "childAccumulator": argument.id,
+                "childAccumulator": child_names[0],
+                "childAccumulators": child_names,
                 "alias": alias,
                 "parentLoop": "repeat-with-each"
                 if not (
@@ -1868,7 +1878,9 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
                     and parent["loop"].iter.func.id == "range"
                 )
                 else "finite-repeat",
-                "childControlFlow": child["kind"],
+                "childControlFlow": child_kinds[0]
+                if len(child_kinds) == 1
+                else "mixed",
             }
         )
 

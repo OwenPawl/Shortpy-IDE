@@ -57,6 +57,11 @@ rewrite. It converts only proven complete output shapes before
 variable inlining, action lowerer, and workflow serializer authoritative.
 Nine finite/foreach/menu/conditional collision and nesting fixtures pass
 `Python -> plist -> Python -> plist` with stable native action shapes.
+The signed `Shortcut Debugger.shortcut` fixture additionally proved the more
+general nested shape where an outer Repeat Results append contains an action
+call that consumes an inner control-flow result. Aliasing the complete appended
+value at the lexical boundary removes only Apple's synthetic append; its signed
+output reimports and reaches a stable 95-action shape on the next compile.
 
 Proven:
 
