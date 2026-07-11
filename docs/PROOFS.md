@@ -43,6 +43,21 @@ The bridge rewrites inline metadata to compiler refs and catalog metadata before
 
 The bridge sends native ToolRenderer/ShortcutAgent decorator syntax directly to Apple's compiler. It should not preserve the old custom trigger DSL.
 
+## Control-flow compiler adapter
+
+Static and live IR captures proved that Apple's unconditional
+`ControlFlowOutputInferencePass` removes the outer Repeat accumulator but can
+leave its append action when the appended value is another control-flow output.
+Direct `elif` lowering also omitted later conditions, while menu/conditional
+list accumulators remained disconnected named-variable actions.
+
+The production fix is an owned host AST normalization pass, not a hook or plist
+rewrite. It converts only proven complete output shapes before
+`ShortcutsLanguage.pythonToShortcut`, then keeps Apple's parser, diagnostics,
+variable inlining, action lowerer, and workflow serializer authoritative.
+Nine finite/foreach/menu/conditional collision and nesting fixtures pass
+`Python -> plist -> Python -> plist` with stable native action shapes.
+
 Proven:
 
 - `@when_app_opened`
@@ -89,13 +104,3 @@ changes to the current host record, preserving values not represented by
 Shortpy. `WFWorkflowIcon` is explicitly host-owned because identical compiler
 runs generate different default icon colors and Shortpy has no editable icon
 syntax.
-
-The simulator exporter also has a proven asymmetry for compiler-generated
-repeat accumulators. `ShortcutsLanguage` can emit an explicit
-`is.workflow.actions.appendvariable` immediately before a matching Repeat end,
-while `WFWorkflow.export(context:)` rejects that same shape with
-`WFProgramErrorDomain Code=3` because the scope ends on `WFProgramAppendNode`.
-Before plist-to-Python conversion, the bridge removes that append only when it
-appends the immediately preceding action output and its accumulator is otherwise
-unreferenced. The host plist is not modified, and the bridge response records
-the normalized action index, repeat group, accumulator, and value action.

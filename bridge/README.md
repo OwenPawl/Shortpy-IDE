@@ -5,7 +5,7 @@ This bridge loads into the iOS Simulator Shortcuts process and exposes the nativ
 Current target:
 
 - iOS Simulator 27.0
-- `ToolVisibilityFilter.any` for compiler validation, with typed-reference enum closure repair, ShortcutsLanguage intrinsic-name closure, and ToolKit sqlite visibility/approval adjustment for ToolRenderer exposure
+- `ToolVisibilityFilter.any` for compiler validation, with typed-reference enum closure repair and ToolKit sqlite visibility/approval adjustment for ToolRenderer exposure
 - launch-time `DYLD_INSERT_LIBRARIES`
 - private Apple frameworks from the selected simulator runtime
 
@@ -79,13 +79,23 @@ native function names, ToolKit aliases, and parameter names. A global monotonic
 semantic alignment permits literal/control-flow gaps without positional shifts;
 ambiguous matches remain unchanged with structured diagnostics.
 
-Python-syntax actions use the finite intrinsic names reserved during ToolKit
-preparation (`dictionary`, `list`, `text`, `nothing`, and
-`get_dictionary_value`) and stay as native literals/subscripts. Other
+Python-syntax actions retain their ToolKit names during preparation; for
+example, list literals are lowered internally to `com_apple_shortcuts_list`.
+Other
 value-rendered actions are reified only when one canonical action and one
 serialized parameter agree. Loop-carried branch results receive an alias-only
 seed assignment when same-call keyword recurrence identifies one existing seed;
 ambiguous control flow remains unchanged.
+
+Before native compilation, the host CLI applies a narrow owned control-flow
+normalization pass. Complete menu and conditional accumulators become native
+branch-result assignments, `elif` chains become nested conditionals so each
+condition uses Apple's working primary lowerer, and nested control-flow values
+crossing a Repeat Results boundary receive a collision-free same-line alias.
+Explicit non-result list mutations lower internally through native Set/Add/Get
+Variable actions and are restored to normal list syntax on import. The pass
+does not patch the dylib, edit workflow plists, or replace Apple's parser,
+diagnostics, variable inlining, action lowerer, or workflow serializer.
 
 Compilation uses an imported `WFParameterStateCatalog` only while legacy source
 still contains matching `ref(...)` handles. Editable inline metadata rebuilds

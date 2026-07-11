@@ -1658,6 +1658,759 @@ def node_span(node: ast.AST, line_offsets: list[int]) -> tuple[int, int]:
     return start, end
 
 
+def _empty_list_assignment_name(statement: ast.stmt) -> str | None:
+    if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        return None
+    target = statement.targets[0]
+    if not isinstance(target, ast.Name):
+        return None
+    if not isinstance(statement.value, ast.List) or statement.value.elts:
+        return None
+    return target.id
+
+
+def _direct_append(statement: ast.stmt) -> tuple[str, ast.AST] | None:
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return None
+    call = statement.value
+    if call.keywords or len(call.args) != 1:
+        return None
+    function = call.func
+    if (
+        not isinstance(function, ast.Attribute)
+        or function.attr != "append"
+        or not isinstance(function.value, ast.Name)
+    ):
+        return None
+    return function.value.id, call.args[0]
+
+
+def _loads_name(statements: list[ast.stmt], name: str) -> bool:
+    return any(
+        isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id == name
+        for statement in statements
+        for node in ast.walk(statement)
+    )
+
+
+def _statement_blocks(node: ast.AST) -> list[list[ast.stmt]]:
+    blocks: list[list[ast.stmt]] = []
+    seen: set[int] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, ast.AST):
+            for _field, child in ast.iter_fields(value):
+                visit(child)
+            return
+        if not isinstance(value, list):
+            return
+        if value and all(isinstance(item, ast.stmt) for item in value):
+            block_id = id(value)
+            if block_id not in seen:
+                seen.add(block_id)
+                blocks.append(value)
+        for item in value:
+            visit(item)
+
+    visit(node)
+    return blocks
+
+
+def _repeat_output_candidates(tree: ast.AST) -> list[dict]:
+    candidates: list[dict] = []
+    for block in _statement_blocks(tree):
+        empty_assignments: dict[str, int] = {}
+        for index, statement in enumerate(block):
+            assigned_name = _empty_list_assignment_name(statement)
+            if assigned_name is not None:
+                empty_assignments[assigned_name] = index
+                continue
+            if not isinstance(statement, ast.For):
+                continue
+            direct_appends: dict[str, list[tuple[int, ast.stmt, ast.AST]]] = {}
+            for body_index, body_statement in enumerate(statement.body):
+                append = _direct_append(body_statement)
+                if append is not None:
+                    target, argument = append
+                    direct_appends.setdefault(target, []).append(
+                        (body_index, body_statement, argument)
+                    )
+            for accumulator, appends in direct_appends.items():
+                assignment_index = empty_assignments.get(accumulator)
+                if (
+                    assignment_index is None
+                    or len(appends) != 1
+                    or appends[0][0] != len(statement.body) - 1
+                ):
+                    continue
+                if not _loads_name(block[index + 1 :], accumulator):
+                    continue
+                append_index, append_statement, argument = appends[0]
+                candidates.append(
+                    {
+                        "block": block,
+                        "assignment_index": assignment_index,
+                        "loop_index": index,
+                        "loop": statement,
+                        "accumulator": accumulator,
+                        "append_index": append_index,
+                        "append_statement": append_statement,
+                        "argument": argument,
+                    }
+                )
+    return candidates
+
+
+def _byte_line_offsets(source: bytes) -> list[int]:
+    offsets: list[int] = []
+    cursor = 0
+    for line in source.splitlines(keepends=True):
+        offsets.append(cursor)
+        cursor += len(line)
+    if not offsets:
+        offsets.append(0)
+    return offsets
+
+
+def _node_byte_span(node: ast.AST, offsets: list[int]) -> tuple[int, int]:
+    return (
+        offsets[node.lineno - 1] + node.col_offset,
+        offsets[node.end_lineno - 1] + node.end_col_offset,
+    )
+
+
+def normalize_nested_repeat_results(source: bytes) -> dict:
+    report = {
+        "present": False,
+        "source": "Shortpy owned control-flow frontend normalization",
+        "strategy": "same-line nested-repeat-result alias",
+        "line_count_preserved": True,
+        "transformations": [],
+    }
+    try:
+        text = source.decode("utf-8")
+        tree = ast.parse(text)
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        report["status"] = "skipped"
+        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
+        return {"source": source, "rewritten": False, "report": report}
+
+    candidates = _repeat_output_candidates(tree)
+    producers: dict[tuple[int, str], dict] = {
+        (id(candidate["block"]), candidate["accumulator"]): {
+            "index": candidate["loop_index"],
+            "kind": "finite-repeat"
+            if (
+                isinstance(candidate["loop"].iter, ast.Call)
+                and isinstance(candidate["loop"].iter.func, ast.Name)
+                and candidate["loop"].iter.func.id == "range"
+            )
+            else "repeat-with-each",
+        }
+        for candidate in candidates
+    }
+    for block in _statement_blocks(tree):
+        for index, statement in enumerate(block):
+            target = _branch_result_assignment_name(statement)
+            if target is not None:
+                producers[(id(block), target)] = {
+                    "index": index,
+                    "kind": "if" if isinstance(statement, ast.If) else "menu",
+                }
+    existing_names = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    offsets = _byte_line_offsets(source)
+    edits: list[tuple[int, int, bytes]] = []
+
+    for parent in candidates:
+        argument = parent["argument"]
+        if not isinstance(argument, ast.Name):
+            continue
+        child = producers.get(
+            (id(parent["loop"].body), argument.id)
+        )
+        if child is None or child["index"] >= parent["append_index"]:
+            continue
+
+        suffix = 1
+        while True:
+            alias = f"__shortpy_control_flow_value_{suffix}"
+            suffix += 1
+            if alias not in existing_names:
+                existing_names.add(alias)
+                break
+
+        append_start, _append_end = _node_byte_span(
+            parent["append_statement"], offsets
+        )
+        argument_start, argument_end = _node_byte_span(argument, offsets)
+        edits.append(
+            (
+                append_start,
+                append_start,
+                f"{alias} = {argument.id}; ".encode("utf-8"),
+            )
+        )
+        edits.append((argument_start, argument_end, alias.encode("utf-8")))
+        report["transformations"].append(
+            {
+                "line": parent["append_statement"].lineno,
+                "parentAccumulator": parent["accumulator"],
+                "childAccumulator": argument.id,
+                "alias": alias,
+                "parentLoop": "repeat-with-each"
+                if not (
+                    isinstance(parent["loop"].iter, ast.Call)
+                    and isinstance(parent["loop"].iter.func, ast.Name)
+                    and parent["loop"].iter.func.id == "range"
+                )
+                else "finite-repeat",
+                "childControlFlow": child["kind"],
+            }
+        )
+
+    rewritten = source
+    for start, end, replacement in sorted(
+        edits, key=lambda item: (item[0], item[1]), reverse=True
+    ):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    report["present"] = bool(report["transformations"])
+    report["status"] = "applied" if report["present"] else "skipped"
+    if not report["present"]:
+        report["reason"] = "no nested synthetic repeat-result boundary was found"
+    return {
+        "source": rewritten,
+        "rewritten": rewritten != source,
+        "report": report,
+    }
+
+
+def _conditional_leaf_bodies(statement: ast.If) -> list[list[ast.stmt]] | None:
+    if not statement.body or not statement.orelse:
+        return None
+    bodies = [statement.body]
+    current = statement
+    while (
+        len(current.orelse) == 1
+        and isinstance(current.orelse[0], ast.If)
+    ):
+        current = current.orelse[0]
+        if not current.body or not current.orelse:
+            return None
+        bodies.append(current.body)
+    bodies.append(current.orelse)
+    return bodies
+
+
+def _branch_result_appends(
+    statement: ast.stmt,
+) -> tuple[str, list[tuple[ast.stmt, ast.AST]]] | None:
+    if isinstance(statement, ast.If):
+        bodies = _conditional_leaf_bodies(statement)
+        if bodies is None:
+            return None
+    elif isinstance(statement, ast.Match):
+        bodies = [case.body for case in statement.cases]
+        if not bodies or any(not body for body in bodies):
+            return None
+    else:
+        return None
+
+    appends: list[tuple[ast.stmt, ast.AST]] = []
+    target: str | None = None
+    for body in bodies:
+        append = _direct_append(body[-1])
+        if append is None:
+            return None
+        candidate_target, argument = append
+        if target is None:
+            target = candidate_target
+        elif target != candidate_target:
+            return None
+        appends.append((body[-1], argument))
+    return (target, appends) if target is not None else None
+
+
+def _branch_result_assignment_name(statement: ast.stmt) -> str | None:
+    if isinstance(statement, ast.If):
+        bodies = _conditional_leaf_bodies(statement)
+        if bodies is None:
+            return None
+    elif isinstance(statement, ast.Match):
+        bodies = [case.body for case in statement.cases]
+        if not bodies or any(not body for body in bodies):
+            return None
+    else:
+        return None
+    targets = []
+    for body in bodies:
+        assignment = value_assignment_target(body[-1])
+        if assignment is None:
+            return None
+        targets.append(assignment[0].id)
+    return targets[0] if targets and len(set(targets)) == 1 else None
+
+
+def normalize_branch_results_and_elifs(source: bytes) -> dict:
+    report = {
+        "present": False,
+        "source": "Shortpy owned control-flow frontend normalization",
+        "strategy": "branch-result assignments and nested else-if lowering",
+        "line_count_preserved": True,
+        "branch_transformations": [],
+        "elif_transformations": [],
+    }
+    try:
+        text = source.decode("utf-8")
+        tree = ast.parse(text)
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        report["status"] = "skipped"
+        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
+        return {"source": source, "rewritten": False, "report": report}
+
+    offsets = _byte_line_offsets(source)
+    edits: list[tuple[int, int, bytes]] = []
+    transformed_assignments: set[int] = set()
+    for block in _statement_blocks(tree):
+        empty_assignments: dict[str, tuple[int, ast.Assign]] = {}
+        for index, statement in enumerate(block):
+            assigned_name = _empty_list_assignment_name(statement)
+            if assigned_name is not None:
+                empty_assignments[assigned_name] = (index, statement)
+                continue
+            branch_result = _branch_result_appends(statement)
+            if branch_result is None:
+                continue
+            accumulator, appends = branch_result
+            assignment = empty_assignments.get(accumulator)
+            if assignment is None or not _loads_name(block[index + 1 :], accumulator):
+                continue
+            assignment_index, assignment_statement = assignment
+            if id(assignment_statement) not in transformed_assignments:
+                start, end = _node_byte_span(assignment_statement, offsets)
+                edits.append((start, end, b"pass"))
+                transformed_assignments.add(id(assignment_statement))
+            for append_statement, argument in appends:
+                start, end = _node_byte_span(append_statement, offsets)
+                argument_start, argument_end = _node_byte_span(argument, offsets)
+                edits.append(
+                    (
+                        start,
+                        end,
+                        accumulator.encode("utf-8")
+                        + b" = "
+                        + source[argument_start:argument_end],
+                    )
+                )
+            report["branch_transformations"].append(
+                {
+                    "kind": "if" if isinstance(statement, ast.If) else "menu",
+                    "line": statement.lineno,
+                    "accumulator": accumulator,
+                    "assignmentLine": assignment_statement.lineno,
+                    "branchCount": len(appends),
+                }
+            )
+
+    lines = source.splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        start, _end = _node_byte_span(node, offsets)
+        if source[start : start + 4] != b"elif":
+            continue
+        indent = lines[node.lineno - 1][: node.col_offset]
+        edits.append(
+            (
+                start,
+                start + 4,
+                b"else:\n" + indent + b"    if",
+            )
+        )
+        for line_number in range(node.lineno + 1, node.end_lineno + 1):
+            edits.append((offsets[line_number - 1], offsets[line_number - 1], b"    "))
+        report["elif_transformations"].append(
+            {
+                "line": node.lineno,
+                "endLine": node.end_lineno,
+                "insertedLineCount": 1,
+            }
+        )
+
+    rewritten = source
+    for start, end, replacement in sorted(
+        edits, key=lambda item: (item[0], item[1]), reverse=True
+    ):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    report["present"] = bool(
+        report["branch_transformations"] or report["elif_transformations"]
+    )
+    report["status"] = "applied" if report["present"] else "skipped"
+    report["line_count_preserved"] = not bool(report["elif_transformations"])
+    if not report["present"]:
+        report["reason"] = "no complete branch-result or elif shape was found"
+    return {
+        "source": rewritten,
+        "rewritten": rewritten != source,
+        "report": report,
+    }
+
+
+def normalize_variable_aliases(source: bytes) -> dict:
+    report = {
+        "present": False,
+        "source": "Shortpy owned control-flow frontend normalization",
+        "strategy": "single-use alias def-use collapse",
+        "line_count_preserved": False,
+        "aliases": [],
+    }
+    rewritten = source
+    for _iteration in range(20):
+        try:
+            text = rewritten.decode("utf-8")
+            tree = ast.parse(text)
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            report["status"] = "partial" if report["aliases"] else "skipped"
+            report["reason"] = f"source was not parseable by the host Python AST: {exc}"
+            break
+        offsets = _byte_line_offsets(rewritten)
+        loads: dict[str, list[ast.Name]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                loads.setdefault(node.id, []).append(node)
+        edit: tuple[int, int, bytes, int, int, str, str] | None = None
+
+        for block in _statement_blocks(tree):
+            for index in range(1, len(block)):
+                alias = value_assignment_target(block[index])
+                if alias is None or not isinstance(alias[1], ast.Name):
+                    continue
+                destination = alias[0].id
+                source_name = alias[1].id
+                if len(loads.get(source_name, [])) != 1:
+                    continue
+
+                previous_assignment = value_assignment_target(block[index - 1])
+                if (
+                    previous_assignment is not None
+                    and previous_assignment[0].id == source_name
+                ):
+                    target_start, target_end = _node_byte_span(
+                        previous_assignment[0], offsets
+                    )
+                    line_start, line_end = _line_span_for_statement(
+                        text, block[index], line_offsets_for(text)
+                    )
+                    edit = (
+                        target_start,
+                        target_end,
+                        destination.encode("utf-8"),
+                        line_start,
+                        line_end,
+                        source_name,
+                        destination,
+                    )
+                    break
+
+                producer = block[index - 1]
+                producer_target = _branch_result_assignment_name(producer)
+                if producer_target != source_name:
+                    continue
+                target_nodes = []
+                if isinstance(producer, ast.If):
+                    bodies = _conditional_leaf_bodies(producer) or []
+                elif isinstance(producer, ast.Match):
+                    bodies = [case.body for case in producer.cases]
+                else:
+                    bodies = []
+                for body in bodies:
+                    assignment = value_assignment_target(body[-1])
+                    if assignment is not None and assignment[0].id == source_name:
+                        target_nodes.append(assignment[0])
+                if not target_nodes:
+                    continue
+                replacements = [
+                    (*_node_byte_span(target, offsets), destination.encode("utf-8"))
+                    for target in target_nodes
+                ]
+                line_start, line_end = _line_span_for_statement(
+                    text, block[index], line_offsets_for(text)
+                )
+                for start, end, replacement in sorted(
+                    replacements + [(line_start, line_end, b"")],
+                    key=lambda item: item[0],
+                    reverse=True,
+                ):
+                    rewritten = (
+                        rewritten[:start] + replacement + rewritten[end:]
+                    )
+                report["aliases"].append(
+                    {
+                        "from": source_name,
+                        "to": destination,
+                        "line": block[index].lineno,
+                        "producer": "if"
+                        if isinstance(producer, ast.If)
+                        else "menu",
+                    }
+                )
+                edit = ()
+                break
+            if edit is not None:
+                break
+
+        if edit is None:
+            break
+        if edit == ():
+            continue
+        (
+            target_start,
+            target_end,
+            target_replacement,
+            line_start,
+            line_end,
+            source_name,
+            destination,
+        ) = edit
+        for start, end, replacement in sorted(
+            [
+                (target_start, target_end, target_replacement),
+                (line_start, line_end, b""),
+            ],
+            key=lambda item: item[0],
+            reverse=True,
+        ):
+            rewritten = rewritten[:start] + replacement + rewritten[end:]
+        report["aliases"].append(
+            {
+                "from": source_name,
+                "to": destination,
+                "line": text.count("\n", 0, line_start) + 1,
+                "producer": "assignment",
+            }
+        )
+
+    report["present"] = bool(report["aliases"])
+    report.setdefault("status", "applied" if report["present"] else "skipped")
+    if not report["present"] and "reason" not in report:
+        report["reason"] = "no single-use alias chain was found"
+    return {
+        "source": rewritten,
+        "rewritten": rewritten != source,
+        "report": report,
+    }
+
+
+def normalize_explicit_variable_mutations(source: bytes) -> dict:
+    report = {
+        "present": False,
+        "source": "Shortpy owned control-flow frontend normalization",
+        "strategy": "explicit Set/Add/Get Variable data flow",
+        "line_count_preserved": True,
+        "variables": [],
+    }
+    try:
+        text = source.decode("utf-8")
+        tree = ast.parse(text)
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        report["status"] = "skipped"
+        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
+        return {"source": source, "rewritten": False, "report": report}
+
+    repeat_accumulators = {
+        candidate["accumulator"] for candidate in _repeat_output_candidates(tree)
+    }
+    parent = {
+        id(child): node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+    existing_names = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    assignments: dict[str, list[tuple[ast.stmt, ast.AST]]] = {}
+    append_receivers: dict[str, list[ast.Name]] = {}
+    for node in ast.walk(tree):
+        assignment = value_assignment_target(node)
+        if assignment is not None:
+            target, value = assignment
+            assignments.setdefault(target.id, []).append((node, value))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            append_receivers.setdefault(node.func.value.id, []).append(
+                node.func.value
+            )
+
+    offsets = _byte_line_offsets(source)
+    edits: list[tuple[int, int, bytes]] = []
+    for name, receivers in append_receivers.items():
+        if name in repeat_accumulators:
+            continue
+        definitions = sorted(
+            assignments.get(name, []), key=lambda item: item[0].lineno
+        )
+        first_mutation_line = min(receiver.lineno for receiver in receivers)
+        definitions = [
+            item for item in definitions if item[0].lineno < first_mutation_line
+        ]
+        if len(definitions) != 1:
+            continue
+        assignment_statement, initial_value = definitions[0]
+        if any(
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == name
+            for node in ast.walk(initial_value)
+        ):
+            continue
+
+        assignment_start, assignment_end = _node_byte_span(
+            assignment_statement, offsets
+        )
+        value_start, value_end = _node_byte_span(initial_value, offsets)
+        edits.append(
+            (
+                assignment_start,
+                assignment_end,
+                b"com_apple_shortcuts_set_variable(input="
+                + source[value_start:value_end]
+                + b", variable="
+                + json.dumps(name).encode("utf-8")
+                + b")",
+            )
+        )
+
+        receiver_ids = {id(receiver) for receiver in receivers}
+        read_groups: dict[int, tuple[ast.stmt, list[ast.Name]]] = {}
+        for node in ast.walk(tree):
+            if (
+                not isinstance(node, ast.Name)
+                or not isinstance(node.ctx, ast.Load)
+                or node.id != name
+                or node.lineno <= assignment_statement.lineno
+                or id(node) in receiver_ids
+            ):
+                continue
+            parent_node = parent.get(id(node))
+            if (
+                isinstance(parent_node, ast.Call)
+                and isinstance(parent_node.func, ast.Name)
+                and parent_node.func.id
+                in {
+                    "com_apple_shortcuts_get_variable",
+                    "com_apple_shortcuts_set_variable",
+                    "com_apple_shortcuts_add_to_variable",
+                }
+            ):
+                continue
+            statement: ast.AST | None = node
+            while statement is not None and not isinstance(statement, ast.stmt):
+                statement = parent.get(id(statement))
+            if not isinstance(statement, ast.stmt):
+                continue
+            group = read_groups.setdefault(
+                id(statement), (statement, [])
+            )
+            group[1].append(node)
+
+        read_count = 0
+        for statement, reads in read_groups.values():
+            suffix = 1
+            while True:
+                alias = f"__shortpy_variable_value_{suffix}"
+                suffix += 1
+                if alias not in existing_names:
+                    existing_names.add(alias)
+                    break
+            statement_start, _statement_end = _node_byte_span(statement, offsets)
+            edits.append(
+                (
+                    statement_start,
+                    statement_start,
+                    (
+                        alias
+                        + " = com_apple_shortcuts_get_variable(variable="
+                        + json.dumps(name)
+                        + "); "
+                    ).encode("utf-8"),
+                )
+            )
+            for read in reads:
+                start, end = _node_byte_span(read, offsets)
+                edits.append((start, end, alias.encode("utf-8")))
+                read_count += 1
+        report["variables"].append(
+            {
+                "name": name,
+                "assignmentLine": assignment_statement.lineno,
+                "mutationCount": len(receivers),
+                "readCount": read_count,
+            }
+        )
+
+    rewritten = source
+    for start, end, replacement in sorted(
+        edits, key=lambda item: (item[0], item[1]), reverse=True
+    ):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    report["present"] = bool(report["variables"])
+    report["status"] = "applied" if report["present"] else "skipped"
+    if not report["present"]:
+        report["reason"] = "no non-control-flow list mutation had one lexical initializer"
+    return {
+        "source": rewritten,
+        "rewritten": rewritten != source,
+        "report": report,
+    }
+
+
+def normalize_control_flow_source(source: bytes) -> dict:
+    aliases = normalize_variable_aliases(source)
+    branches = normalize_branch_results_and_elifs(aliases["source"])
+    repeats = normalize_nested_repeat_results(branches["source"])
+    variables = normalize_explicit_variable_mutations(repeats["source"])
+    reports = [
+        aliases["report"],
+        branches["report"],
+        repeats["report"],
+        variables["report"],
+    ]
+    transformations = sum(
+        len(report.get("branch_transformations", []))
+        + len(report.get("elif_transformations", []))
+        + len(report.get("transformations", []))
+        + len(report.get("variables", []))
+        + len(report.get("aliases", []))
+        for report in reports
+    )
+    return {
+        "source": variables["source"],
+        "rewritten": bool(
+            aliases["rewritten"]
+            or branches["rewritten"]
+            or repeats["rewritten"]
+            or variables["rewritten"]
+        ),
+        "report": {
+            "present": transformations > 0,
+            "source": "Shortpy owned control-flow frontend normalization",
+            "strategy": "native branch outputs plus nested-repeat result aliases",
+            "transformation_count": transformations,
+            "line_count_preserved": all(
+                report.get("line_count_preserved", True) for report in reports
+            ),
+            "stages": reports,
+        },
+    }
+
+
 def inline_catalog_literals(value_node: ast.AST, parameter_info: dict) -> list[ast.Dict]:
     if isinstance(value_node, ast.Dict) and not parameter_info.get("isList"):
         return [value_node]
@@ -1804,27 +2557,78 @@ def attach_inline_catalog_summary(response: dict, prepared: dict, expand_respons
     return response
 
 
+def attach_control_flow_normalization_summary(
+    response: dict, normalized: dict
+) -> dict:
+    report = normalized.get("report")
+    if isinstance(report, dict) and report.get("present"):
+        response["control_flow_normalization"] = report
+    return response
+
+
+def _compile_prepared_python_to_bplist(
+    socket_path: str,
+    prepared: dict,
+    flags: int,
+    catalog_payload: object | None,
+) -> dict:
+    native_catalog_payload = (
+        native_catalog_json(catalog_payload)
+        if catalog_payload is not None
+        else None
+    )
+    expand_response = None
+    if prepared.get("entries"):
+        expand_response = expand_inline_catalog(socket_path, prepared["entries"])
+        native_catalog_payload = expand_response.get("catalog")
+    payload = base64.b64encode(prepared["source"]).decode("ascii")
+    if native_catalog_payload is not None:
+        catalog_text = json.dumps(
+            native_catalog_payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        catalog_b64 = base64.b64encode(catalog_text).decode("ascii")
+        raw = send_command(
+            socket_path,
+            f"python-to-bplist-catalog-b64-flags {flags} {payload} {catalog_b64}",
+        )
+    else:
+        raw = send_command(
+            socket_path, f"python-to-bplist-b64-flags {flags} {payload}"
+        )
+    return attach_inline_catalog_summary(
+        json.loads(raw), prepared, expand_response
+    )
+
+
 def compile_python_to_bplist(
     socket_path: str,
     source: bytes,
     flags: int,
     catalog_payload: object | None = None,
 ) -> dict:
-    prepared = rewrite_inline_catalog_metadata(source)
-    native_catalog_payload = native_catalog_json(catalog_payload) if catalog_payload is not None else None
-    expand_response = None
-    if prepared.get("entries"):
-        expand_response = expand_inline_catalog(socket_path, prepared["entries"])
-        native_catalog_payload = expand_response.get("catalog")
+    normalized = normalize_control_flow_source(source)
+    if (
+        normalized["rewritten"]
+        and not normalized["report"].get("line_count_preserved", True)
+    ):
+        original_prepared = rewrite_inline_catalog_metadata(source)
+        preflight = _compile_prepared_python_to_bplist(
+            socket_path, original_prepared, flags, catalog_payload
+        )
+        if not preflight.get("ok"):
+            preflight["control_flow_preflight"] = {
+                "usedOriginalSource": True,
+                "reason": "preserve user-source diagnostic locations",
+            }
+            return attach_control_flow_normalization_summary(
+                preflight, normalized
+            )
 
-    payload = base64.b64encode(prepared["source"]).decode("ascii")
-    if native_catalog_payload is not None:
-        catalog_text = json.dumps(native_catalog_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        catalog_b64 = base64.b64encode(catalog_text).decode("ascii")
-        raw = send_command(socket_path, f"python-to-bplist-catalog-b64-flags {flags} {payload} {catalog_b64}")
-    else:
-        raw = send_command(socket_path, f"python-to-bplist-b64-flags {flags} {payload}")
-    return attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
+    prepared = rewrite_inline_catalog_metadata(normalized["source"])
+    response = _compile_prepared_python_to_bplist(
+        socket_path, prepared, flags, catalog_payload
+    )
+    return attach_control_flow_normalization_summary(response, normalized)
 
 
 def sign_shortcut_response(
@@ -2168,7 +2972,8 @@ def compile_python_record_file_probe(
     flags: int,
     catalog_payload: object | None = None,
 ) -> dict:
-    prepared = rewrite_inline_catalog_metadata(source)
+    normalized = normalize_control_flow_source(source)
+    prepared = rewrite_inline_catalog_metadata(normalized["source"])
     native_catalog_payload = native_catalog_json(catalog_payload) if catalog_payload is not None else None
     expand_response = None
     if prepared.get("entries"):
@@ -2182,7 +2987,8 @@ def compile_python_record_file_probe(
         raw = send_command(socket_path, f"record-file-probe-catalog-b64-flags {flags} {payload} {catalog_b64}")
     else:
         raw = send_command(socket_path, f"record-file-probe-b64-flags {flags} {payload}")
-    return attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
+    response = attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
+    return attach_control_flow_normalization_summary(response, normalized)
 
 
 def python_literal(value: object) -> str:
@@ -2289,128 +3095,6 @@ def action_origins_from_plist_json(data: bytes) -> list[dict]:
 
 def action_identifiers_from_plist_json(data: bytes) -> list[str]:
     return [origin["actionIdentifier"] for origin in action_origins_from_plist_json(data)]
-
-
-def workflow_action_uuid(action: object) -> str | None:
-    if not isinstance(action, dict):
-        return None
-    parameters = action.get("WFWorkflowActionParameters")
-    candidates = [
-        action.get("WFWorkflowActionUUID"),
-        parameters.get("UUID") if isinstance(parameters, dict) else None,
-    ]
-    return next((value for value in candidates if isinstance(value, str) and value), None)
-
-
-def variable_name_reference_count(value: object, variable_name: str) -> int:
-    if isinstance(value, list):
-        return sum(variable_name_reference_count(item, variable_name) for item in value)
-    if not isinstance(value, dict):
-        return 0
-    count = sum(
-        1
-        for key in ("WFVariableName", "VariableName")
-        if value.get(key) == variable_name
-    )
-    return count + sum(
-        variable_name_reference_count(item, variable_name)
-        for key, item in value.items()
-        if key not in {"WFVariableName", "VariableName"}
-    )
-
-
-def normalize_repeat_accumulators_for_python_export(data: bytes) -> tuple[bytes, dict]:
-    """Remove a redundant compiler append that Apple's workflow exporter cannot re-read."""
-    report = {
-        "present": False,
-        "source": "ShortcutsLanguage repeat accumulator compatibility",
-        "strategy": "remove an otherwise-unreferenced appendvariable immediately before its matching repeat end when it appends the preceding action output",
-        "removed": [],
-        "removed_count": 0,
-        "original_length": len(data),
-        "normalized_length": len(data),
-    }
-    try:
-        root = plistlib.loads(data)
-    except Exception:
-        return data, report
-    if not isinstance(root, dict) or not isinstance(root.get("WFWorkflowActions"), list):
-        return data, report
-
-    actions = root["WFWorkflowActions"]
-    removals: list[tuple[int, dict]] = []
-    for index in range(1, len(actions) - 1):
-        action = actions[index]
-        previous = actions[index - 1]
-        repeat_end = actions[index + 1]
-        if not all(isinstance(item, dict) for item in (action, previous, repeat_end)):
-            continue
-        if action.get("WFWorkflowActionIdentifier") != "is.workflow.actions.appendvariable":
-            continue
-        if repeat_end.get("WFWorkflowActionIdentifier") != "is.workflow.actions.repeat.each":
-            continue
-
-        append_parameters = action.get("WFWorkflowActionParameters")
-        end_parameters = repeat_end.get("WFWorkflowActionParameters")
-        if not isinstance(append_parameters, dict) or not isinstance(end_parameters, dict):
-            continue
-        if end_parameters.get("WFControlFlowMode") != 2:
-            continue
-        grouping_identifier = end_parameters.get("GroupingIdentifier")
-        variable_name = append_parameters.get("WFVariableName")
-        if not isinstance(grouping_identifier, str) or not isinstance(variable_name, str):
-            continue
-
-        repeat_start_index = next((
-            candidate_index
-            for candidate_index in range(index - 1, -1, -1)
-            if isinstance(actions[candidate_index], dict)
-            and actions[candidate_index].get("WFWorkflowActionIdentifier") == "is.workflow.actions.repeat.each"
-            and isinstance(actions[candidate_index].get("WFWorkflowActionParameters"), dict)
-            and actions[candidate_index]["WFWorkflowActionParameters"].get("GroupingIdentifier") == grouping_identifier
-            and actions[candidate_index]["WFWorkflowActionParameters"].get("WFControlFlowMode") == 0
-        ), None)
-        if repeat_start_index is None or repeat_start_index >= index - 1:
-            continue
-
-        input_state = append_parameters.get("WFInput")
-        if not isinstance(input_state, dict) or input_state.get("WFSerializationType") != "WFTextTokenAttachment":
-            continue
-        input_value = input_state.get("Value")
-        if not isinstance(input_value, dict) or input_value.get("Type") != "ActionOutput":
-            continue
-        if input_value.get("Aggrandizements"):
-            continue
-        previous_uuid = workflow_action_uuid(previous)
-        if not previous_uuid or input_value.get("OutputUUID") != previous_uuid:
-            continue
-        if variable_name_reference_count(root, variable_name) != 1:
-            continue
-
-        removals.append((index, {
-            "action_index": index,
-            "grouping_identifier": grouping_identifier,
-            "repeat_start_index": repeat_start_index,
-            "repeat_end_index": index + 1,
-            "variable_name": variable_name,
-            "value_action_index": index - 1,
-            "value_action_identifier": previous.get("WFWorkflowActionIdentifier"),
-            "value_action_uuid": previous_uuid,
-        }))
-
-    for index, _ in reversed(removals):
-        del actions[index]
-    if not removals:
-        return data, report
-
-    normalized = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
-    report.update({
-        "present": True,
-        "removed": [entry for _, entry in removals],
-        "removed_count": len(removals),
-        "normalized_length": len(normalized),
-    })
-    return normalized, report
 
 
 def toolkit_action_items_by_identifier() -> dict[str, dict]:
@@ -3325,6 +4009,136 @@ def initialize_imported_loop_carried_values(source: str) -> tuple[str, dict]:
     return rewritten, report
 
 
+def _line_span_for_statement(
+    source: str, statement: ast.stmt, offsets: list[int]
+) -> tuple[int, int]:
+    start = offsets[statement.lineno - 1]
+    if statement.end_lineno < len(offsets):
+        end = offsets[statement.end_lineno]
+    else:
+        end = len(source)
+    return start, end
+
+
+def canonicalize_imported_named_variables(
+    source: str, action_origins: list[object]
+) -> tuple[str, dict]:
+    report = {
+        "present": False,
+        "source": "native Set/Get Variable workflow actions",
+        "strategy": "restore natural list mutation syntax",
+        "setVariables": [],
+        "getVariables": [],
+    }
+    origins = [origin for origin in action_origins if isinstance(origin, dict)]
+    set_names = {
+        origin.get("actionParameters", {}).get("WFVariableName")
+        for origin in origins
+        if origin.get("actionIdentifier") == "is.workflow.actions.setvariable"
+    }
+    set_names = {name for name in set_names if isinstance(name, str) and name}
+    get_names: set[str] = set()
+    for index, origin in enumerate(origins):
+        if origin.get("actionIdentifier") != "is.workflow.actions.getvariable":
+            continue
+        for previous in reversed(origins[:index]):
+            if previous.get("actionIdentifier") != "is.workflow.actions.gettext":
+                continue
+            value = previous.get("actionParameters", {}).get("WFTextActionText")
+            if isinstance(value, str) and value:
+                get_names.add(value)
+            break
+    if not set_names and not get_names:
+        report["status"] = "skipped"
+        report["reason"] = "workflow contains no native Set/Get Variable actions"
+        return source, report
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        report["status"] = "skipped"
+        report["reason"] = "native Python could not be parsed"
+        return source, report
+
+    offsets = line_offsets_for(source)
+    parent = {
+        id(child): node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+    edits: list[tuple[int, int, str]] = []
+    removed_statement_ids: set[int] = set()
+
+    for block in _statement_blocks(tree):
+        for index in range(1, len(block)):
+            first = value_assignment_target(block[index - 1])
+            second = value_assignment_target(block[index])
+            if first is None or second is None:
+                continue
+            first_target, first_value = first
+            second_target, second_value = second
+            if (
+                second_target.id in set_names
+                and isinstance(second_value, ast.Name)
+                and second_value.id == first_target.id
+            ):
+                uses = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.id == first_target.id
+                ]
+                if len(uses) == 1:
+                    start, end = node_span(first_target, offsets)
+                    edits.append((start, end, second_target.id))
+                    start, end = _line_span_for_statement(
+                        source, block[index], offsets
+                    )
+                    edits.append((start, end, ""))
+                    removed_statement_ids.add(id(block[index]))
+                    report["setVariables"].append(second_target.id)
+
+            if (
+                isinstance(first_value, ast.Constant)
+                and isinstance(first_value.value, str)
+                and first_value.value in get_names
+                and isinstance(second_value, ast.Name)
+                and second_value.id == first_target.id
+            ):
+                variable_name = first_value.value
+                for node in ast.walk(tree):
+                    if (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id == second_target.id
+                        and node.lineno > block[index].lineno
+                    ):
+                        start, end = node_span(node, offsets)
+                        edits.append((start, end, variable_name))
+                for statement in (block[index - 1], block[index]):
+                    if id(statement) in removed_statement_ids:
+                        continue
+                    start, end = _line_span_for_statement(
+                        source, statement, offsets
+                    )
+                    edits.append((start, end, ""))
+                    removed_statement_ids.add(id(statement))
+                report["getVariables"].append(variable_name)
+
+    rewritten = source
+    for start, end, replacement in sorted(
+        edits, key=lambda item: (item[0], item[1]), reverse=True
+    ):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    report["setVariables"] = sorted(set(report["setVariables"]))
+    report["getVariables"] = sorted(set(report["getVariables"]))
+    report["present"] = rewritten != source
+    report["status"] = "applied" if report["present"] else "skipped"
+    if not report["present"]:
+        report["reason"] = "native variable actions did not match the exporter alias shape"
+    return rewritten, report
+
+
 def canonicalize_import_response(response: dict, action_origins: list[object]) -> dict:
     source = response.get("python_code")
     if not isinstance(source, str):
@@ -3337,9 +4151,19 @@ def canonicalize_import_response(response: dict, action_origins: list[object]) -
     if reified != rewritten:
         response.setdefault("raw_python_code_before_value_reification", rewritten)
     response["value_action_reification"] = value_report
-    initialized, control_flow_report = initialize_imported_loop_carried_values(reified)
-    if initialized != reified:
-        response.setdefault("raw_python_code_before_control_flow_initialization", reified)
+    named_variables, named_variable_report = canonicalize_imported_named_variables(
+        reified, action_origins
+    )
+    if named_variables != reified:
+        response.setdefault("raw_python_code_before_named_variable_canonicalization", reified)
+    response["named_variable_canonicalization"] = named_variable_report
+    initialized, control_flow_report = initialize_imported_loop_carried_values(
+        named_variables
+    )
+    if initialized != named_variables:
+        response.setdefault(
+            "raw_python_code_before_control_flow_initialization", named_variables
+        )
     response["python_code"] = initialized
     response["python_length"] = len(initialized.encode("utf-8"))
     response["control_flow_initialization"] = control_flow_report
@@ -3656,19 +4480,25 @@ def main() -> int:
         return 0
 
     if args.command == "direct-run":
-        source = read_source(args)
-        payload = base64.b64encode(source).decode("ascii")
+        normalized = normalize_control_flow_source(read_source(args))
+        payload = base64.b64encode(normalized["source"]).decode("ascii")
         raw = send_command(args.socket, f"direct-run-b64-flags {args.flags} {payload}")
-        print_response(raw, not args.raw)
+        response = attach_control_flow_normalization_summary(
+            json.loads(raw), normalized
+        )
+        print_response(json.dumps(response), not args.raw)
         return 0
 
     if args.command == "python-to-plist":
-        source = read_source(args)
-        payload = base64.b64encode(source).decode("ascii")
+        normalized = normalize_control_flow_source(read_source(args))
+        payload = base64.b64encode(normalized["source"]).decode("ascii")
         raw = send_command(
             args.socket, f"python-to-plist-b64-flags {args.flags} {payload}"
         )
-        print_response(raw, not args.raw)
+        response = attach_control_flow_normalization_summary(
+            json.loads(raw), normalized
+        )
+        print_response(json.dumps(response), not args.raw)
         return 0
 
     if args.command == "python-to-bplist":
@@ -3722,14 +4552,11 @@ def main() -> int:
     if args.command == "plist-data-to-python":
         try:
             plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
-            normalized_plist_data, python_export_normalization = normalize_repeat_accumulators_for_python_export(plist_data)
-            action_origins = action_origins_from_plist_data(normalized_plist_data)
-            payload = base64.b64encode(normalized_plist_data).decode("ascii")
+            action_origins = action_origins_from_plist_data(plist_data)
+            payload = base64.b64encode(plist_data).decode("ascii")
             response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
             response = inline_catalog_import_response(args.socket, response)
             response = canonicalize_import_response(response, action_origins)
-            response["python_export_normalization"] = python_export_normalization
-            response["original_input_length"] = len(plist_data)
             if signed_import is not None:
                 response["signed_shortcut_import"] = signed_import
             if icloud_import is not None:
