@@ -2291,6 +2291,128 @@ def action_identifiers_from_plist_json(data: bytes) -> list[str]:
     return [origin["actionIdentifier"] for origin in action_origins_from_plist_json(data)]
 
 
+def workflow_action_uuid(action: object) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    parameters = action.get("WFWorkflowActionParameters")
+    candidates = [
+        action.get("WFWorkflowActionUUID"),
+        parameters.get("UUID") if isinstance(parameters, dict) else None,
+    ]
+    return next((value for value in candidates if isinstance(value, str) and value), None)
+
+
+def variable_name_reference_count(value: object, variable_name: str) -> int:
+    if isinstance(value, list):
+        return sum(variable_name_reference_count(item, variable_name) for item in value)
+    if not isinstance(value, dict):
+        return 0
+    count = sum(
+        1
+        for key in ("WFVariableName", "VariableName")
+        if value.get(key) == variable_name
+    )
+    return count + sum(
+        variable_name_reference_count(item, variable_name)
+        for key, item in value.items()
+        if key not in {"WFVariableName", "VariableName"}
+    )
+
+
+def normalize_repeat_accumulators_for_python_export(data: bytes) -> tuple[bytes, dict]:
+    """Remove a redundant compiler append that Apple's workflow exporter cannot re-read."""
+    report = {
+        "present": False,
+        "source": "ShortcutsLanguage repeat accumulator compatibility",
+        "strategy": "remove an otherwise-unreferenced appendvariable immediately before its matching repeat end when it appends the preceding action output",
+        "removed": [],
+        "removed_count": 0,
+        "original_length": len(data),
+        "normalized_length": len(data),
+    }
+    try:
+        root = plistlib.loads(data)
+    except Exception:
+        return data, report
+    if not isinstance(root, dict) or not isinstance(root.get("WFWorkflowActions"), list):
+        return data, report
+
+    actions = root["WFWorkflowActions"]
+    removals: list[tuple[int, dict]] = []
+    for index in range(1, len(actions) - 1):
+        action = actions[index]
+        previous = actions[index - 1]
+        repeat_end = actions[index + 1]
+        if not all(isinstance(item, dict) for item in (action, previous, repeat_end)):
+            continue
+        if action.get("WFWorkflowActionIdentifier") != "is.workflow.actions.appendvariable":
+            continue
+        if repeat_end.get("WFWorkflowActionIdentifier") != "is.workflow.actions.repeat.each":
+            continue
+
+        append_parameters = action.get("WFWorkflowActionParameters")
+        end_parameters = repeat_end.get("WFWorkflowActionParameters")
+        if not isinstance(append_parameters, dict) or not isinstance(end_parameters, dict):
+            continue
+        if end_parameters.get("WFControlFlowMode") != 2:
+            continue
+        grouping_identifier = end_parameters.get("GroupingIdentifier")
+        variable_name = append_parameters.get("WFVariableName")
+        if not isinstance(grouping_identifier, str) or not isinstance(variable_name, str):
+            continue
+
+        repeat_start_index = next((
+            candidate_index
+            for candidate_index in range(index - 1, -1, -1)
+            if isinstance(actions[candidate_index], dict)
+            and actions[candidate_index].get("WFWorkflowActionIdentifier") == "is.workflow.actions.repeat.each"
+            and isinstance(actions[candidate_index].get("WFWorkflowActionParameters"), dict)
+            and actions[candidate_index]["WFWorkflowActionParameters"].get("GroupingIdentifier") == grouping_identifier
+            and actions[candidate_index]["WFWorkflowActionParameters"].get("WFControlFlowMode") == 0
+        ), None)
+        if repeat_start_index is None or repeat_start_index >= index - 1:
+            continue
+
+        input_state = append_parameters.get("WFInput")
+        if not isinstance(input_state, dict) or input_state.get("WFSerializationType") != "WFTextTokenAttachment":
+            continue
+        input_value = input_state.get("Value")
+        if not isinstance(input_value, dict) or input_value.get("Type") != "ActionOutput":
+            continue
+        if input_value.get("Aggrandizements"):
+            continue
+        previous_uuid = workflow_action_uuid(previous)
+        if not previous_uuid or input_value.get("OutputUUID") != previous_uuid:
+            continue
+        if variable_name_reference_count(root, variable_name) != 1:
+            continue
+
+        removals.append((index, {
+            "action_index": index,
+            "grouping_identifier": grouping_identifier,
+            "repeat_start_index": repeat_start_index,
+            "repeat_end_index": index + 1,
+            "variable_name": variable_name,
+            "value_action_index": index - 1,
+            "value_action_identifier": previous.get("WFWorkflowActionIdentifier"),
+            "value_action_uuid": previous_uuid,
+        }))
+
+    for index, _ in reversed(removals):
+        del actions[index]
+    if not removals:
+        return data, report
+
+    normalized = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
+    report.update({
+        "present": True,
+        "removed": [entry for _, entry in removals],
+        "removed_count": len(removals),
+        "normalized_length": len(normalized),
+    })
+    return normalized, report
+
+
 def toolkit_action_items_by_identifier() -> dict[str, dict]:
     metadata = current_toolkit_metadata()
     output: dict[str, dict] = {}
@@ -3600,11 +3722,14 @@ def main() -> int:
     if args.command == "plist-data-to-python":
         try:
             plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
-            action_origins = action_origins_from_plist_data(plist_data)
-            payload = base64.b64encode(plist_data).decode("ascii")
+            normalized_plist_data, python_export_normalization = normalize_repeat_accumulators_for_python_export(plist_data)
+            action_origins = action_origins_from_plist_data(normalized_plist_data)
+            payload = base64.b64encode(normalized_plist_data).decode("ascii")
             response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
             response = inline_catalog_import_response(args.socket, response)
             response = canonicalize_import_response(response, action_origins)
+            response["python_export_normalization"] = python_export_normalization
+            response["original_input_length"] = len(plist_data)
             if signed_import is not None:
                 response["signed_shortcut_import"] = signed_import
             if icloud_import is not None:

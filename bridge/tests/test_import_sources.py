@@ -66,6 +66,68 @@ def main() -> None:
     else:
         raise AssertionError("iCloud API error response did not raise")
 
+    value_uuid = "11111111-1111-1111-1111-111111111111"
+    group_uuid = "22222222-2222-2222-2222-222222222222"
+    accumulator = "repeat_results"
+    repeat_actions = [
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
+            "WFWorkflowActionParameters": {
+                "GroupingIdentifier": group_uuid,
+                "WFControlFlowMode": 0,
+            },
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.text.combine",
+            "WFWorkflowActionParameters": {"UUID": value_uuid},
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.appendvariable",
+            "WFWorkflowActionParameters": {
+                "WFInput": {
+                    "Value": {
+                        "OutputUUID": value_uuid,
+                        "Type": "ActionOutput",
+                    },
+                    "WFSerializationType": "WFTextTokenAttachment",
+                },
+                "WFVariableName": accumulator,
+            },
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
+            "WFWorkflowActionParameters": {
+                "GroupingIdentifier": group_uuid,
+                "UUID": "33333333-3333-3333-3333-333333333333",
+                "WFControlFlowMode": 2,
+            },
+        },
+    ]
+    repeat_workflow = plistlib.dumps(
+        {"WFWorkflowActions": repeat_actions},
+        fmt=plistlib.FMT_BINARY,
+    )
+    normalized, report = bridgectl.normalize_repeat_accumulators_for_python_export(repeat_workflow)
+    normalized_actions = plistlib.loads(normalized)["WFWorkflowActions"]
+    assert report["present"] is True
+    assert report["removed_count"] == 1
+    assert report["removed"][0]["variable_name"] == accumulator
+    assert len(normalized_actions) == 3
+    assert all(
+        action["WFWorkflowActionIdentifier"] != "is.workflow.actions.appendvariable"
+        for action in normalized_actions
+    )
+
+    referenced_workflow = plistlib.loads(repeat_workflow)
+    referenced_workflow["WFWorkflowActions"].append({
+        "WFWorkflowActionIdentifier": "is.workflow.actions.getvariable",
+        "WFWorkflowActionParameters": {"WFVariableName": accumulator},
+    })
+    referenced_data = plistlib.dumps(referenced_workflow, fmt=plistlib.FMT_BINARY)
+    unchanged, unchanged_report = bridgectl.normalize_repeat_accumulators_for_python_export(referenced_data)
+    assert unchanged == referenced_data
+    assert unchanged_report["present"] is False
+
     print("import-sources-ok")
 
 

@@ -89,3 +89,13 @@ changes to the current host record, preserving values not represented by
 Shortpy. `WFWorkflowIcon` is explicitly host-owned because identical compiler
 runs generate different default icon colors and Shortpy has no editable icon
 syntax.
+
+The simulator exporter also has a proven asymmetry for compiler-generated
+repeat accumulators. `ShortcutsLanguage` can emit an explicit
+`is.workflow.actions.appendvariable` immediately before a matching Repeat end,
+while `WFWorkflow.export(context:)` rejects that same shape with
+`WFProgramErrorDomain Code=3` because the scope ends on `WFProgramAppendNode`.
+Before plist-to-Python conversion, the bridge removes that append only when it
+appends the immediately preceding action output and its accumulator is otherwise
+unreferenced. The host plist is not modified, and the bridge response records
+the normalized action index, repeat group, accumulator, and value action.
