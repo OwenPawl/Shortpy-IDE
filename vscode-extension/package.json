@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.41",
+  "version": "0.1.43",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -17,10 +17,10 @@
   ],
   "scripts": {
     "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js && node scripts/prepare-bundled-headless-shortcuts.js",
-    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check scripts/prepare-bundled-headless-shortcuts.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/hostShortcuts.js && node --check src/toolrenderer.js && node --check src/extension.js",
+    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check scripts/prepare-bundled-headless-shortcuts.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/hostShortcuts.js && node --check src/toolrenderer.js && node --check src/workflowRoundTrip.js && node --check src/extension.js",
     "diagnose-shortpy": "node scripts/diagnose-shortpy.js --pretty",
     "install:local": "node scripts/install-vsix.js",
-    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js && node test/hostShortcuts.test.js"
+    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js && node test/hostShortcuts.test.js && node test/workflowRoundTrip.test.js"
   },
   "activationEvents": [
     "onStartupFinished",

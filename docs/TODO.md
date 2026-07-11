@@ -35,11 +35,17 @@
   Import removes the internal aliases and variable scaffolding. A nine-fixture
   `Python -> plist -> Python -> plist` corpus has stable action/control-flow
   shapes for triple nesting and mixed menu/conditional/repeat cases.
+- Native Comment actions import as explicit
+  `com_apple_shortcuts_comment(comment=...)` calls, including empty,
+  multiline, leading-hash, and trailing-newline values.
+- Real variable `.append(...)` calls containing direct variable casts or
+  subscripts are selectively lowered through
+  `com_apple_shortcuts_add_to_variable(...)`. This keeps coercion and
+  dictionary-value aggrandizements attached to the native Append Variable
+  input while ordinary appends continue to establish user-variable scope.
 - Selected proof reports are in `docs/reports/`.
 
 ## Next
-
-- Preserve Comment actions and native dictionary-aggrandizement representations without materializing equivalent extra actions during reverse compilation.
 
 - Finish replacing legacy sidecar/ref UI paths with inline parameter-state metadata everywhere.
 - Generalize inline parameter-state metadata across all catalog-like action and trigger parameters.

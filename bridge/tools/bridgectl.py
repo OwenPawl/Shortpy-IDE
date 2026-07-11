@@ -1785,7 +1785,7 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
     report = {
         "present": False,
         "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "same-line nested-control-flow-dependent value alias",
+        "strategy": "native repeat-result assignment with same-line alias fallback",
         "line_count_preserved": True,
         "transformations": [],
     }
@@ -1837,6 +1837,54 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
         if not child_dependencies:
             continue
 
+        argument_start, argument_end = _node_byte_span(argument, offsets)
+        child_names = sorted(child_dependencies)
+        child_kinds = sorted(
+            {child["kind"] for child in child_dependencies.values()}
+        )
+        transformation = {
+            "line": parent["append_statement"].lineno,
+            "parentAccumulator": parent["accumulator"],
+            "childAccumulator": child_names[0],
+            "childAccumulators": child_names,
+            "parentLoop": "repeat-with-each"
+            if not (
+                isinstance(parent["loop"].iter, ast.Call)
+                and isinstance(parent["loop"].iter.func, ast.Name)
+                and parent["loop"].iter.func.id == "range"
+            )
+            else "finite-repeat",
+            "childControlFlow": child_kinds[0]
+            if len(child_kinds) == 1
+            else "mixed",
+        }
+
+        # A non-name value expression already materializes a native action output.
+        # Making that action the loop's final assignment lets ShortcutsLanguage use
+        # it as Repeat Results without emitting an Append/Get Variable helper pair.
+        if not isinstance(argument, ast.Name):
+            assignment = parent["block"][parent["assignment_index"]]
+            assignment_start, assignment_end = _node_byte_span(
+                assignment, offsets
+            )
+            append_start, append_end = _node_byte_span(
+                parent["append_statement"], offsets
+            )
+            edits.append((assignment_start, assignment_end, b""))
+            edits.append(
+                (
+                    append_start,
+                    append_end,
+                    parent["accumulator"].encode("utf-8")
+                    + b" = "
+                    + source[argument_start:argument_end],
+                )
+            )
+            transformation["lowering"] = "native-repeat-result-assignment"
+            transformation["removedInitializerLine"] = assignment.lineno
+            report["transformations"].append(transformation)
+            continue
+
         suffix = 1
         while True:
             alias = f"__shortpy_control_flow_value_{suffix}"
@@ -1848,7 +1896,6 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
         append_start, _append_end = _node_byte_span(
             parent["append_statement"], offsets
         )
-        argument_start, argument_end = _node_byte_span(argument, offsets)
         edits.append(
             (
                 append_start,
@@ -1860,29 +1907,9 @@ def normalize_nested_repeat_results(source: bytes) -> dict:
             )
         )
         edits.append((argument_start, argument_end, alias.encode("utf-8")))
-        child_names = sorted(child_dependencies)
-        child_kinds = sorted(
-            {child["kind"] for child in child_dependencies.values()}
-        )
-        report["transformations"].append(
-            {
-                "line": parent["append_statement"].lineno,
-                "parentAccumulator": parent["accumulator"],
-                "childAccumulator": child_names[0],
-                "childAccumulators": child_names,
-                "alias": alias,
-                "parentLoop": "repeat-with-each"
-                if not (
-                    isinstance(parent["loop"].iter, ast.Call)
-                    and isinstance(parent["loop"].iter.func, ast.Name)
-                    and parent["loop"].iter.func.id == "range"
-                )
-                else "finite-repeat",
-                "childControlFlow": child_kinds[0]
-                if len(child_kinds) == 1
-                else "mixed",
-            }
-        )
+        transformation["lowering"] = "same-line-alias-fallback"
+        transformation["alias"] = alias
+        report["transformations"].append(transformation)
 
     rewritten = source
     for start, end, replacement in sorted(
@@ -2206,6 +2233,7 @@ def normalize_variable_aliases(source: bytes) -> dict:
         )
 
     report["present"] = bool(report["aliases"])
+    report["line_count_preserved"] = not report["present"]
     report.setdefault("status", "applied" if report["present"] else "skipped")
     if not report["present"] and "reason" not in report:
         report["reason"] = "no single-use alias chain was found"
@@ -2214,6 +2242,30 @@ def normalize_variable_aliases(source: bytes) -> dict:
         "rewritten": rewritten != source,
         "report": report,
     }
+
+
+def _variable_atom_requires_explicit_action(node: ast.AST) -> bool:
+    def classify(value: ast.AST) -> tuple[bool, bool]:
+        if isinstance(value, ast.Name):
+            return True, False
+        if isinstance(value, ast.Attribute):
+            return classify(value.value)
+        if isinstance(value, ast.Subscript):
+            valid, _requires_explicit = classify(value.value)
+            return valid, valid
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and not value.args
+            and len(value.keywords) == 1
+            and value.keywords[0].arg == "_from"
+        ):
+            valid, requires_explicit = classify(value.keywords[0].value)
+            return valid, valid or requires_explicit
+        return False, False
+
+    valid, requires_explicit = classify(node)
+    return valid and requires_explicit
 
 
 def normalize_explicit_variable_mutations(source: bytes) -> dict:
@@ -2244,7 +2296,7 @@ def normalize_explicit_variable_mutations(source: bytes) -> dict:
         node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
     }
     assignments: dict[str, list[tuple[ast.stmt, ast.AST]]] = {}
-    append_receivers: dict[str, list[ast.Name]] = {}
+    append_calls: dict[str, list[ast.Call]] = {}
     for node in ast.walk(tree):
         assignment = value_assignment_target(node)
         if assignment is not None:
@@ -2255,59 +2307,86 @@ def normalize_explicit_variable_mutations(source: bytes) -> dict:
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "append"
             and isinstance(node.func.value, ast.Name)
+            and len(node.args) == 1
+            and not node.keywords
         ):
-            append_receivers.setdefault(node.func.value.id, []).append(
-                node.func.value
-            )
+            append_calls.setdefault(node.func.value.id, []).append(node)
 
     offsets = _byte_line_offsets(source)
     edits: list[tuple[int, int, bytes]] = []
-    for name, receivers in append_receivers.items():
+    for name, calls in append_calls.items():
         if name in repeat_accumulators:
             continue
+        explicit_calls = [
+            call
+            for call in calls
+            if _variable_atom_requires_explicit_action(call.args[0])
+        ]
+        natural_calls = [call for call in calls if call not in explicit_calls]
         definitions = sorted(
             assignments.get(name, []), key=lambda item: item[0].lineno
         )
-        first_mutation_line = min(receiver.lineno for receiver in receivers)
+        first_mutation_line = min(call.lineno for call in calls)
         definitions = [
             item for item in definitions if item[0].lineno < first_mutation_line
         ]
-        if len(definitions) != 1:
-            continue
-        assignment_statement, initial_value = definitions[0]
-        if any(
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and node.id == name
-            for node in ast.walk(initial_value)
-        ):
-            continue
+        assignment_statement = None
+        initial_value = None
+        if len(definitions) == 1:
+            candidate_statement, candidate_value = definitions[0]
+            if not any(
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id == name
+                for node in ast.walk(candidate_value)
+            ):
+                assignment_statement = candidate_statement
+                initial_value = candidate_value
 
-        assignment_start, assignment_end = _node_byte_span(
-            assignment_statement, offsets
-        )
-        value_start, value_end = _node_byte_span(initial_value, offsets)
-        edits.append(
-            (
-                assignment_start,
-                assignment_end,
-                b"com_apple_shortcuts_set_variable(input="
-                + source[value_start:value_end]
-                + b", variable="
-                + json.dumps(name).encode("utf-8")
-                + b")",
+        if assignment_statement is not None and initial_value is not None:
+            assignment_start, assignment_end = _node_byte_span(
+                assignment_statement, offsets
             )
-        )
+            value_start, value_end = _node_byte_span(initial_value, offsets)
+            edits.append(
+                (
+                    assignment_start,
+                    assignment_end,
+                    b"com_apple_shortcuts_set_variable(input="
+                    + source[value_start:value_end]
+                    + b", variable="
+                    + json.dumps(name).encode("utf-8")
+                    + b")",
+                )
+            )
 
-        receiver_ids = {id(receiver) for receiver in receivers}
+        receiver_ids = {id(call.func.value) for call in calls}
+        natural_binding_line = (
+            min(call.lineno for call in natural_calls) if natural_calls else None
+        )
         read_groups: dict[int, tuple[ast.stmt, list[ast.Name]]] = {}
         for node in ast.walk(tree):
             if (
                 not isinstance(node, ast.Name)
                 or not isinstance(node.ctx, ast.Load)
                 or node.id != name
-                or node.lineno <= assignment_statement.lineno
                 or id(node) in receiver_ids
+            ):
+                continue
+            if (
+                assignment_statement is not None
+                and node.lineno <= assignment_statement.lineno
+            ):
+                continue
+            if (
+                assignment_statement is None
+                and node.lineno < first_mutation_line
+            ):
+                continue
+            if (
+                assignment_statement is None
+                and natural_binding_line is not None
+                and node.lineno >= natural_binding_line
             ):
                 continue
             parent_node = parent.get(id(node))
@@ -2358,24 +2437,68 @@ def normalize_explicit_variable_mutations(source: bytes) -> dict:
                 start, end = _node_byte_span(read, offsets)
                 edits.append((start, end, alias.encode("utf-8")))
                 read_count += 1
-        report["variables"].append(
-            {
-                "name": name,
-                "assignmentLine": assignment_statement.lineno,
-                "mutationCount": len(receivers),
-                "readCount": read_count,
-            }
-        )
+        if assignment_statement is not None or explicit_calls or read_count:
+            report["variables"].append(
+                {
+                    "name": name,
+                    "assignmentLine": assignment_statement.lineno
+                    if assignment_statement is not None
+                    else None,
+                    "mutationCount": len(calls),
+                    "explicitMutationCount": len(explicit_calls),
+                    "naturalMutationCount": len(natural_calls),
+                    "readCount": read_count,
+                    "appendLowering": "selective com_apple_shortcuts_add_to_variable",
+                }
+            )
 
     rewritten = source
     for start, end, replacement in sorted(
         edits, key=lambda item: (item[0], item[1]), reverse=True
     ):
         rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    try:
+        append_tree = ast.parse(rewritten.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        report["status"] = "failed"
+        report["reason"] = f"variable data-flow rewrite was not parseable: {exc}"
+        return {"source": source, "rewritten": False, "report": report}
+    append_offsets = _byte_line_offsets(rewritten)
+    append_edits: list[tuple[int, int, bytes]] = []
+    for node in ast.walk(append_tree):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Attribute)
+            or node.func.attr != "append"
+            or not isinstance(node.func.value, ast.Name)
+            or node.func.value.id in repeat_accumulators
+            or len(node.args) != 1
+            or node.keywords
+            or not _variable_atom_requires_explicit_action(node.args[0])
+        ):
+            continue
+        call_start, call_end = _node_byte_span(node, append_offsets)
+        argument_start, argument_end = _node_byte_span(node.args[0], append_offsets)
+        append_edits.append(
+            (
+                call_start,
+                call_end,
+                b"com_apple_shortcuts_add_to_variable(variable="
+                + json.dumps(node.func.value.id).encode("utf-8")
+                + b", input="
+                + rewritten[argument_start:argument_end]
+                + b")",
+            )
+        )
+    for start, end, replacement in sorted(
+        append_edits, key=lambda item: (item[0], item[1]), reverse=True
+    ):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
     report["present"] = bool(report["variables"])
     report["status"] = "applied" if report["present"] else "skipped"
     if not report["present"]:
-        report["reason"] = "no non-control-flow list mutation had one lexical initializer"
+        report["reason"] = "no non-control-flow list mutation was found"
     return {
         "source": rewritten,
         "rewritten": rewritten != source,
@@ -2413,7 +2536,7 @@ def normalize_control_flow_source(source: bytes) -> dict:
         "report": {
             "present": transformations > 0,
             "source": "Shortpy owned control-flow frontend normalization",
-            "strategy": "native branch outputs plus nested-repeat result aliases",
+            "strategy": "native control-flow outputs plus explicit variable data flow",
             "transformation_count": transformations,
             "line_count_preserved": all(
                 report.get("line_count_preserved", True) for report in reports
@@ -4151,13 +4274,121 @@ def canonicalize_imported_named_variables(
     return rewritten, report
 
 
+def canonicalize_imported_comment_actions(
+    source: str, action_origins: list[object]
+) -> tuple[str, dict]:
+    report = {
+        "present": False,
+        "source": "native Comment actions and WFCommentActionText",
+        "strategy": "replace exported hash-comment blocks with ToolKit action calls",
+        "status": "skipped",
+        "action_count": 0,
+        "replacement_count": 0,
+        "replacements": [],
+        "unresolved": [],
+    }
+    comments = []
+    for origin in action_origins:
+        if (
+            not isinstance(origin, dict)
+            or origin.get("actionIdentifier") != "is.workflow.actions.comment"
+        ):
+            continue
+        parameters = origin.get("actionParameters")
+        value = parameters.get("WFCommentActionText", "") if isinstance(parameters, dict) else ""
+        comments.append({
+            "actionIndex": origin.get("actionIndex"),
+            "text": value if isinstance(value, str) else str(value),
+        })
+    report["action_count"] = len(comments)
+    if not source or not comments:
+        report["reason"] = "workflow contains no Comment actions"
+        return source, report
+
+    lines = source.splitlines(keepends=True)
+    cursor = 0
+    edits = []
+
+    def comment_content(line: str) -> tuple[str, str] | None:
+        body = line.rstrip("\r\n")
+        indent = body[: len(body) - len(body.lstrip(" \t"))]
+        stripped = body[len(indent):]
+        if not stripped.startswith("#"):
+            return None
+        content = stripped[1:]
+        if content.startswith(" "):
+            content = content[1:]
+        return indent, content
+
+    for comment in comments:
+        expected = (
+            comment["text"]
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .split("\n")
+        )
+        match = None
+        for start in range(cursor, len(lines) - len(expected) + 1):
+            parsed = [comment_content(lines[start + offset]) for offset in range(len(expected))]
+            if any(item is None for item in parsed):
+                continue
+            assert all(item is not None for item in parsed)
+            if [item[1] for item in parsed] != expected:
+                continue
+            indents = {item[0] for item in parsed}
+            if len(indents) != 1:
+                continue
+            match = (start, start + len(expected), parsed[0][0])
+            break
+        if match is None:
+            report["unresolved"].append({
+                "actionIndex": comment["actionIndex"],
+                "text": comment["text"],
+            })
+            continue
+        start, end, indent = match
+        newline = "\n"
+        if lines[end - 1].endswith("\r\n"):
+            newline = "\r\n"
+        elif not lines[end - 1].endswith(("\n", "\r")):
+            newline = ""
+        replacement = (
+            f"{indent}com_apple_shortcuts_comment(comment="
+            f"{json.dumps(comment['text'], ensure_ascii=False)}){newline}"
+        )
+        edits.append((start, end, replacement))
+        report["replacements"].append({
+            "actionIndex": comment["actionIndex"],
+            "sourceStartLine": start + 1,
+            "sourceEndLine": end,
+            "textLength": len(comment["text"]),
+        })
+        cursor = end
+
+    for start, end, replacement in reversed(edits):
+        lines[start:end] = [replacement]
+    rewritten = "".join(lines)
+    report["replacement_count"] = len(edits)
+    report["present"] = rewritten != source
+    report["status"] = "applied" if report["present"] else "skipped"
+    if not report["present"]:
+        report["reason"] = "exported comment blocks did not match native Comment actions"
+    return rewritten, report
+
+
 def canonicalize_import_response(response: dict, action_origins: list[object]) -> dict:
     source = response.get("python_code")
     if not isinstance(source, str):
         return response
-    rewritten, report = canonicalize_imported_action_names(source, action_origins)
-    if rewritten != source:
-        response.setdefault("raw_python_code_before_name_canonicalization", source)
+    comments, comment_report = canonicalize_imported_comment_actions(
+        source, action_origins
+    )
+    if comments != source:
+        response.setdefault("raw_python_code_before_comment_reification", source)
+    response["comment_action_reification"] = comment_report
+    rewritten, report = canonicalize_imported_action_names(comments, action_origins)
+    if rewritten != comments:
+        response.setdefault("raw_python_code_before_name_canonicalization", comments)
     response["name_canonicalization"] = report
     reified, value_report = reify_imported_value_actions(rewritten, action_origins)
     if reified != rewritten:

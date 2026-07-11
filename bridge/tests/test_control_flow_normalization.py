@@ -44,14 +44,18 @@ def main() -> None:
         nested_expression
     )
     expression_source = normalized_expression["source"].decode("utf-8")
-    assert (
-        "__shortpy_control_flow_value_1 = combine(text=repeat_results1); "
-        in expression_source
-    )
-    assert "repeat_results.append(__shortpy_control_flow_value_1)" in expression_source
+    assert "    repeat_results = []" not in expression_source
+    assert "repeat_results = combine(text=repeat_results1)" in expression_source
+    assert "repeat_results.append(" not in expression_source
     assert normalized_expression["report"]["transformations"][0][
         "childAccumulators"
     ] == ["repeat_results1"]
+    assert normalized_expression["report"]["transformations"][0][
+        "lowering"
+    ] == "native-repeat-result-assignment"
+    assert len(expression_source.splitlines()) == len(
+        nested_expression.decode("utf-8").splitlines()
+    )
     ast.parse(expression_source)
 
     collision = nested.replace(
@@ -139,6 +143,61 @@ def main() -> None:
     )
     assert "consume(value=__shortpy_variable_value_1)" in mutation_source
     ast.parse(mutation_source)
+
+    uninitialized_mutation = b"""def shortcut() -> None:
+    action = make_action()
+    actions.append(dictionary(_from=action)["actions"])
+    consume(value=actions)
+"""
+    normalized_uninitialized = bridgectl.normalize_control_flow_source(
+        uninitialized_mutation
+    )
+    uninitialized_source = normalized_uninitialized["source"].decode("utf-8")
+    assert (
+        'com_apple_shortcuts_add_to_variable(variable="actions", '
+        'input=dictionary(_from=action)["actions"])'
+        in uninitialized_source
+    )
+    assert (
+        '__shortpy_variable_value_1 = '
+        'com_apple_shortcuts_get_variable(variable="actions"); '
+        'consume(value=__shortpy_variable_value_1)'
+        in uninitialized_source
+    )
+    uninitialized_variables = normalized_uninitialized["report"]["stages"][3][
+        "variables"
+    ]
+    assert uninitialized_variables == [
+        {
+            "name": "actions",
+            "assignmentLine": None,
+            "mutationCount": 1,
+            "explicitMutationCount": 1,
+            "naturalMutationCount": 0,
+            "readCount": 1,
+            "appendLowering": "selective com_apple_shortcuts_add_to_variable",
+        }
+    ]
+    ast.parse(uninitialized_source)
+
+    mixed_mutation = b"""def shortcut() -> None:
+    action = make_action()
+    actions.append(dictionary(_from=action)["actions"])
+    for item in items:
+        actions.append(item)
+    consume(value=actions)
+"""
+    normalized_mixed = bridgectl.normalize_control_flow_source(mixed_mutation)
+    mixed_source = normalized_mixed["source"].decode("utf-8")
+    assert (
+        'com_apple_shortcuts_add_to_variable(variable="actions", '
+        'input=dictionary(_from=action)["actions"])'
+        in mixed_source
+    )
+    assert "actions.append(item)" in mixed_source
+    assert "consume(value=actions)" in mixed_source
+    assert "com_apple_shortcuts_get_variable" not in mixed_source
+    ast.parse(mixed_source)
 
     imported = """def shortcut() -> None:
     list = []

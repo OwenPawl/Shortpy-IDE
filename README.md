@@ -25,6 +25,20 @@ ShortcutsLanguage.pythonToShortcut
 
 This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
 
+The custom editor retains imported document bytes as an in-memory baseline.
+Exporting unchanged Shortpy writes the exact original `.shortcut` or `.plist`
+bytes, preserving opaque workflow metadata that Apple's Python representation
+does not expose. Native Comment actions are editable as explicit
+`com_apple_shortcuts_comment(...)` calls. Once the Python source changes,
+export uses the native compiler.
+
+The compiler adapter also preserves native Repeat Results and variable
+aggrandizements. It lowers nested control-flow results to native output
+assignments and selectively uses `com_apple_shortcuts_add_to_variable(...)`
+when a natural `.append(...)` subscript or cast would otherwise materialize an
+extra action. Ordinary appends remain natural so user-defined variable tokens
+retain their native scope.
+
 `Shortcuts IDE: Sync With Host Shortcuts` links the editor to a host workflow
 ID. It automatically pushes when only the editor changed and pulls through the
 simulator plist-to-Python converter when only Shortcuts changed. Simultaneous

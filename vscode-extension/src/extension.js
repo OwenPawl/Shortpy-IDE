@@ -37,6 +37,10 @@ const {
   VISIBLE_COMMANDS,
   customEditorActions,
 } = require("./commandRegistry");
+const {
+  exactWorkflowRoundTripBytes,
+  rememberWorkflowBaseline,
+} = require("./workflowRoundTrip");
 
 const COMMAND_NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
 const TOOLKIT_SQLITE_STATE_KEY = "shortcutsRuntimeIDE.toolkitSqlitePath";
@@ -877,6 +881,7 @@ async function importWorkflowPlistToSession(context, workflowUri) {
   session.lastImportResponse = response;
   session.lastImportValidation = imported.validation;
   session.lastImportError = undefined;
+  rememberWorkflowBaseline(session, imported.source, bytes, workflowUri.fsPath);
   return session;
 }
 
@@ -1454,10 +1459,13 @@ async function saveRuntimePlistFromPython(collection) {
     return;
   }
   const bytes = shortcutBytesForTarget(response, target);
-  await vscode.workspace.fs.writeFile(target, bytes);
+  const session = workflowSessionForDocument(editor.document);
+  const preserved = exactWorkflowRoundTripBytes(session, source, target.fsPath);
+  await vscode.workspace.fs.writeFile(target, preserved || bytes);
   const count = response.plist_summary && response.plist_summary.WFWorkflowActions_count;
   const signed = Boolean(response.shortcut_payload) && path.extname(target.fsPath).toLowerCase() !== ".plist";
-  await offerOpenInShortcuts(target, `Saved ${signed ? "signed shortcut" : "runtime plist"} (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
+  const written = preserved || bytes;
+  await offerOpenInShortcuts(target, `Saved ${preserved ? "byte-identical imported shortcut" : signed ? "signed shortcut" : "runtime plist"} (${written.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
 }
 
 async function writeSiblingRuntimePlistFromPython(collection) {
@@ -1481,12 +1489,16 @@ async function writeSiblingRuntimePlistFromPython(collection) {
       return;
     }
   }
-  const response = await compilePythonDocument(editor.document, selectedOrFullText(editor), collection, compileOptionsForExport());
+  const source = selectedOrFullText(editor);
+  const response = await compilePythonDocument(editor.document, source, collection, compileOptionsForExport());
   const bytes = shortcutBytesForTarget(response, target);
-  await vscode.workspace.fs.writeFile(target, bytes);
+  const session = workflowSessionForDocument(editor.document);
+  const preserved = exactWorkflowRoundTripBytes(session, source, target.fsPath);
+  const written = preserved || bytes;
+  await vscode.workspace.fs.writeFile(target, written);
   const count = response.plist_summary && response.plist_summary.WFWorkflowActions_count;
   const signed = Boolean(response.shortcut_payload) && path.extname(target.fsPath).toLowerCase() !== ".plist";
-  await offerOpenInShortcuts(target, `Wrote ${signed ? "signed " : ""}${path.basename(target.fsPath)} (${bytes.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
+  await offerOpenInShortcuts(target, `Wrote ${preserved ? "byte-identical " : signed ? "signed " : ""}${path.basename(target.fsPath)} (${written.length} bytes${Number.isInteger(count) ? `, ${count} actions` : ""}).`);
 }
 
 async function validatePython(collection) {
@@ -2273,15 +2285,35 @@ class WorkflowPythonCustomEditorProvider {
           await ensureImported({ editorOptions: { preserveFocus: true } });
           const pyDocument = await pythonDocument();
           await showWorkflowPythonEditor(session, { preserveFocus: true });
+          const source = pyDocument.getText();
+          const preserved = exactWorkflowRoundTripBytes(
+            session,
+            source,
+            document.uri.fsPath
+          );
+          if (preserved) {
+            await vscode.workspace.fs.writeFile(document.uri, preserved);
+            postWorkflowSessionStatus(session, `Preserved exact ${path.basename(document.uri.fsPath)} (${preserved.length} bytes)`);
+            postWorkflowSessionRuntimeResponse(session, {
+              ok: true,
+              source: "Shortpy document baseline",
+              message: "Editable Shortpy was unchanged; exported the exact imported workflow bytes.",
+              byteIdentical: true,
+              length: preserved.length,
+            });
+            setBridgeStatus("connected", `Exported byte-identical ${path.basename(document.uri.fsPath)}`);
+            return;
+          }
           const shouldSign = path.extname(document.uri.fsPath).toLowerCase() !== ".plist";
           const response = await compilePythonDocument(
             pyDocument,
-            pyDocument.getText(),
+            source,
             this.runtimeDiagnosticsCollection,
             shouldSign ? compileOptionsForExport() : compileOptionsForValidation()
           );
           const bytes = shortcutBytesForTarget(response, document.uri);
           await vscode.workspace.fs.writeFile(document.uri, bytes);
+          rememberWorkflowBaseline(session, source, bytes, document.uri.fsPath);
           postWorkflowSessionStatus(session, `Exported ${bytes.length} bytes to ${path.basename(document.uri.fsPath)}`);
           setBridgeStatus("connected", `Exported ${path.basename(document.uri.fsPath)}`);
         } else if (commandName === "syncHost") {

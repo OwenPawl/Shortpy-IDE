@@ -66,67 +66,68 @@ def main() -> None:
     else:
         raise AssertionError("iCloud API error response did not raise")
 
-    value_uuid = "11111111-1111-1111-1111-111111111111"
-    group_uuid = "22222222-2222-2222-2222-222222222222"
-    accumulator = "repeat_results"
-    repeat_actions = [
+    comment_source = """def shortcut() -> None:
+    # Line one
+    # Line two
+    action()
+""" + "    # \n"
+    comment_origins = [
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": group_uuid,
-                "WFControlFlowMode": 0,
-            },
+            "actionIndex": 0,
+            "actionIdentifier": "is.workflow.actions.comment",
+            "actionParameters": {"WFCommentActionText": "Line one\nLine two"},
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.text.combine",
-            "WFWorkflowActionParameters": {"UUID": value_uuid},
+            "actionIndex": 1,
+            "actionIdentifier": "is.workflow.actions.notification",
+            "actionParameters": {},
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.appendvariable",
-            "WFWorkflowActionParameters": {
-                "WFInput": {
-                    "Value": {
-                        "OutputUUID": value_uuid,
-                        "Type": "ActionOutput",
-                    },
-                    "WFSerializationType": "WFTextTokenAttachment",
-                },
-                "WFVariableName": accumulator,
-            },
-        },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": group_uuid,
-                "UUID": "33333333-3333-3333-3333-333333333333",
-                "WFControlFlowMode": 2,
-            },
+            "actionIndex": 2,
+            "actionIdentifier": "is.workflow.actions.comment",
+            "actionParameters": {},
         },
     ]
-    repeat_workflow = plistlib.dumps(
-        {"WFWorkflowActions": repeat_actions},
-        fmt=plistlib.FMT_BINARY,
+    canonical_comments, comment_report = (
+        bridgectl.canonicalize_imported_comment_actions(
+            comment_source, comment_origins
+        )
     )
-    normalized, report = bridgectl.normalize_repeat_accumulators_for_python_export(repeat_workflow)
-    normalized_actions = plistlib.loads(normalized)["WFWorkflowActions"]
-    assert report["present"] is True
-    assert report["removed_count"] == 1
-    assert report["removed"][0]["variable_name"] == accumulator
-    assert len(normalized_actions) == 3
-    assert all(
-        action["WFWorkflowActionIdentifier"] != "is.workflow.actions.appendvariable"
-        for action in normalized_actions
-    )
+    assert 'com_apple_shortcuts_comment(comment="Line one\\nLine two")' in canonical_comments
+    assert 'com_apple_shortcuts_comment(comment="")' in canonical_comments
+    assert "    # Line one" not in canonical_comments
+    assert comment_report["replacement_count"] == 2
+    assert comment_report["unresolved"] == []
 
-    referenced_workflow = plistlib.loads(repeat_workflow)
-    referenced_workflow["WFWorkflowActions"].append({
-        "WFWorkflowActionIdentifier": "is.workflow.actions.getvariable",
-        "WFWorkflowActionParameters": {"WFVariableName": accumulator},
-    })
-    referenced_data = plistlib.dumps(referenced_workflow, fmt=plistlib.FMT_BINARY)
-    unchanged, unchanged_report = bridgectl.normalize_repeat_accumulators_for_python_export(referenced_data)
-    assert unchanged == referenced_data
-    assert unchanged_report["present"] is False
+    edge_comment_source = """def shortcut() -> None:
+    # # literal hash
+    # trailing newline
+""" + "    # \n    action()\n"
+    edge_comment_origins = [
+        {
+            "actionIndex": 0,
+            "actionIdentifier": "is.workflow.actions.comment",
+            "actionParameters": {"WFCommentActionText": "# literal hash"},
+        },
+        {
+            "actionIndex": 1,
+            "actionIdentifier": "is.workflow.actions.comment",
+            "actionParameters": {"WFCommentActionText": "trailing newline\n"},
+        },
+        {
+            "actionIndex": 2,
+            "actionIdentifier": "is.workflow.actions.notification",
+            "actionParameters": {},
+        },
+    ]
+    canonical_edges, edge_report = bridgectl.canonicalize_imported_comment_actions(
+        edge_comment_source, edge_comment_origins
+    )
+    assert 'com_apple_shortcuts_comment(comment="# literal hash")' in canonical_edges
+    assert 'com_apple_shortcuts_comment(comment="trailing newline\\n")' in canonical_edges
+    assert "    # " not in canonical_edges
+    assert edge_report["replacement_count"] == 2
+    assert edge_report["unresolved"] == []
 
     print("import-sources-ok")
 

@@ -59,9 +59,23 @@ Nine finite/foreach/menu/conditional collision and nesting fixtures pass
 `Python -> plist -> Python -> plist` with stable native action shapes.
 The signed `Shortcut Debugger.shortcut` fixture additionally proved the more
 general nested shape where an outer Repeat Results append contains an action
-call that consumes an inner control-flow result. Aliasing the complete appended
-value at the lexical boundary removes only Apple's synthetic append; its signed
-output reimports and reaches a stable 95-action shape on the next compile.
+call that consumes an inner control-flow result. Making that action assignment
+the outer loop's native result removes the synthetic append helper. Native
+Comment actions import as explicit `com_apple_shortcuts_comment(...)` calls.
+For real variable mutations, direct casts and subscripts are selectively
+lowered through `com_apple_shortcuts_add_to_variable(...)`, preserving
+`WFCoercionVariableAggrandizement` and
+`WFDictionaryValueVariableAggrandizement` on the append input. The supplied
+workflow compiles from 94 actions to the same 94 action identifiers in the same
+order, and the next compile remains stable.
+
+Compiled plist bytes are still not byte-identical because Shortpy does not
+represent generated UUIDs, implicit defaults, or opaque per-action/root
+metadata. The custom editor owns that lossless no-edit boundary: it retains
+imported document bytes in session memory and writes them unchanged when the
+editable Shortpy is unchanged. The real signed fixture exported byte-for-byte
+with SHA-256
+`47800ced59bf6c86982f19308b72b76a3c3184d34f5bb0cb118c715402e5881e`.
 
 Proven:
 
