@@ -42,6 +42,20 @@ const VISIBLE_COMMANDS = [
     customEditor: { message: "syncHost", label: "Sync With Host", primary: true, order: 45 },
   },
   {
+    key: "toggleLiveSync",
+    command: "shortcutsRuntimeIDE.toggleLiveSync",
+    title: "Shortcuts IDE: Toggle Live Sync",
+    editorContext: { when: "editorLangId == python", group: "navigation@48" },
+    customEditor: { message: "toggleLiveSync", label: "Live Sync", order: 46 },
+  },
+  {
+    key: "openHostShortcutEditor",
+    command: "shortcutsRuntimeIDE.openHostShortcutEditor",
+    title: "Shortcuts IDE: Open Shortcut Editor",
+    editorContext: { when: "editorLangId == python", group: "navigation@47" },
+    customEditor: { message: "openHostShortcutEditor", label: "Open in Shortcuts", order: 47 },
+  },
+  {
     key: "openWorkflowPlistFromPython",
     command: "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
     title: "Shortcuts IDE: Open Workflow Plist From Python",

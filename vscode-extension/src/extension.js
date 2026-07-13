@@ -30,6 +30,7 @@ const {
   exportHostShortcut,
   hashSource,
   mergeWorkflowPlists,
+  shortcutEditorDeepLink,
   syncHostShortcut,
 } = require("./hostShortcuts");
 const {
@@ -60,6 +61,10 @@ let extensionGlobalStoragePath = "";
 let extensionVersion = "dev";
 const workflowSessionsByWorkflowUri = new Map();
 const workflowSessionsByPythonUri = new Map();
+const hostSyncRunsByLinkKey = new Map();
+let hostShortcutLinkStateUpdate = Promise.resolve();
+let liveSyncTimer;
+let liveSyncPollRunning = false;
 
 function configOptions() {
   const config = vscode.workspace.getConfiguration("shortcutsRuntimeIDE");
@@ -94,6 +99,7 @@ function configOptions() {
     overwriteSiblingShortcut: Boolean(config.get("overwriteSiblingShortcut")),
     headlessShortcutsPath: config.get("headlessShortcutsPath") || "",
     hostCommandTimeoutMs: Number(config.get("hostCommandTimeoutMs")) || 120000,
+    liveSyncPollIntervalMs: Math.max(1000, Number(config.get("liveSyncPollIntervalMs")) || 3000),
   };
 }
 
@@ -852,6 +858,15 @@ function postWorkflowSessionStatus(session, text) {
   postWorkflowSessionMessage(session, { command: "status", text });
 }
 
+function postWorkflowSessionLiveSyncState(session, link) {
+  postWorkflowSessionMessage(session, {
+    command: "liveSyncState",
+    enabled: Boolean(link && link.liveSync),
+    paused: Boolean(link && link.liveSyncPausedReason),
+    reason: link && link.liveSyncPausedReason,
+  });
+}
+
 async function writeWorkflowPythonSource(session, source) {
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(session.pythonUri.fsPath)));
   const openDocument = vscode.workspace.textDocuments.find((document) =>
@@ -1120,17 +1135,30 @@ async function ensureBridgeConnectedForHostSync() {
   }
 }
 
-async function updateHostShortcutLink(context, linkKey, link) {
-  await context.globalState.update(HOST_SHORTCUT_LINKS_STATE_KEY, {
-    ...hostShortcutLinks(context),
-    [linkKey]: link,
+function updateHostShortcutLink(context, linkKey, linkOrUpdater) {
+  const operation = hostShortcutLinkStateUpdate.catch(() => undefined).then(async () => {
+    const links = hostShortcutLinks(context);
+    const link = typeof linkOrUpdater === "function"
+      ? linkOrUpdater(links[linkKey])
+      : linkOrUpdater;
+    await context.globalState.update(HOST_SHORTCUT_LINKS_STATE_KEY, {
+      ...links,
+      [linkKey]: link,
+    });
+    return link;
   });
+  hostShortcutLinkStateUpdate = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
 async function removeHostShortcutLink(context, linkKey) {
-  const links = { ...hostShortcutLinks(context) };
-  delete links[linkKey];
-  await context.globalState.update(HOST_SHORTCUT_LINKS_STATE_KEY, links);
+  const operation = hostShortcutLinkStateUpdate.catch(() => undefined).then(async () => {
+    const links = { ...hostShortcutLinks(context) };
+    delete links[linkKey];
+    await context.globalState.update(HOST_SHORTCUT_LINKS_STATE_KEY, links);
+  });
+  hostShortcutLinkStateUpdate = operation.then(() => undefined, () => undefined);
+  await operation;
   const uris = hostSyncSnapshotUris(context, linkKey);
   try {
     await vscode.workspace.fs.delete(uris.directory, { recursive: true, useTrash: false });
@@ -1209,10 +1237,11 @@ async function openHostPythonDiff(context, document, source, name, linkKey) {
   );
 }
 
-async function syncPythonDocumentToHost(context, document, collection) {
+async function performPythonDocumentHostSync(context, document, collection, syncOptions = {}) {
   if (!document || document.languageId !== "python") {
     throw new Error("Open a Shortpy Python editor before syncing to host Shortcuts.");
   }
+  const interactive = syncOptions.interactive !== false;
   await ensureBridgeConnectedForHostSync();
 
   const linkKey = hostShortcutLinkKey(document);
@@ -1220,6 +1249,9 @@ async function syncPythonDocumentToHost(context, document, collection) {
   const link = links[linkKey];
   let name = link && link.name;
   if (!link) {
+    if (!interactive) {
+      return { ok: false, operation: "unlinked", name: suggestedHostShortcutName(document) };
+    }
     name = await vscode.window.showInputBox({
       title: "Sync With Host Shortcuts",
       prompt: "Name for the host shortcut",
@@ -1235,11 +1267,7 @@ async function syncPythonDocumentToHost(context, document, collection) {
     name = name.trim();
   }
 
-  return vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    title: link ? `Syncing ${link.name} with Shortcuts` : `Creating ${name} in Shortcuts`,
-    cancellable: false,
-  }, async (progress) => {
+  const run = async (progress) => {
     const hostOptions = configOptions();
     const runSync = (currentRequest) => syncHostShortcut(currentRequest, hostOptions, (event) => {
       progress.report({ message: event.message || "Preparing host runtime" });
@@ -1250,16 +1278,21 @@ async function syncPythonDocumentToHost(context, document, collection) {
       logRuntime("host export runtime", event);
     });
     const saveBaseline = async (result, hostExport, source, compiledPlist) => {
-      const updatedLink = {
-        workflowID: result.workflowID,
-        name: hostExport.name || result.name || name,
-        sourceHash: hashSource(source),
-        hostHash: hostExport.hostHash,
-        updatedAt: new Date().toISOString(),
-      };
       await writeHostSyncSnapshots(context, linkKey, hostExport.plist, compiledPlist);
-      await updateHostShortcutLink(context, linkKey, updatedLink);
-      return updatedLink;
+      const updated = await updateHostShortcutLink(context, linkKey, (currentLink) => {
+        const updatedLink = {
+          ...(currentLink || link || {}),
+          workflowID: result.workflowID,
+          name: hostExport.name || result.name || name,
+          sourceHash: hashSource(source),
+          hostHash: hostExport.hostHash,
+          updatedAt: new Date().toISOString(),
+        };
+        delete updatedLink.liveSyncPausedReason;
+        return updatedLink;
+      });
+      postWorkflowSessionLiveSyncState(workflowSessionForDocument(document), updated);
+      return updated;
     };
     const compileLocal = async () => {
       progress.report({ message: "Compiling editor version" });
@@ -1304,9 +1337,11 @@ async function syncPythonDocumentToHost(context, document, collection) {
         workflowID: result.workflowID,
         name: updatedLink.name,
       });
-      vscode.window.showInformationMessage(
-        `${result.operation === "create" ? "Created" : "Updated"} ${updatedLink.name} in Shortcuts.`
-      );
+      if (interactive) {
+        vscode.window.showInformationMessage(
+          `${result.operation === "create" ? "Created" : "Updated"} ${updatedLink.name} in Shortcuts.`
+        );
+      }
       return { ...result, name: updatedLink.name, direction: "push" };
     };
     const pullHost = async (hostExport) => {
@@ -1330,7 +1365,9 @@ async function syncPythonDocumentToHost(context, document, collection) {
         workflowID: updatedLink.workflowID,
         name: updatedLink.name,
       });
-      vscode.window.showInformationMessage(`Updated the editor from ${updatedLink.name} in Shortcuts.`);
+      if (interactive) {
+        vscode.window.showInformationMessage(`Updated the editor from ${updatedLink.name} in Shortcuts.`);
+      }
       return { ...result, name: updatedLink.name, direction: "pull" };
     };
 
@@ -1345,6 +1382,9 @@ async function syncPythonDocumentToHost(context, document, collection) {
     } catch (error) {
       if (error.code !== "not_found") {
         throw error;
+      }
+      if (!interactive) {
+        return { ok: false, operation: "missing", workflowID: link.workflowID, name: link.name };
       }
       const missingChoice = await vscode.window.showWarningMessage(
         `Host shortcut ${link.name} no longer exists.`,
@@ -1375,15 +1415,24 @@ async function syncPythonDocumentToHost(context, document, collection) {
         local.source,
         local.plist
       );
-      vscode.window.showInformationMessage(`Initialized two-way sync for ${updatedLink.name}.`);
+      if (interactive) {
+        vscode.window.showInformationMessage(`Initialized two-way sync for ${updatedLink.name}.`);
+      }
       return { ok: true, operation: "initialize", ...updatedLink };
     }
     if (action === "none") {
-      if (currentHost.name && currentHost.name !== link.name) {
-        await updateHostShortcutLink(context, linkKey, { ...link, name: currentHost.name });
+      if ((currentHost.name && currentHost.name !== link.name) || link.liveSyncPausedReason) {
+        const updated = await updateHostShortcutLink(context, linkKey, (currentLink) => {
+          const updatedLink = { ...(currentLink || link), name: currentHost.name || link.name };
+          delete updatedLink.liveSyncPausedReason;
+          return updatedLink;
+        });
+        postWorkflowSessionLiveSyncState(workflowSessionForDocument(document), updated);
       }
       setBridgeStatus("connected", `${currentHost.name || link.name} is in sync`);
-      vscode.window.showInformationMessage(`${currentHost.name || link.name} is already in sync.`);
+      if (interactive) {
+        vscode.window.showInformationMessage(`${currentHost.name || link.name} is already in sync.`);
+      }
       return { ok: true, operation: "none", workflowID: link.workflowID, name: currentHost.name || link.name };
     }
     if (action === "push") {
@@ -1391,6 +1440,10 @@ async function syncPythonDocumentToHost(context, document, collection) {
     }
     if (action === "pull") {
       return pullHost(currentHost);
+    }
+
+    if (!interactive) {
+      return { ok: false, operation: "conflict", workflowID: link.workflowID, name: currentHost.name || link.name };
     }
 
     const conflictChoice = await vscode.window.showWarningMessage(
@@ -1419,12 +1472,232 @@ async function syncPythonDocumentToHost(context, document, collection) {
       return { ok: false, operation: "conflict", workflowID: link.workflowID, name: currentHost.name || link.name };
     }
     return undefined;
-  });
+  };
+  if (!interactive) {
+    return run({ report() {} });
+  }
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: link ? `Syncing ${link.name} with Shortcuts` : `Creating ${name} in Shortcuts`,
+    cancellable: false,
+  }, run);
+}
+
+function syncPythonDocumentToHost(context, document, collection, syncOptions = {}) {
+  const linkKey = hostShortcutLinkKey(document);
+  const existing = hostSyncRunsByLinkKey.get(linkKey);
+  if (existing && syncOptions.coalesce) {
+    return existing;
+  }
+  const prior = existing ? existing.catch(() => undefined) : Promise.resolve();
+  const current = prior.then(() => performPythonDocumentHostSync(
+    context,
+    document,
+    collection,
+    syncOptions
+  ));
+  hostSyncRunsByLinkKey.set(linkKey, current);
+  current.finally(() => {
+    if (hostSyncRunsByLinkKey.get(linkKey) === current) {
+      hostSyncRunsByLinkKey.delete(linkKey);
+    }
+  }).catch(() => {});
+  return current;
 }
 
 async function syncToHostShortcuts(context, collection) {
   const editor = activeEditorOrThrow();
   return syncPythonDocumentToHost(context, editor.document, collection);
+}
+
+function hostShortcutLinkForDocument(context, document) {
+  const linkKey = hostShortcutLinkKey(document);
+  return { linkKey, link: hostShortcutLinks(context)[linkKey] };
+}
+
+function postHostSyncStatus(document, text) {
+  const session = workflowSessionForDocument(document);
+  if (session) {
+    postWorkflowSessionStatus(session, text);
+  }
+}
+
+async function openHostShortcutEditorLink(context, linkKey, fallbackName) {
+  const link = hostShortcutLinks(context)[linkKey];
+  const name = (link && link.name) || fallbackName;
+  const deepLink = shortcutEditorDeepLink(link && link.workflowID, name);
+  const opened = await vscode.env.openExternal(vscode.Uri.parse(deepLink));
+  if (!opened) {
+    throw new Error("macOS did not open the Shortcuts editor deep link.");
+  }
+  logRuntime("opened host shortcut editor", {
+    workflowID: link && link.workflowID,
+    name,
+    deepLink,
+  });
+  return { ok: true, workflowID: link && link.workflowID, name, deepLink };
+}
+
+async function openHostShortcutEditorForDocument(context, document) {
+  if (!document || document.languageId !== "python") {
+    throw new Error("Open a Shortpy Python editor before opening the Shortcuts editor.");
+  }
+  const result = await openHostShortcutEditorLink(
+    context,
+    hostShortcutLinkKey(document),
+    suggestedHostShortcutName(document)
+  );
+  postHostSyncStatus(document, `Opened ${result.name} in Shortcuts`);
+  return result;
+}
+
+async function openHostShortcutEditor(context) {
+  const editor = activeEditorOrThrow();
+  return openHostShortcutEditorForDocument(context, editor.document);
+}
+
+function openDocumentForHostLinkKey(linkKey) {
+  return vscode.workspace.textDocuments.find((document) =>
+    document.languageId === "python" && hostShortcutLinkKey(document) === linkKey
+  );
+}
+
+async function pauseLiveSync(context, document, reason, message) {
+  const { linkKey, link } = hostShortcutLinkForDocument(context, document);
+  if (!link || !link.liveSync) {
+    return;
+  }
+  const alreadyPaused = link.liveSyncPausedReason === reason;
+  const paused = await updateHostShortcutLink(context, linkKey, (currentLink) => ({
+    ...(currentLink || link),
+    liveSyncPausedReason: reason,
+  }));
+  postWorkflowSessionLiveSyncState(workflowSessionForDocument(document), paused);
+  postHostSyncStatus(document, `Live Sync paused: ${message}`);
+  setBridgeStatus("error", `Live Sync paused for ${link.name}: ${message}`);
+  if (!alreadyPaused) {
+    vscode.window.showWarningMessage(
+      `Live Sync paused for ${link.name}: ${message} Run Sync With Host Shortcuts to resolve it.`
+    );
+  }
+}
+
+async function runLiveSyncForDocument(context, document, collection, reason) {
+  const { link } = hostShortcutLinkForDocument(context, document);
+  if (!link || !link.liveSync || link.liveSyncPausedReason) {
+    return undefined;
+  }
+  if (reason === "poll" && document.isDirty) {
+    return undefined;
+  }
+  postHostSyncStatus(document, `Live Sync checking ${link.name}`);
+  try {
+    const result = await syncPythonDocumentToHost(context, document, collection, {
+      interactive: false,
+      coalesce: true,
+    });
+    if (!result) {
+      return undefined;
+    }
+    const currentLink = hostShortcutLinkForDocument(context, document).link;
+    if (!currentLink || !currentLink.liveSync) {
+      return result;
+    }
+    if (result.operation === "conflict") {
+      await pauseLiveSync(context, document, "conflict", "both the editor and Shortcuts changed");
+      return result;
+    }
+    if (result.operation === "missing") {
+      await pauseLiveSync(context, document, "missing", "the linked shortcut no longer exists");
+      return result;
+    }
+    if (["push", "pull", "initialize"].includes(result.operation)) {
+      postHostSyncStatus(document, `Live Sync ${result.direction || result.operation}: ${result.name}`);
+      logRuntime("live sync propagated change", {
+        reason,
+        operation: result.operation,
+        direction: result.direction,
+        workflowID: result.workflowID,
+        name: result.name,
+      });
+    } else {
+      postHostSyncStatus(document, `Live Sync active: ${result.name || link.name}`);
+    }
+    return result;
+  } catch (error) {
+    const text = error && error.message ? error.message : String(error);
+    const currentLink = hostShortcutLinkForDocument(context, document).link;
+    if (currentLink && currentLink.liveSync) {
+      postHostSyncStatus(document, `Live Sync retry pending: ${text}`);
+    }
+    logRuntime("live sync attempt failed", { reason, name: link.name, error: text });
+    return undefined;
+  }
+}
+
+async function pollLiveSyncDocuments(context, collection) {
+  if (liveSyncPollRunning) {
+    return;
+  }
+  liveSyncPollRunning = true;
+  try {
+    for (const [linkKey, link] of Object.entries(hostShortcutLinks(context))) {
+      if (!link || !link.liveSync || link.liveSyncPausedReason) {
+        continue;
+      }
+      const document = openDocumentForHostLinkKey(linkKey);
+      if (document) {
+        await runLiveSyncForDocument(context, document, collection, "poll");
+      }
+    }
+  } finally {
+    liveSyncPollRunning = false;
+  }
+}
+
+async function toggleLiveSyncForDocument(context, document, collection) {
+  if (!document || document.languageId !== "python") {
+    throw new Error("Open a Shortpy Python editor before changing Live Sync.");
+  }
+  let { linkKey, link } = hostShortcutLinkForDocument(context, document);
+  if (link && link.liveSync) {
+    const disabled = await updateHostShortcutLink(context, linkKey, (currentLink) => {
+      const value = { ...(currentLink || link), liveSync: false };
+      delete value.liveSyncPausedReason;
+      return value;
+    });
+    postWorkflowSessionLiveSyncState(workflowSessionForDocument(document), disabled);
+    postHostSyncStatus(document, `Live Sync disabled for ${link.name}`);
+    vscode.window.showInformationMessage(`Live Sync disabled for ${link.name}.`);
+    return { ok: true, enabled: false, ...disabled };
+  }
+
+  if (!link || !link.sourceHash || !link.hostHash) {
+    const result = await syncPythonDocumentToHost(context, document, collection);
+    if (!result || ["conflict", "unlink"].includes(result.operation)) {
+      return result;
+    }
+    ({ linkKey, link } = hostShortcutLinkForDocument(context, document));
+  }
+  if (!link) {
+    throw new Error("Live Sync requires a linked host shortcut. Run Sync With Host Shortcuts first.");
+  }
+  const enabled = await updateHostShortcutLink(context, linkKey, (currentLink) => {
+    const value = { ...(currentLink || link), liveSync: true };
+    delete value.liveSyncPausedReason;
+    return value;
+  });
+  postWorkflowSessionLiveSyncState(workflowSessionForDocument(document), enabled);
+  postHostSyncStatus(document, `Live Sync enabled for ${enabled.name}`);
+  vscode.window.showInformationMessage(
+    `Live Sync enabled for ${enabled.name}. Editor changes sync after save; Shortcuts changes are polled while the editor is open.`
+  );
+  return { ok: true, enabled: true, ...enabled };
+}
+
+async function toggleLiveSync(context, collection) {
+  const editor = activeEditorOrThrow();
+  return toggleLiveSyncForDocument(context, editor.document, collection);
 }
 
 async function offerOpenInShortcuts(uri, message) {
@@ -2038,7 +2311,8 @@ function workflowEditorToolbarHtml() {
   return customEditorActions()
     .map((action) => {
       const classes = action.primary ? " class=\"primary\"" : "";
-      return `<button${classes} data-command="${htmlEscape(action.message)}">${htmlEscape(action.label)}</button>`;
+      const toggle = action.message === "toggleLiveSync" ? " aria-pressed=\"false\"" : "";
+      return `<button${classes}${toggle} data-command="${htmlEscape(action.message)}">${htmlEscape(action.label)}</button>`;
     })
     .join("\n    ");
 }
@@ -2076,6 +2350,10 @@ function workflowEditorHtml(fileName, pythonPath) {
       padding: 4px 8px;
     }
     button.primary {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    button[aria-pressed="true"] {
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
     }
@@ -2157,6 +2435,7 @@ function workflowEditorHtml(fileName, pythonPath) {
     const vscode = acquireVsCodeApi();
     const status = document.getElementById("status");
     const runtimeResponse = document.getElementById("runtimeResponse");
+    const liveSyncButton = document.querySelector('button[data-command="toggleLiveSync"]');
     function renderRuntimeResponse(payload) {
       if (!payload) {
         runtimeResponse.textContent = "No validation run yet.";
@@ -2176,6 +2455,14 @@ function workflowEditorHtml(fileName, pythonPath) {
         renderRuntimeResponse(message.payload);
       } else if (message.command === "status") {
         status.textContent = message.text || "";
+      } else if (message.command === "liveSyncState" && liveSyncButton) {
+        liveSyncButton.setAttribute("aria-pressed", message.enabled ? "true" : "false");
+        liveSyncButton.textContent = message.paused
+          ? "Live Sync: Paused"
+          : message.enabled ? "Live Sync: On" : "Live Sync";
+        liveSyncButton.title = message.paused && message.reason
+          ? "Paused: " + message.reason
+          : message.enabled ? "Disable Live Sync" : "Enable Live Sync";
       }
     });
   </script>
@@ -2255,6 +2542,10 @@ class WorkflowPythonCustomEditorProvider {
     };
 
     await importIntoSession();
+    postWorkflowSessionLiveSyncState(
+      session,
+      hostShortcutLinks(this.context)[session.workflowUri.toString()]
+    );
 
     const pythonDocument = async () => vscode.workspace.openTextDocument(session.pythonUri);
 
@@ -2334,6 +2625,38 @@ class WorkflowPythonCustomEditorProvider {
               name: result.name,
             });
           }
+        } else if (commandName === "toggleLiveSync") {
+          await ensureImported({ editorOptions: { preserveFocus: true } });
+          const pyDocument = await pythonDocument();
+          const result = await toggleLiveSyncForDocument(
+            this.context,
+            pyDocument,
+            this.runtimeDiagnosticsCollection
+          );
+          if (result) {
+            postWorkflowSessionRuntimeResponse(session, {
+              ok: result.ok !== false,
+              source: "Headless Shortcuts",
+              operation: "live-sync",
+              enabled: result.enabled,
+              workflowID: result.workflowID,
+              name: result.name,
+            });
+          }
+        } else if (commandName === "openHostShortcutEditor") {
+          const result = await openHostShortcutEditorLink(
+            this.context,
+            session.workflowUri.toString(),
+            path.basename(session.workflowUri.fsPath).replace(/\.(?:shortcut|plist)$/i, "")
+          );
+          postWorkflowSessionStatus(session, `Opened ${result.name} in Shortcuts`);
+          postWorkflowSessionRuntimeResponse(session, {
+            ok: true,
+            source: "Shortcuts URL scheme",
+            operation: "open-shortcut-editor",
+            workflowID: result.workflowID,
+            name: result.name,
+          });
         } else if (commandName === "import") {
           await importIntoSession();
         } else if (commandName === "connect") {
@@ -2396,6 +2719,8 @@ function activate(context) {
     writeSiblingRuntimePlistFromPython: () => writeSiblingRuntimePlistFromPython(diagnostics),
     validatePython: () => validatePython(diagnostics),
     syncToHostShortcuts: () => syncToHostShortcuts(context, diagnostics),
+    toggleLiveSync: () => toggleLiveSync(context, diagnostics),
+    openHostShortcutEditor: () => openHostShortcutEditor(context),
     openWorkflowPlistFromPython: () => openWorkflowPlistFromPython(diagnostics),
     pythonToPlistDebugJson: () => pythonToPlistDebugJson(diagnostics),
     loadPythonFromPlist: loadPythonFromPlist,
@@ -2466,11 +2791,29 @@ function activate(context) {
   probeBridgeStatusPassive().catch((error) => {
     logRuntime("Passive bridge status probe failed", error && error.message ? error.message : String(error));
   });
+  liveSyncTimer = setInterval(() => {
+    pollLiveSyncDocuments(context, diagnostics).catch((error) => {
+      logRuntime("Live Sync poll failed", error && error.message ? error.message : String(error));
+    });
+  }, configOptions().liveSyncPollIntervalMs);
+  context.subscriptions.push({
+    dispose() {
+      if (liveSyncTimer) {
+        clearInterval(liveSyncTimer);
+        liveSyncTimer = undefined;
+      }
+    },
+  });
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
-    if (!configOptions().validateOnSave || document.languageId !== "python") {
+    if (document.languageId !== "python") {
       return;
     }
-    compilePythonDocument(document, document.getText(), diagnostics).catch(() => {});
+    const { link } = hostShortcutLinkForDocument(context, document);
+    if (link && link.liveSync && !link.liveSyncPausedReason) {
+      runLiveSyncForDocument(context, document, diagnostics, "save").catch(() => {});
+    } else if (configOptions().validateOnSave) {
+      compilePythonDocument(document, document.getText(), diagnostics).catch(() => {});
+    }
   }));
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
     const options = configOptions();
@@ -2500,7 +2843,12 @@ function activate(context) {
   updateCommandDecorations();
 }
 
-function deactivate() {}
+function deactivate() {
+  if (liveSyncTimer) {
+    clearInterval(liveSyncTimer);
+    liveSyncTimer = undefined;
+  }
+}
 
 module.exports = {
   activate,

@@ -19,6 +19,8 @@ const activationEvents = manifest.activationEvents || [];
 const commands = (manifest.contributes && manifest.contributes.commands || []).map((item) => item.command);
 const menus = Object.values(manifest.contributes && manifest.contributes.menus || {}).flat();
 const menuCommands = menus.map((item) => item.command);
+const configuration = manifest.contributes && manifest.contributes.configuration || {};
+const configurationProperties = configuration.properties || {};
 
 assert.deepStrictEqual(activationEvents, packageActivationEvents(), "activationEvents must be generated from commandRegistry.js");
 assert.deepStrictEqual(manifest.contributes.commands, packageCommands(), "contributed commands must be generated from commandRegistry.js");
@@ -33,6 +35,16 @@ assert(!extensionSource.includes('data-command="status"'), "custom editor must n
 assert(extensionSource.includes('bridgeStatusBar.command = "shortcutsRuntimeIDE.connectBridge"'), "status bar must connect the bridge when clicked");
 assert(!/Shortcuts IDE: Resolve Entity/.test(readme), "README must not document Resolve Entity as a UI command");
 assert(!/Shortcuts IDE: Show Bridge Status/.test(readme), "README must not document Show Bridge Status as a UI command");
+assert(commands.includes("shortcutsRuntimeIDE.openHostShortcutEditor"), "Open Shortcut Editor must be a visible command");
+assert(commands.includes("shortcutsRuntimeIDE.toggleLiveSync"), "Live Sync must be a visible command");
+assert(extensionSource.includes('commandName === "openHostShortcutEditor"'), "custom editor must handle Open Shortcut Editor");
+assert(extensionSource.includes('commandName === "toggleLiveSync"'), "custom editor must handle Live Sync");
+assert(extensionSource.includes('aria-pressed=\\"false\\"'), "custom editor Live Sync must expose native toggle state");
+assert.strictEqual(
+  configurationProperties["shortcutsRuntimeIDE.liveSyncPollIntervalMs"].default,
+  3000,
+  "Live Sync must use the documented default polling interval"
+);
 assert(/^\*\*\/__pycache__\/\*\*$/m.test(vscodeIgnore), "VSIX must exclude Python bytecode cache directories");
 assert(/^\*\*\/\*\.pyc$/m.test(vscodeIgnore), "VSIX must exclude Python bytecode files");
 

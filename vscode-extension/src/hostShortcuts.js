@@ -10,6 +10,7 @@ const path = require("path");
 const RUNTIME_MARKER = ".shortpy-headless-runtime.json";
 const BINARY_RELATIVE_PATH = path.join("build", "headless-shortcuts");
 const SOURCE_ENTRIES = ["Makefile", "README.md", "LICENSE", "Sources"];
+const WORKFLOW_ID_RE = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
 function packagedSourceRoot() {
   return path.resolve(__dirname, "..", "bundled", "headless-shortcuts");
@@ -216,6 +217,22 @@ function hashSource(source) {
   return crypto.createHash("sha256").update(String(source || ""), "utf8").digest("hex");
 }
 
+function shortcutEditorDeepLink(workflowID, name) {
+  const id = String(workflowID || "").trim();
+  const title = String(name || "").trim();
+  const query = [];
+  if (WORKFLOW_ID_RE.test(id)) {
+    query.push(`id=${encodeURIComponent(id)}`);
+  }
+  if (title) {
+    query.push(`name=${encodeURIComponent(title)}`);
+  }
+  if (query.length === 0) {
+    throw new Error("A valid shortcut workflow ID or name is required to open the Shortcuts editor.");
+  }
+  return `shortcuts://open-shortcut?${query.join("&")}`;
+}
+
 async function canonicalPlistHashAtPath(plistPath, options = {}) {
   const result = await execFile("/usr/bin/plutil", ["-convert", "xml1", "-o", "-", plistPath], {
     timeoutMs: options.hostCommandTimeoutMs,
@@ -319,6 +336,7 @@ module.exports = {
   mergeWorkflowPlists,
   packagedSourceRoot,
   parseResponse,
+  shortcutEditorDeepLink,
   syncHostShortcut,
   versionedStorageRoot,
   workspaceSourceRoot,

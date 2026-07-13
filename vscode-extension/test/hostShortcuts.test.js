@@ -12,6 +12,7 @@ const {
   hashSource,
   mergeWorkflowPlists,
   parseResponse,
+  shortcutEditorDeepLink,
   syncHostShortcut,
   versionedStorageRoot,
 } = require("../src/hostShortcuts");
@@ -35,6 +36,22 @@ async function main() {
   assert.strictEqual(determineSyncAction(baseline, hashSource("changed"), "host"), "push");
   assert.strictEqual(determineSyncAction(baseline, hashSource("source"), "changed"), "pull");
   assert.strictEqual(determineSyncAction(baseline, hashSource("changed"), "changed"), "conflict");
+  assert.strictEqual(
+    shortcutEditorDeepLink("11111111-2222-3333-4444-555555555555", "My Shortcut"),
+    "shortcuts://open-shortcut?id=11111111-2222-3333-4444-555555555555&name=My%20Shortcut"
+  );
+  assert.strictEqual(
+    shortcutEditorDeepLink("not-a-workflow-id", "Name Fallback"),
+    "shortcuts://open-shortcut?name=Name%20Fallback"
+  );
+  assert.strictEqual(
+    shortcutEditorDeepLink("11111111-2222-3333-4444-555555555555", ""),
+    "shortcuts://open-shortcut?id=11111111-2222-3333-4444-555555555555"
+  );
+  assert.throws(
+    () => shortcutEditorDeepLink("invalid", ""),
+    /valid shortcut workflow ID or name/
+  );
 
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "shortpy-host-test-"));
   const binary = path.join(directory, "headless-shortcuts");

@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,8 @@
     "onCommand:shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
     "onCommand:shortcutsRuntimeIDE.validatePython",
     "onCommand:shortcutsRuntimeIDE.syncToHostShortcuts",
+    "onCommand:shortcutsRuntimeIDE.toggleLiveSync",
+    "onCommand:shortcutsRuntimeIDE.openHostShortcutEditor",
     "onCommand:shortcutsRuntimeIDE.openWorkflowPlistFromPython",
     "onCommand:shortcutsRuntimeIDE.pythonToPlistDebugJson",
     "onCommand:shortcutsRuntimeIDE.loadPythonFromPlist",
@@ -78,6 +80,14 @@
       {
         "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
         "title": "Shortcuts IDE: Sync With Host Shortcuts"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.toggleLiveSync",
+        "title": "Shortcuts IDE: Toggle Live Sync"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.openHostShortcutEditor",
+        "title": "Shortcuts IDE: Open Shortcut Editor"
       },
       {
         "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
@@ -137,6 +147,16 @@
           "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
           "when": "editorLangId == python",
           "group": "navigation@49"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.toggleLiveSync",
+          "when": "editorLangId == python",
+          "group": "navigation@48"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.openHostShortcutEditor",
+          "when": "editorLangId == python",
+          "group": "navigation@47"
         },
         {
           "command": "shortcutsRuntimeIDE.openWorkflowPlistFromPython",
@@ -320,6 +340,12 @@
           "type": "number",
           "default": 120000,
           "description": "Maximum time in milliseconds for building or running the host Shortcuts sync helper."
+        },
+        "shortcutsRuntimeIDE.liveSyncPollIntervalMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 1000,
+          "description": "Polling interval in milliseconds for host Shortcuts changes while Live Sync is enabled and the linked editor is open."
         }
       }
     }

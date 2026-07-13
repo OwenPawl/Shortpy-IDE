@@ -220,6 +220,8 @@ Primary commands include:
 - **Open Workflow Plist From Python**
 - **Import Plist As Python**
 - **Import iCloud Link As Python**
+- **Open Shortcut Editor**
+- **Toggle Live Sync**
 - **Retrieve Relevant Actions**
 - **Retrieve Relevant Triggers**
 - **Refresh ToolRenderer Metadata**
@@ -235,6 +237,16 @@ fix-its as VS Code Quick Fixes. Bridge activity is also written to the
 Later syncs push editor-only changes or pull Shortcuts-only changes. If both
 sides changed, the extension offers the editor version, the Shortcuts version,
 or a comparison.
+
+**Open Shortcut Editor** opens the linked shortcut directly with
+`shortcuts://open-shortcut`. A valid workflow UUID is preferred; the linked or
+filename-derived shortcut name is used as the fallback.
+
+**Toggle Live Sync** persists automatic sync for the linked editor. Editor
+changes propagate after save, and Shortcuts changes are polled while the Python
+editor is open. Host operations are serialized per document. If both sides
+change, Live Sync pauses without overwriting either version; run the normal Sync
+command to compare or choose a side, after which Live Sync resumes.
 
 The VSIX bundles the small Headless Shortcuts source runtime used for native
 `WFWorkflowRecord` creation, update, and export. It is built in extension global

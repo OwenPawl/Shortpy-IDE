@@ -66,6 +66,10 @@ Shortpy runtime pipeline and Apple's workflow-record serializer.
   link.
 - **Sync With Host Shortcuts**: create/link a Mac shortcut, then push or pull
   whichever side changed.
+- **Open Shortcut Editor**: open the linked shortcut in the Shortcuts editor by
+  workflow UUID, with its name as fallback.
+- **Toggle Live Sync**: push editor changes after save and poll open linked
+  editors for Shortcuts-side changes.
 - **Retrieve Relevant Actions**: search native ToolRenderer action definitions.
 - **Retrieve Relevant Triggers**: search native trigger decorators.
 - **Refresh ToolRenderer Metadata**: rerender and cache the native Python
@@ -160,6 +164,17 @@ Later syncs:
 - pull when only Shortcuts changed;
 - offer editor, Shortcuts, or comparison choices when both changed.
 
+**Open Shortcut Editor** uses
+`shortcuts://open-shortcut?id=<UUID>&name=<STRING>`. A valid linked UUID is
+included when available and takes precedence; the linked or filename-derived
+name remains a fallback.
+
+**Toggle Live Sync** stores the mode on the existing per-document host link.
+Editor changes propagate after save, and host changes are polled while the
+linked Python editor is open. Operations are serialized per document. Live Sync
+pauses on a two-sided conflict instead of choosing a winner; resolve it with the
+normal Sync command and automatic propagation resumes.
+
 The VSIX bundles a small Headless Shortcuts source runtime. It is built in
 extension global storage on first sync and saves complete native
 `WFWorkflowRecord` values. Baseline host and compiled plists preserve host-owned
@@ -195,6 +210,8 @@ Common settings:
   `shortcutsRuntimeIDE.bridgeLaunchTimeoutMs`: bound bridge operations.
 - `shortcutsRuntimeIDE.headlessShortcutsPath`: optional prebuilt host-sync
   helper; normally the bundled source is used.
+- `shortcutsRuntimeIDE.liveSyncPollIntervalMs`: host-change polling interval
+  while Live Sync is enabled; default `3000`, minimum `1000`.
 
 Advanced path overrides such as `bridgeCtlPath`, `toolRendererMetadataPath`,
 `pythonPath`, `socket`, and `shortcutsCliPath` can point the extension at a
