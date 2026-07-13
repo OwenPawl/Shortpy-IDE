@@ -13,6 +13,7 @@ const root = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const extensionSource = fs.readFileSync(path.join(root, "src", "extension.js"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const vscodeIgnore = fs.readFileSync(path.join(root, ".vscodeignore"), "utf8");
 
 const activationEvents = manifest.activationEvents || [];
 const commands = (manifest.contributes && manifest.contributes.commands || []).map((item) => item.command);
@@ -32,5 +33,7 @@ assert(!extensionSource.includes('data-command="status"'), "custom editor must n
 assert(extensionSource.includes('bridgeStatusBar.command = "shortcutsRuntimeIDE.connectBridge"'), "status bar must connect the bridge when clicked");
 assert(!/Shortcuts IDE: Resolve Entity/.test(readme), "README must not document Resolve Entity as a UI command");
 assert(!/Shortcuts IDE: Show Bridge Status/.test(readme), "README must not document Show Bridge Status as a UI command");
+assert(/^\*\*\/__pycache__\/\*\*$/m.test(vscodeIgnore), "VSIX must exclude Python bytecode cache directories");
+assert(/^\*\*\/\*\.pyc$/m.test(vscodeIgnore), "VSIX must exclude Python bytecode files");
 
 console.log("manifest-ok");

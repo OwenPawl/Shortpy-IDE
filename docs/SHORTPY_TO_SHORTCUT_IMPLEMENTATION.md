@@ -1,5 +1,9 @@
 # Shortpy Runtime Pipeline
 
+For the detailed ownership model, native object boundaries, isolation
+properties, and removal contract, see
+[`SHORTPY_RUNTIME_OWNERSHIP.md`](SHORTPY_RUNTIME_OWNERSHIP.md).
+
 ## Purpose
 
 Shortpy IDE keeps Apple's compiler and edit-mode exporter available, but adds a
