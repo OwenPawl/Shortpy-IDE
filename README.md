@@ -1,113 +1,272 @@
 # Shortpy IDE
 
-Shortpy IDE is a local VS Code and iOS Simulator bridge for Apple's Shortcuts Python surface. It uses the same native compiler/runtime surfaces that the built-in Shortcuts agent uses where they are currently proven.
+Shortpy IDE is a local bridge between **Visual Studio Code** and the **iOS
+Simulator** for Apple's Shortcuts Python interface. It uses the same native
+compiler, workflow model, and ToolRenderer surfaces used by the built-in
+Shortcuts agent wherever those surfaces have been proven.
 
-This repository is intentionally small. It contains the current working bridge and editor source, not the long-run RE logs, crash dumps, generated VSIX packages, or captured prompts.
+> [!NOTE]
+> Shortpy IDE is a macOS development tool. It requires Xcode, an iOS Simulator
+> runtime, private Apple frameworks, and the macOS `/usr/bin/shortcuts` command.
 
-## Layout
+This repository intentionally contains the current bridge and editor source,
+not long-run reverse-engineering logs, crash dumps, generated VSIX packages, or
+captured prompts.
 
-- `bridge/`: injected iOS Simulator dylib, bridge control CLI, internal catalog-binding helpers, and build files.
-- `vscode-extension/`: VS Code custom editor, Python tooling, and the bundled Headless Shortcuts host-sync runtime.
-- `docs/`: implementation notes, TODO, and selected proof reports. Start with
-  [`SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md`](docs/SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md)
-  for the compiler architecture and abstraction audit.
+## Table of Contents
 
-## Current Runtime Boundary
+- [Repository Layout](#repository-layout)
+- [Runtime Architecture](#runtime-architecture)
+  - [Python to Workflow](#python-to-workflow)
+  - [Workflow to Python](#workflow-to-python)
+  - [Inline Catalog Metadata](#inline-catalog-metadata)
+  - [ToolRenderer Metadata](#toolrenderer-metadata)
+  - [ToolKit SQLite](#toolkit-sqlite)
+- [Quick Start](#quick-start)
+  - [Install](#install)
+  - [Connect](#connect)
+  - [Edit Shortcuts](#edit-shortcuts)
+  - [Sync With Host Shortcuts](#sync-with-host-shortcuts)
+  - [Load Another ToolKit](#load-another-toolkit)
+- [Command-Line Development](#command-line-development)
+- [Static Diagnostics](#static-diagnostics)
+- [Development Commands](#development-commands)
+- [Scope and License](#scope-and-license)
 
-Python-to-workflow plist export now uses Apple's native whole-workflow record serializer:
+## Repository Layout
 
 ```text
-ShortpyToShortcut
-  -> ShortcutsLanguage.PythonToIR
-  -> Shortpy owned IR corrections
-  -> ShortcutsLanguage native IR passes
-  -> ShortcutsLanguage.IRToShortcut
-  -> captured recurrence correction on native WFAction parameters (if required)
-  -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync
-  -> WFWorkflow.saveToRecord
-  -> WFWorkflow.record
-  -> WFWorkflowRecord.fileRepresentation
-  -> WFWorkflowFile.fileDataWithError:
+Shortpy-IDE/
+|-- bridge/             Injected simulator dylib and bridge CLI
+|-- vscode-extension/   Custom editor and VS Code language tooling
+`-- docs/               Architecture, TODO, and selected proof reports
 ```
 
-This preserves workflow root metadata and native trigger decorators such as `@when_app_opened` without manually rebuilding `WFWorkflowTriggers`. Host-side `.shortcut` export then signs those workflow plist bytes with macOS `/usr/bin/shortcuts sign --mode anyone`.
+Start with
+[`docs/SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md`](docs/SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md)
+for the compiler architecture and removal path.
 
-The custom editor retains imported document bytes as an in-memory baseline.
-Exporting unchanged Shortpy writes the exact original `.shortcut` or `.plist`
-bytes, preserving opaque workflow metadata that Apple's Python representation
-does not expose. Native Comment actions are editable as explicit
-`com_apple_shortcuts_comment(...)` calls. Once the Python source changes,
-export uses the native compiler.
+## Runtime Architecture
 
-The compiler adapter preserves native Repeat Results, loop-carried branch
-values, and variable aggrandizements without rewriting editable Python. Its
-owned IR corrections run between Apple's frontend and native IR passes. A
-separate fail-closed native action correction repairs only captured recursive
-branch edges before `saveToRecord`; it derives branch structure, control UUIDs,
-and output names from the `WFWorkflow`. Import
-uses `com_apple_shortcuts_add_to_variable(...)` only when a natural
-`.append(...)` subscript or cast would otherwise materialize an extra action;
-ordinary appends remain natural so user-defined variable tokens retain their
-native scope.
+Shortpy IDE has explicit `shortpy` and `native` runtime pipelines. `shortpy` is
+the production default. `native` retains Apple's original monolithic compiler
+and edit-mode exporter as a reference path. The bridge never silently falls
+back between them.
 
-`Shortcuts IDE: Sync With Host Shortcuts` links the editor to a host workflow
-ID. It automatically pushes when only the editor changed and pulls through the
-simulator plist-to-Python converter when only Shortcuts changed. Simultaneous
-edits show one conflict dialog. Baseline host/compiled plists live only in VS
-Code extension storage and let Shortpy apply Python structural deltas while
-preserving host-owned presentation metadata such as the shortcut icon.
+### Python to Workflow
 
-Editable Python uses inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge reconstructs any required compiler catalog from that source representation. Ref-free source without inline catalog values compiles with `defaultInitialCatalog`; the compiler no longer silently falls back to the latest imported workflow catalog.
+```text
+Editable Shortpy
+  -> inline parameterState preprocessing
+  -> ShortcutsLanguage.PythonToIR
+  -> Shortpy native IR corrections
+  -> Apple's native IR passes
+  -> ShortcutsLanguage.IRToShortcut
+  -> captured recurrence correction on native WFAction parameters, if needed
+  -> WFWorkflow.databaseAccessQueue barrier
+  -> WFWorkflow.saveToRecord
+  -> WFWorkflowRecord.fileRepresentation
+  -> WFWorkflowFile.fileDataWithError:
+  -> unsigned workflow plist
+```
 
-VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then rebuilds the visible cache from that local interface plus the active sqlite names. Live native ToolRenderer refresh is an explicit command because it can occupy the simulator bridge for a long time. Function and decorator hovers show exact native ToolRenderer definition blocks; keyword hovers show the specific parameter type/default/docs plus referenced enum/type material. Runtime-shaped definitions and enum cases remain visible with a notice that they came from the current simulator and may differ elsewhere. The prepared ToolKit gives every tool a neutral ToolRenderer naming context and uses its normalized sqlite `pythonName` as the native render name. Visible metadata then accepts definitions only by exact Python-name equality; it does not rewrite or synthesize definition text. The bridge also ensures selected DB rows have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) set before ToolRenderer refresh so native ToolRenderer renders actions that were present in the DB but hidden from the generative surface. ToolKit sqlite data is not a user-facing documentation source; its native tool/trigger IDs and raw parameter keys are the catalog host identity used internally for inline `Resolved[...]`/`Picked[...]` metadata.
+The owned `ShortpyToShortcut` layer fixes proven control-flow collisions without
+rewriting editable Python. It preserves Repeat Results, nested control outputs,
+`if`/`elif`/`else`, Choose from Menu, loop-carried branch values, variable
+aggrandizements, root decorators, and native trigger decorators. Ordinary
+actions still use Apple's frontend, native passes, backend, and workflow model.
+
+Captured recurrence edges are corrected on native
+`WFAction.serializedParameters` before `saveToRecord`. The bridge does not
+rebuild the workflow root or rewrite a serialized whole-workflow plist.
+
+Host-side `.shortcut` export signs the native workflow plist with:
+
+```sh
+/usr/bin/shortcuts sign --mode anyone
+```
+
+Saving as `.plist` writes the raw workflow plist bytes.
+
+### Workflow to Python
+
+Apple's exporter represents both synthetic control-result accumulation and real
+variable mutation with the same append program node. `ShortpyEditModeContext`
+avoids that collision by adapting only ambiguous real Add/Set/Get Variable and
+Comment actions in a temporary workflow clone. Structural Repeat, If, and Menu
+nodes remain on Apple's native exporter.
+
+The result is independently compilable Python. It does not require the source
+workflow, hidden action provenance, or a sidecar. Native Comment actions and
+ambiguous variable actions use their explicit ToolKit definitions; structural
+control flow keeps Apple's normal Python form.
+
+The custom editor also retains imported document bytes in memory. Exporting an
+unchanged document returns the exact original `.shortcut` or `.plist`, including
+opaque metadata that Python does not represent.
+
+### Inline Catalog Metadata
+
+Editable Python contains inline plist-compatible parameter-state dictionaries,
+not visible `ref(...)` handles:
+
+```python
+@when_app_opened(app=[{
+    "Bundle Identifier": "com.apple.shortcuts",
+    "Name": "Shortcuts",
+}])
+def shortcut() -> None:
+    pass
+```
+
+For ToolRenderer parameters typed as `Resolved[...]` or `Picked[...]`, the host
+creates stable compiler-only refs and an ephemeral
+`WFParameterStateCatalog`. Import performs the reverse replacement, so no ref
+or catalog sidecar appears in editable Python.
+
+Catalog host identity comes from the active Tool database's native action or
+trigger ID and raw parameter key. If those fields are unavailable, compilation
+returns `unsupportedInlineCatalogContext` rather than guessing.
+
+### ToolRenderer Metadata
+
+Apple's `ToolRenderer.pythonInterface` is the visible IDE metadata source. Its
+definitions power:
+
+- function, decorator, parameter, enum, and type hovers;
+- completions and signature help;
+- command highlighting;
+- action and trigger search;
+- static Shortpy diagnostics.
+
+Function hovers show native definition blocks. Parameter hovers show the
+specific type, default, documentation, and referenced type material.
+Runtime-shaped definitions and enum cases remain visible; the IDE adds a notice
+that dynamic cases came from the current simulator and may differ elsewhere.
+
+Metadata is cached locally after refresh so hover, completion, search, and
+static diagnostics do not make a bridge call on every interaction. A live
+native refresh remains explicit because a full ToolRenderer render can be
+large.
+
+### ToolKit SQLite
+
+ToolKit SQLite is the compiler and naming source of truth, not the visible
+documentation source. The prepared-copy path:
+
+1. Repairs missing enum rows still referenced by typed relationships.
+2. Deduplicates action and trigger Python names using native identifiers.
+3. Aligns each non-empty SQLite `pythonName` with ToolRenderer through a neutral
+   naming container.
+4. Sets `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) on DB-present
+   actions before ToolRenderer refresh.
+5. Backs up and replaces the simulator's resolved `Tools-active` target.
+6. Primes the SQLite WAL and refreshes bridge metadata.
+
+Empty Python names remain empty. The bridge does not synthesize ToolRenderer
+definition text; visible definitions are accepted only when native rendered
+names match the prepared ToolKit names exactly.
 
 ## Quick Start
 
-Install the VS Code extension from a fresh checkout with one command:
+### Install
+
+Prerequisites:
+
+- macOS with Xcode command-line tools;
+- an iOS Simulator runtime, with iOS 27.0 preferred;
+- Visual Studio Code;
+- Python 3 and Node.js/npm;
+- `/usr/bin/shortcuts` for signed export.
+
+From a fresh checkout:
 
 ```sh
 npm run install-extension
 ```
 
-Then open VS Code and run `Shortcuts IDE: Connect To Bridge`, or click the
-Shortcuts status bar item.
-From a Shortpy Python editor, run `Shortcuts IDE: Sync With Host Shortcuts` to
-create the host shortcut. Later runs synchronize whichever side changed.
-The packaged extension bundles the bridge source, stages it into extension
-global storage on first connect, builds the simulator dylib if needed, boots
-an iOS simulator if needed, launches Shortcuts with the bridge, and keeps
-bridge status visible in the status bar. Connect runs headlessly by default:
-it does not open `Simulator.app`, quits the visible Simulator app if it is
-already running, and keeps only the selected iOS simulator booted by shutting
-down other booted iOS simulators.
-The bridge build discovers the installed iOS Simulator runtime at build time
-and prefers iOS 27.0 when present.
-By default the launcher uses `~/Library/Shortcuts/ToolKit/Tools-active` as the
-ToolKit source of truth. On connect it launches the simulator bridge, waits for
-Shortcuts' launch-time ToolKit indexing to settle, creates an adjusted copy,
-repairs missing enum rows that are still referenced by typed parameter
-relationships or type instances, rewrites duplicate action/trigger Python names
-from their native identifiers, preserves ToolKit action names used behind
-dictionary/list/text/nothing/subscript syntax, aligns every tool's
-normalized `pythonName` with its native ToolRenderer render name through a
-dedicated neutral naming container, sets the ToolRenderer visibility/approval bits, backs up the
-simulator's resolved `Tools-active` target, replaces that target file with the
-adjusted copy, primes the WAL database, and refreshes bridge metadata. The
-closure repair uses only typed references retained in the selected ToolKit.
-Use `Shortcuts IDE: Load ToolKit SQLite` to select a different sqlite; that
-command applies the same post-index prepared-copy target replacement and
-relaunches the bridge.
-Set `shortcutsRuntimeIDE.openSimulatorOnConnect` when you intentionally want the
-visible Simulator UI, or disable `shortcutsRuntimeIDE.singleSimulatorOnConnect`
-when another booted iOS simulator must stay running.
+The installer packages the VSIX and installs it using `code` from `PATH` or the
+standard macOS Visual Studio Code app bundle.
 
-The direct CLI development path is still available:
+### Connect
 
-Build and launch the simulator bridge:
+In VS Code, run **Shortcuts IDE: Connect To Bridge** or click the Shortcuts
+status-bar item. Connect:
+
+1. Stages the bundled bridge in extension global storage.
+2. Builds the simulator dylib when needed.
+3. Selects the newest compatible iOS 27.0 runtime.
+4. Boots one simulator and launches Shortcuts with the dylib.
+5. Waits for first-boot ToolKit indexing only when needed.
+6. Activates the prepared ToolKit and refreshes metadata.
+7. Reports passive connection state in the status bar.
+
+Connect is headless by default. It closes the visible Simulator app and shuts
+down other booted iOS simulators to reduce memory use. Set
+`shortcutsRuntimeIDE.openSimulatorOnConnect` to show Simulator, or disable
+`shortcutsRuntimeIDE.singleSimulatorOnConnect` to keep other devices booted.
+
+### Edit Shortcuts
+
+Opening a raw `.shortcut` or workflow `.plist` starts the **Shortcuts Workflow
+Python** custom editor and opens the generated Python in a native VS Code editor.
+The controller remains usable while disconnected and exposes Connect directly.
+
+Primary commands include:
+
+- **Validate With Apple Runtime**
+- **Export Python To Shortcut**
+- **Write Sibling Shortcut**
+- **Open Workflow Plist From Python**
+- **Import Plist As Python**
+- **Import iCloud Link As Python**
+- **Retrieve Relevant Actions**
+- **Retrieve Relevant Triggers**
+- **Refresh ToolRenderer Metadata**
+- **Load ToolKit SQLite**
+
+Apple diagnostics appear in Problems with source ranges, hints, and supported
+fix-its as VS Code Quick Fixes. Bridge activity is also written to the
+**Shortcuts Runtime IDE** output channel and, where available, the Debug Console.
+
+### Sync With Host Shortcuts
+
+**Sync With Host Shortcuts** creates and links a host Mac shortcut on first use.
+Later syncs push editor-only changes or pull Shortcuts-only changes. If both
+sides changed, the extension offers the editor version, the Shortcuts version,
+or a comparison.
+
+The VSIX bundles the small Headless Shortcuts source runtime used for native
+`WFWorkflowRecord` creation, update, and export. It is built in extension global
+storage on first sync. Baseline host/compiled plists preserve host-owned data
+such as the icon while applying structural Python changes.
+
+### Load Another ToolKit
+
+By default, Connect uses:
+
+```text
+~/Library/Shortcuts/ToolKit/Tools-active
+```
+
+Run **Shortcuts IDE: Load ToolKit SQLite** to select another database. The
+selection is persisted for the project, prepared with the same rules, activated
+after launch-time indexing, and followed by a complete ToolRenderer cache
+refresh.
+
+## Command-Line Development
+
+Build and launch the bridge:
 
 ```sh
 make -C bridge clean all
 bridge/tools/launch_shortcuts_sim_bridge.sh
+```
+
+Build the Apple-native reference path without the owned C IR adapter:
+
+```sh
+make -C bridge BUILD_DIR=build-sim-native-only ENABLE_SHORTPY_PIPELINE=0
 ```
 
 Check bridge status:
@@ -124,100 +283,66 @@ bridge/tools/bridgectl.py --raw python-to-bplist --text 'def shortcut() -> None:
 '
 ```
 
-The response contains both `plist_payload` (unsigned workflow plist bytes) and `shortcut_payload` (signed `.shortcut` bytes). Use `--no-sign` for validation/debug paths that only need the unsigned plist payload.
+Use global `--pipeline native` to select Apple's reference path. Use
+`--no-sign` when only the unsigned workflow plist is needed.
 
-Import a raw workflow plist, signed `.shortcut` file, or iCloud Shortcuts link:
+Import a raw plist, signed `.shortcut`, or iCloud link:
 
 ```sh
 bridge/tools/bridgectl.py --raw plist-data-to-python --file Example.shortcut
-bridge/tools/bridgectl.py --raw plist-data-to-python --text 'https://www.icloud.com/shortcuts/00000000-0000-0000-0000-000000000000'
+bridge/tools/bridgectl.py --raw plist-data-to-python \
+  --text 'https://www.icloud.com/shortcuts/00000000-0000-0000-0000-000000000000'
 ```
 
-Signed import unwraps either `anyone` or `people-who-know-me` AEA1 envelopes host-side. iCloud import resolves `fields.shortcut.value.downloadURL` from the public record API. Both paths send the resulting unsigned `Shortcut.wflow` plist to the simulator edit-mode converter.
+Signed imports support `anyone` and `people-who-know-me` AEA1 envelopes. iCloud
+imports resolve `fields.shortcut.value.downloadURL` from the public record API.
 
-Imported action identity is handled at the native edit-export boundary. A
-temporary workflow clone adapts only ambiguous real Add/Set/Get Variable and
-Comment actions into explicit ToolKit call nodes; Apple's normal exporter
-renders all structural control flow and unaffected actions.
+## Static Diagnostics
 
-The prepared ToolKit preserves native action Python names such as
-`com_apple_shortcuts_list`; ShortcutsLanguage independently lowers
-dictionary/list/text/nothing/subscript syntax to those actions. Import uses
-explicit ToolKit functions for real actions whose native Python form is
-ambiguous or lossy, while structural list and control-flow syntax stays in
-Apple's native form.
-
-Compilation does not rewrite the editable Python. `ShortpyToShortcut` parses
-the unchanged source with `PythonToIR`, captures lexical control-result
-bindings, applies narrow native IR corrections for nested control values and
-loop-carried recurrence preparation, then runs Apple's control-flow inference,
-variable inlining, and backend. Captured recurrences receive one structural
-action-output edge correction on native `WFAction.serializedParameters` before
-the workflow-record serializer runs.
-The implementation resolves Swift
-metadata by name and does not hook executable text or use fixed addresses.
-
-Static editor diagnostics treat ToolRenderer as a positive metadata source.
-They validate parameters only when the rendered signature is complete and
-non-overloaded; incomplete device/runtime surfaces remain unmarked until native
-compiler validation. Compiler-facing aliases are closed over the loaded ToolKit
-parameter keys and the finite filter-query syntax without exposing raw keys.
-
-Return the exact static highlight ranges for a ShortPy file or stdin with:
+Return the exact ranges produced by the VS Code static checker:
 
 ```sh
 node vscode-extension/scripts/diagnose-shortpy.js --pretty Example.py
 printf 'def shortcut() -> None:\n    com_apple_shortcuts_not_real()\n' |
-  node vscode-extension/scripts/diagnose-shortpy.js --pretty --fail-on-diagnostics -
+  node vscode-extension/scripts/diagnose-shortpy.js \
+    --pretty --fail-on-diagnostics -
 ```
 
-Use `--metadata PATH` to test against a specific ToolRenderer cache. The probe
-uses the same collector as VS Code and emits both one-based and zero-based
-ranges plus a caret-rendered source excerpt.
+Use `--metadata PATH` to test a specific ToolRenderer cache. Static checks cover
+known actions, triggers, and top-level keyword parameters. Nested payload
+validation remains authoritative in Apple's runtime compiler.
 
-Run VS Code extension tests and syntax checks:
+## Development Commands
 
 ```sh
 npm run check
-```
-
-Package the extension without installing it:
-
-```sh
 npm run package-extension
-```
-
-Install an already-packaged VSIX for the current extension version:
-
-```sh
 npm run install-extension -- --install-only
 ```
 
-The installer uses `code` from PATH when available and falls back to the
-standard macOS VS Code app bundle CLI. Set `VSCODE_CLI=/path/to/code` if VS Code
-is installed somewhere else.
-
-Low-level checks can also be run directly:
+The live simulator regression suite is:
 
 ```sh
-node --check vscode-extension/src/bridge.js
-node --check vscode-extension/src/hostShortcuts.js
-node --check vscode-extension/src/toolrenderer.js
-node --check vscode-extension/src/extension.js
-node --check vscode-extension/test/smoke.js
+python3 bridge/tests/runtime_shortpy_to_shortcut.py
 ```
 
-## Scope Notes
+It performs two compile/import cycles across finite Repeat,
+`if`/`elif`/`else`, Choose from Menu, nested Repeat Results, variable actions,
+list actions, comments, root decorators, and inline trigger metadata.
 
-- Primary target is iOS Simulator 27.0.
-- The bridge uses private Apple frameworks and is a local RE/development tool.
-- Signed `.shortcut`/AEA1 envelope import is handled host-side before the simulator plist-to-Python bridge call.
-- Launch-time dylib loading is the supported simulator path; live injection is retained as a debug fallback.
+## Scope and License
 
-## License
+- Primary target: iOS Simulator 27.0.
+- Launch-time dylib loading is the supported path; live injection is a debug
+  fallback.
+- The bridge uses private Apple frameworks and may require updates when Apple
+  changes Shortcuts, Xcode, macOS, or the simulator runtime.
+- Signed shortcut envelopes are processed on the host before plist-to-Python
+  conversion in the simulator.
 
-Shortpy IDE is MIT licensed. The license includes an interoperability notice:
-this is an independent VS Code and bridge implementation, is not affiliated
-with Apple or Microsoft, does not license or include Apple or Microsoft
-software, and does not warrant that private Apple runtime surfaces will continue
-to work. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+> [!WARNING]
+> Private Apple interfaces have no compatibility guarantee.
+
+Shortpy IDE is MIT licensed and is not affiliated with Apple or Microsoft. It
+does not include or license Apple or Microsoft software. See
+[LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
