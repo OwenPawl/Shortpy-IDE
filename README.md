@@ -248,7 +248,9 @@ editor is open. Host operations are serialized per document. If both sides
 change, Live Sync pauses without overwriting either version; run the normal Sync
 command to compare or choose a side, after which Live Sync resumes.
 
-[Watch the 43-second Live Sync demonstration](docs/assets/live-sync-demo.mov).
+![Shortpy IDE Live Sync demonstration](docs/assets/live-sync-demo.gif)
+
+[Open the full-quality MOV recording](docs/assets/live-sync-demo.mov).
 
 The VSIX bundles the small Headless Shortcuts source runtime used for native
 `WFWorkflowRecord` creation, update, and export. It is built in extension global
