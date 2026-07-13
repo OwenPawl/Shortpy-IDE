@@ -16,11 +16,23 @@ SIM_RUNTIME_ROOT ?= $(shell $(RUNTIME_RESOLVER) --runtime-root)
 PRIVATE_FRAMEWORKS := $(SIM_RUNTIME_ROOT)/System/Library/PrivateFrameworks
 TOOLKIT_LINK_FLAGS := $(shell if [ -f "$(PRIVATE_FRAMEWORKS)/ToolKit.framework/ToolKit" ]; then printf '%s' "-Xlinker -framework -Xlinker ToolKit"; else printf '%s' "-Xlinker -undefined -Xlinker dynamic_lookup"; fi)
 
-DYLIB := $(BUILD_DIR)/libShortcutsIDESimBridge-v019.dylib
+DYLIB := $(BUILD_DIR)/libShortcutsIDESimBridge-v020.dylib
 C_BRIDGE := $(BUILD_DIR)/ShortcutsIDESimBridge.o
 SHIMS := $(BUILD_DIR)/runtime_direct_shims_sim.o
 OBJC_HELPERS := $(BUILD_DIR)/runtime_objc_helpers_sim.o
+IR_ADAPTER := $(BUILD_DIR)/shortpy_ir_adapter_sim.o
 SWIFT_SOURCE := src/ShortcutsRuntimeDirectSim.swift
+ENABLE_SHORTPY_PIPELINE ?= 1
+
+ifeq ($(ENABLE_SHORTPY_PIPELINE),1)
+SHORTPY_OBJECTS := $(IR_ADAPTER)
+SHORTPY_SWIFT_FLAGS := -D SHORTPY_PIPELINE
+SHORTPY_LINK_FLAGS :=
+else
+SHORTPY_OBJECTS :=
+SHORTPY_SWIFT_FLAGS :=
+SHORTPY_LINK_FLAGS := -Xlinker -undefined -Xlinker dynamic_lookup
+endif
 
 CFLAGS ?= -std=c11 -Wall -Wextra -O2 -g
 TARGET_FLAGS := -target $(TARGET) -isysroot "$(SDKROOT)"
@@ -48,8 +60,11 @@ $(SHIMS): src/runtime_direct_shims_sim.S | $(BUILD_DIR)
 $(OBJC_HELPERS): src/runtime_objc_helpers.m | $(BUILD_DIR)
 	$(CC) $(TARGET_FLAGS) -fobjc-arc -O2 -g -c -o $@ $<
 
-$(DYLIB): $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) | $(BUILD_DIR)
-	$(SWIFTC) -swift-version 5 -O -g -emit-library -target $(TARGET) -sdk "$(SDKROOT)" -module-name ShortcutsIDESimBridge -o $@ $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(FRAMEWORK_FLAGS)
+$(IR_ADAPTER): src/shortpy/shortpy_ir_adapter.c | $(BUILD_DIR)
+	$(CC) $(TARGET_FLAGS) $(CFLAGS) -c -o $@ $<
+
+$(DYLIB): $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) | $(BUILD_DIR)
+	$(SWIFTC) -swift-version 5 -O -g -emit-library $(SHORTPY_SWIFT_FLAGS) -target $(TARGET) -sdk "$(SDKROOT)" -module-name ShortcutsIDESimBridge -o $@ $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) $(FRAMEWORK_FLAGS) $(SHORTPY_LINK_FLAGS)
 	codesign --force --sign - $@
 
 inspect: $(DYLIB)

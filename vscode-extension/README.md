@@ -2,7 +2,7 @@
 
 This VS Code extension drives the iOS Simulator Shortcuts runtime bridge from this repository.
 
-It does not use JSON as the shortcut plist representation for file operations. Python is compiled through `ShortcutsLanguage.pythonToShortcut`, the bridge returns raw workflow plist bytes, and host-side export signs `.shortcut` files with macOS `/usr/bin/shortcuts sign --mode anyone` by default. Saving as `.plist` writes raw workflow plist bytes.
+It does not use JSON as the shortcut plist representation for file operations. Python is compiled through the bridge-owned `ShortpyToShortcut` native IR pipeline, the bridge returns raw workflow plist bytes, and host-side export signs `.shortcut` files with macOS `/usr/bin/shortcuts sign --mode anyone` by default. Saving as `.plist` writes raw workflow plist bytes.
 
 Commands:
 

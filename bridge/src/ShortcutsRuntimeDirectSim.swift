@@ -10,6 +10,32 @@ private struct CompiledShortcut {
     var errorPolicyDecisions: UInt64 = 0
 }
 
+private struct FrontendResultStorage {
+    var w0: UInt64 = 0
+    var w1: UInt64 = 0
+    var w2: UInt64 = 0
+}
+
+private struct IRProgramStorage {
+    var w0: UInt64 = 0
+    var w1: UInt64 = 0
+}
+
+private struct IRPassStorage {
+    var w0: UInt64 = 0
+    var w1: UInt64 = 0
+    var w2: UInt64 = 0
+    var w3: UInt64 = 0
+}
+
+@_silgen_name("bridge_shortpy_array_remove_last_generic")
+@inline(never)
+public func bridgeShortpyArrayRemoveLastGeneric<Element>(
+    _ array: inout [Element]
+) {
+    array.removeLast()
+}
+
 private struct ErrorPolicyDecision {
     let inputDescription: String
     let outputDescription: String?
@@ -70,6 +96,14 @@ private struct WorkflowFileDataPayload {
     let triggersSummary: [String: Any]
 }
 
+private struct PythonExportResult {
+    let python: String
+    let proxy: AnyObject
+    let context: EditModeContextStorage
+    let pipeline: RuntimePipeline
+    let adaptedActionCount: UInt64
+}
+
 private let recordFileNativeRetentionLock = NSLock()
 private var recordFileNativeRetention: [AnyObject] = []
 
@@ -114,6 +148,34 @@ private struct RuntimeBridgeError: Error, CustomStringConvertible {
     let description: String
 }
 
+private enum RuntimePipeline: UInt64 {
+    case native = 0
+    case shortpy = 1
+
+    var name: String {
+        switch self {
+        case .native: return "native"
+        case .shortpy: return "shortpy"
+        }
+    }
+
+    static func decode(_ rawValue: UInt64) throws -> RuntimePipeline {
+        guard let pipeline = RuntimePipeline(rawValue: rawValue) else {
+            throw RuntimeBridgeError(
+                description: "unsupported runtime pipeline \(rawValue); expected native or shortpy"
+            )
+        }
+#if !SHORTPY_PIPELINE
+        if pipeline == .shortpy {
+            throw RuntimeBridgeError(
+                description: "shortpy runtime pipeline is unavailable in this native-only bridge build"
+            )
+        }
+#endif
+        return pipeline
+    }
+}
+
 private struct CompileRun {
     let catalog: AnyObject
     let catalogSource: String
@@ -123,6 +185,70 @@ private struct CompileRun {
     let toolVisibility: ToolVisibilityFilterStorage
     let flagsStorage: FlagsStorage
     let compiled: CompiledShortcut
+}
+
+private struct CompilerFlagsContext {
+    var strictness = UInt8(0)
+    var logLevel = UInt8(0)
+    var errorConfiguration = ErrorConfigurationStorage()
+    var toolVisibility = ToolVisibilityFilterStorage()
+    var flags = FlagsStorage()
+}
+
+private struct ShortpyPassReport {
+    let name: String
+    let calls: Int
+    let changes: Int
+    let input: String
+    let output: String
+
+    var json: [String: Any] {
+        [
+            "name": name,
+            "calls": calls,
+            "changes": changes,
+            "input": input,
+            "output": output,
+        ]
+    }
+}
+
+private struct ShortpyRecurrencePlan {
+    let controlKind: UInt32
+    let targetBranches: [Int]
+    let seedBranches: [Int]
+
+    var json: [String: Any] {
+        [
+            "controlKind": controlKind == 1 ? "conditional" : "match",
+            "targetBranches": targetBranches,
+            "seedBranches": seedBranches,
+        ]
+    }
+}
+
+private struct ShortpyCompileRun {
+    let catalog: AnyObject
+    let catalogSource: String
+    let flags: CompilerFlagsContext
+    let compiled: CompiledShortcut
+    let frontendIR: String
+    let finalIR: String
+    let passes: [ShortpyPassReport]
+    let recurrencePlans: [ShortpyRecurrencePlan]
+    let frontendPolicyDecisions: [ErrorPolicyDecision]
+    let backendContextSize: UInt32
+    let backendConformance: UnsafeRawPointer
+}
+
+private struct PipelineCompileRun {
+    let pipeline: RuntimePipeline
+    let catalog: AnyObject
+    let catalogSource: String
+    let compiled: CompiledShortcut
+    let recurrencePlans: [ShortpyRecurrencePlan]
+    let policyDecisions: [[String: Any]]
+    let details: [String: Any]
 }
 
 private struct AgentToolboxStorage {
@@ -283,6 +409,9 @@ private func defaultInitialCatalog() -> AnyObject
 @_silgen_name("$s7ToolKit06SharedA16DatabaseProviderC6sharedACvgZ")
 private func sharedToolDatabaseProvider() -> AnyObject
 
+@_silgen_name("bridge_fresh_tool_database")
+private func freshToolDatabase() throws -> AnyObject
+
 @_silgen_name("bridge_shared_tool_database_provider_database")
 private func bridgeSharedToolDatabaseProviderDatabase(_ provider: AnyObject) throws -> AnyObject
 
@@ -333,6 +462,238 @@ private func bridgeSwiftGetWitnessTable(
 
 @_silgen_name("bridge_dlsym_default")
 private func bridgeDlsymDefault(_ symbolName: UnsafePointer<CChar>) -> UnsafeMutableRawPointer?
+
+@_silgen_name("bridge_resolve_shortcuts_language_ir_backend")
+private func bridgeResolveShortcutsLanguageIRBackend(
+    _ contextSize: UnsafeMutablePointer<UInt32>,
+    _ conformance: UnsafeMutablePointer<UnsafeRawPointer?>
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("bridge_set_shortpy_backend_target")
+private func bridgeSetShortpyBackendTarget(
+    _ target: UnsafeRawPointer,
+    _ contextSize: UInt32
+)
+
+@_silgen_name("bridge_shortpy_backend_selected")
+private func bridgeShortpyBackendSelected(
+    _ program: UnsafePointer<IRProgramStorage>,
+    _ backend: UnsafeMutableRawPointer
+) async throws -> CompiledShortcut
+
+@_silgen_name("bridge_create_shortcuts_language_ir_backend")
+private func bridgeCreateShortcutsLanguageIRBackend(
+    _ flags: UnsafePointer<FlagsStorage>,
+    _ catalog: AnyObject,
+    _ database: AnyObject,
+    _ toolVisibility: UnsafePointer<ToolVisibilityFilterStorage>
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("bridge_destroy_shortcuts_language_ir_backend")
+private func bridgeDestroyShortcutsLanguageIRBackend(
+    _ backend: UnsafeMutableRawPointer
+)
+
+@_silgen_name("bridge_shortpy_ir_backend_last_error")
+private func bridgeShortpyIRBackendLastError() -> UnsafePointer<CChar>?
+
+@_silgen_name("bridge_python_to_ir_init")
+private func bridgePythonToIRInit(
+    _ flags: UnsafePointer<FlagsStorage>,
+    _ database: AnyObject?
+) -> AnyObject
+
+@_silgen_name("bridge_python_to_ir_visit")
+private func bridgePythonToIRVisit(
+    _ result: UnsafeMutablePointer<FrontendResultStorage>,
+    _ source: String,
+    _ frontend: AnyObject
+) -> UnsafeRawPointer?
+
+@_silgen_name("bridge_python_to_ir_visit_into_throwing")
+private func bridgePythonToIRVisitIntoThrowing(
+    _ result: UnsafeMutablePointer<FrontendResultStorage>,
+    _ source: String,
+    _ frontend: AnyObject
+) throws
+
+@_silgen_name("bridge_frontend_result_get_program")
+private func bridgeFrontendResultGetProgram(
+    _ result: UnsafeMutablePointer<IRProgramStorage>,
+    _ frontendResult: UnsafePointer<FrontendResultStorage>
+)
+
+@_silgen_name("bridge_frontend_result_get_error_policy_decisions")
+private func bridgeFrontendResultGetErrorPolicyDecisions(
+    _ frontendResult: UnsafePointer<FrontendResultStorage>
+) -> [ErrorPolicyDecision]
+
+@_silgen_name("bridge_destroy_shortcuts_language_frontend_result")
+private func bridgeDestroyFrontendResult(
+    _ frontendResult: UnsafeMutablePointer<FrontendResultStorage>
+)
+
+@_silgen_name("bridge_ir_program_print")
+private func bridgeIRProgramPrint(_ program: UnsafePointer<IRProgramStorage>) -> String
+
+@_silgen_name("bridge_ir_program_equal")
+private func bridgeIRProgramEqual(
+    _ lhs: UnsafePointer<IRProgramStorage>,
+    _ rhs: UnsafePointer<IRProgramStorage>
+) -> Bool
+
+@_silgen_name("bridge_copy_shortcuts_language_ir_program")
+private func bridgeCopyIRProgram(
+    _ destination: UnsafeMutablePointer<IRProgramStorage>,
+    _ source: UnsafePointer<IRProgramStorage>
+) -> Bool
+
+@_silgen_name("bridge_destroy_shortcuts_language_ir_program")
+private func bridgeDestroyIRProgram(_ program: UnsafeMutablePointer<IRProgramStorage>)
+
+@_silgen_name("bridge_shortpy_capture_control_flow_bindings")
+private func bridgeShortpyCaptureControlFlowBindings(
+    _ program: UnsafeMutablePointer<IRProgramStorage>
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("bridge_shortpy_destroy_control_flow_bindings")
+private func bridgeShortpyDestroyControlFlowBindings(
+    _ bindings: UnsafeMutableRawPointer
+)
+
+@_silgen_name("bridge_shortpy_control_flow_binding_count")
+private func bridgeShortpyControlFlowBindingCount(
+    _ bindings: UnsafeRawPointer
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_binding_count")
+private func bridgeShortpyRecurrenceBindingCount(
+    _ bindings: UnsafeRawPointer
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_control_kind")
+private func bridgeShortpyRecurrenceControlKind(
+    _ bindings: UnsafeRawPointer,
+    _ recurrenceIndex: UInt32
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_target_branch_count")
+private func bridgeShortpyRecurrenceTargetBranchCount(
+    _ bindings: UnsafeRawPointer,
+    _ recurrenceIndex: UInt32
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_target_branch_at")
+private func bridgeShortpyRecurrenceTargetBranchAt(
+    _ bindings: UnsafeRawPointer,
+    _ recurrenceIndex: UInt32,
+    _ branchIndex: UInt32
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_seed_branch_count")
+private func bridgeShortpyRecurrenceSeedBranchCount(
+    _ bindings: UnsafeRawPointer,
+    _ recurrenceIndex: UInt32
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_recurrence_seed_branch_at")
+private func bridgeShortpyRecurrenceSeedBranchAt(
+    _ bindings: UnsafeRawPointer,
+    _ recurrenceIndex: UInt32,
+    _ branchIndex: UInt32
+) -> UInt32
+
+@_silgen_name("bridge_shortpy_prepare_loop_carried_recurrences")
+private func bridgeShortpyPrepareLoopCarriedRecurrences(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ bindings: UnsafeRawPointer,
+    _ changeCount: UnsafeMutablePointer<UInt32>
+) -> Int32
+
+@_silgen_name("bridge_shortpy_rewrite_nested_control_flow_results")
+private func bridgeShortpyRewriteNestedControlFlowResults(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ bindings: UnsafeRawPointer,
+    _ changeCount: UnsafeMutablePointer<UInt32>
+) -> Int32
+
+@_silgen_name("bridge_shortpy_ir_adapter_last_error")
+private func bridgeShortpyIRAdapterLastError() -> UnsafePointer<CChar>?
+
+@_silgen_name("bridge_shortpy_ir_adapter_last_trace")
+private func bridgeShortpyIRAdapterLastTrace() -> UnsafePointer<CChar>?
+
+@_silgen_name("bridge_control_flow_pass_init")
+private func bridgeControlFlowPassInit(
+    _ result: UnsafeMutablePointer<IRPassStorage>,
+    _ flags: UnsafePointer<FlagsStorage>
+)
+
+@_silgen_name("bridge_control_flow_pass_apply_once")
+private func bridgeControlFlowPassApplyOnce(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ pass: UnsafePointer<IRPassStorage>
+) -> UnsafeRawPointer?
+
+@_silgen_name("bridge_control_flow_pass_apply_once_throwing")
+private func bridgeControlFlowPassApplyOnceThrowing(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
+
+@_silgen_name("bridge_control_flow_pass_apply")
+private func bridgeControlFlowPassApply(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
+
+@_silgen_name("bridge_variable_inlining_pass_init")
+private func bridgeVariableInliningPassInit(
+    _ result: UnsafeMutablePointer<IRPassStorage>,
+    _ flags: UnsafePointer<FlagsStorage>
+)
+
+@_silgen_name("bridge_variable_inlining_pass_apply_once")
+private func bridgeVariableInliningPassApplyOnce(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ pass: UnsafePointer<IRPassStorage>
+) -> UnsafeRawPointer?
+
+@_silgen_name("bridge_variable_inlining_pass_apply_once_throwing")
+private func bridgeVariableInliningPassApplyOnceThrowing(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
+
+@_silgen_name("bridge_variable_inlining_pass_apply")
+private func bridgeVariableInliningPassApply(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
+
+@_silgen_name("bridge_drop_comments_pass_init")
+private func bridgeDropCommentsPassInit(
+    _ result: UnsafeMutablePointer<IRPassStorage>,
+    _ flags: UnsafePointer<FlagsStorage>
+)
+
+@_silgen_name("bridge_drop_comments_pass_apply")
+private func bridgeDropCommentsPassApply(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ pass: UnsafePointer<IRPassStorage>
+) -> UnsafeRawPointer?
+
+@_silgen_name("bridge_drop_comments_pass_apply_throwing")
+private func bridgeDropCommentsPassApplyThrowing(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
+
+@_silgen_name("bridge_drop_comments_pass_apply_native")
+private func bridgeDropCommentsPassApplyNative(
+    _ program: inout IRProgramStorage,
+    _ pass: UnsafePointer<IRPassStorage>
+) throws
 
 @_silgen_name("$s14ShortcutsAgent0B7ToolboxV29alwaysIncludedToolIdentifiersACShySSG_tKcfC")
 private func agentToolboxInit(alwaysIncludedToolIdentifiers: Set<String>) throws -> AgentToolboxStorage
@@ -521,6 +882,19 @@ private func bridgeObjcMsgSendUInt64Arg(
     _ selectorName: UnsafePointer<CChar>,
     _ arg1: UInt64
 )
+
+@_silgen_name("bridge_shortpy_make_edit_export_workflow")
+private func bridgeShortpyMakeEditExportWorkflow(
+    _ workflow: AnyObject,
+    _ adaptedActionCount: UnsafeMutablePointer<UInt64>
+) -> AnyObject?
+
+@_silgen_name("bridge_shortpy_replace_workflow_action_serialized_parameters")
+private func bridgeShortpyReplaceWorkflowActionSerializedParameters(
+    _ workflow: AnyObject,
+    _ index: UInt64,
+    _ serializedParameters: NSDictionary
+) -> Bool
 
 private func shortHexPrefix<T>(of value: T, maxBytes: Int = 32) -> String {
     withUnsafeBytes(of: value) { raw in
@@ -1570,16 +1944,20 @@ private func copyUInt64Selector(
     objcSendUInt64Arg(destination, setter, value)
 }
 
-private func workflowUnifiedTriggers(_ workflow: AnyObject, compiledTrigger: AnyObject?) -> AnyObject? {
-    if let workflowTriggers = performObjectSelector(workflow, "unifiedAutomationTriggers"),
-       let count = collectionCount(workflowTriggers),
-       count > 0 {
-        return workflowTriggers
-    }
-    if let compiledTrigger {
-        return NSArray(object: compiledTrigger)
-    }
-    return nil
+private func makeCompilerFlags(dropComments: Bool = true) -> CompilerFlagsContext {
+    var context = CompilerFlagsContext()
+    bridgeMakeErrorConfigurationEmpty(&context.errorConfiguration)
+    bridgeMakeToolVisibilityFilterAny(&context.toolVisibility)
+    bridgeMakeFlags(
+        &context.flags,
+        &context.strictness,
+        &context.logLevel,
+        dropComments,
+        &context.errorConfiguration,
+        false,
+        &context.toolVisibility
+    )
+    return context
 }
 
 private func compileSource(
@@ -1596,36 +1974,353 @@ private func compileSource(
         catalog = defaultInitialCatalog()
         resolvedCatalogSource = "defaultInitialCatalog"
     }
-    var strictness = UInt8(0)
-    var logLevel = UInt8(0)
-    var errorConfiguration = ErrorConfigurationStorage()
-    var toolVisibility = ToolVisibilityFilterStorage()
-    var flagsStorage = FlagsStorage()
+    var flags = makeCompilerFlags()
     var compiled = CompiledShortcut()
 
-    bridgeMakeErrorConfigurationEmpty(&errorConfiguration)
-    bridgeMakeToolVisibilityFilterAny(&toolVisibility)
-    bridgeMakeFlags(
-        &flagsStorage,
-        &strictness,
-        &logLevel,
-        true,
-        &errorConfiguration,
-        false,
-        &toolVisibility
-    )
-
-    try await pythonToShortcut(&compiled, source, &flagsStorage, catalog)
+    try await pythonToShortcut(&compiled, source, &flags.flags, catalog)
     return CompileRun(
         catalog: catalog,
         catalogSource: resolvedCatalogSource,
-        strictness: strictness,
-        logLevel: logLevel,
-        errorConfiguration: errorConfiguration,
-        toolVisibility: toolVisibility,
-        flagsStorage: flagsStorage,
+        strictness: flags.strictness,
+        logLevel: flags.logLevel,
+        errorConfiguration: flags.errorConfiguration,
+        toolVisibility: flags.toolVisibility,
+        flagsStorage: flags.flags,
         compiled: compiled
     )
+}
+
+private func applyShortpyFixpointPass(
+    name: String,
+    program: inout IRProgramStorage,
+    limit: Int = 64,
+    applyOnce: (inout IRProgramStorage) throws -> Void
+) throws -> ShortpyPassReport {
+    var calls = 0
+    var changes = 0
+    while calls < limit {
+        var before = IRProgramStorage()
+        guard bridgeCopyIRProgram(&before, &program) else {
+            throw RuntimeBridgeError(
+                description: "could not copy IRProgram before \(name)"
+            )
+        }
+        do {
+            calls += 1
+            try applyOnce(&program)
+            let stable = bridgeIRProgramEqual(&before, &program)
+            bridgeDestroyIRProgram(&before)
+            if stable {
+                return ShortpyPassReport(
+                    name: name,
+                    calls: calls,
+                    changes: changes,
+                    input: "native IRProgram value",
+                    output: "native equality fixed point"
+                )
+            }
+            changes += 1
+        } catch {
+            bridgeDestroyIRProgram(&before)
+            throw error
+        }
+    }
+    throw RuntimeBridgeError(
+        description: "\(name) did not reach a fixed point after \(limit) calls"
+    )
+}
+
+private func applyShortpyOwnedPass(
+    name: String,
+    program: inout IRProgramStorage,
+    apply: (UnsafeMutablePointer<IRProgramStorage>, UnsafeMutablePointer<UInt32>) -> Int32
+) throws -> ShortpyPassReport {
+    var changes = UInt32(0)
+    guard apply(&program, &changes) == 0 else {
+        let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
+            ?? "unknown native IR adapter error"
+        throw RuntimeBridgeError(description: "\(name) failed: \(diagnostic)")
+    }
+    let trace = bridgeShortpyIRAdapterLastTrace().map(String.init(cString:)) ?? ""
+    return ShortpyPassReport(
+        name: name,
+        calls: 1,
+        changes: Int(changes),
+        input: "native IRProgram value",
+        output: trace.isEmpty ? "native IRProgram value" : trace
+    )
+}
+
+private func shortpyRecurrencePlans(
+    _ bindings: UnsafeRawPointer
+) throws -> [ShortpyRecurrencePlan] {
+    let count = bridgeShortpyRecurrenceBindingCount(bindings)
+    return try (0..<count).map { recurrenceIndex in
+        func branches(
+            count: UInt32,
+            at: (UInt32) -> UInt32
+        ) throws -> [Int] {
+            try (0..<count).map { branchIndex in
+                let value = at(branchIndex)
+                guard value != UInt32.max else {
+                    throw RuntimeBridgeError(
+                        description: "Shortpy recurrence branch plan is incomplete"
+                    )
+                }
+                return Int(value)
+            }
+        }
+
+        let controlKind = bridgeShortpyRecurrenceControlKind(
+            bindings, recurrenceIndex
+        )
+        guard controlKind == 1 || controlKind == 2 else {
+            throw RuntimeBridgeError(
+                description: "Shortpy recurrence control kind is unsupported"
+            )
+        }
+        let targetBranches = try branches(
+            count: bridgeShortpyRecurrenceTargetBranchCount(
+                bindings, recurrenceIndex
+            ),
+            at: {
+                bridgeShortpyRecurrenceTargetBranchAt(
+                    bindings, recurrenceIndex, $0
+                )
+            }
+        )
+        let seedBranches = try branches(
+            count: bridgeShortpyRecurrenceSeedBranchCount(
+                bindings, recurrenceIndex
+            ),
+            at: {
+                bridgeShortpyRecurrenceSeedBranchAt(
+                    bindings, recurrenceIndex, $0
+                )
+            }
+        )
+        guard !targetBranches.isEmpty && !seedBranches.isEmpty else {
+            throw RuntimeBridgeError(
+                description: "Shortpy recurrence branch plan has no seed or recursive branch"
+            )
+        }
+        return ShortpyRecurrencePlan(
+            controlKind: controlKind,
+            targetBranches: targetBranches,
+            seedBranches: seedBranches
+        )
+    }
+}
+
+private func ShortpyToShortcut(
+    _ source: String,
+    catalogOverride: AnyObject? = nil,
+    catalogSource: String = "defaultInitialCatalog"
+) async throws -> ShortpyCompileRun {
+    let catalog = catalogOverride ?? defaultInitialCatalog()
+    let resolvedCatalogSource = catalogOverride == nil
+        ? "defaultInitialCatalog"
+        : catalogSource
+    // Match Apple's generic Compiler lifecycle: each compile owns one database
+    // shared by PythonToIR, IRToShortcut, and both matchers.
+    let database = try freshToolDatabase()
+    var flags = makeCompilerFlags()
+
+    var backendContextSize = UInt32(0)
+    var backendConformance: UnsafeRawPointer?
+    guard let backendTarget = bridgeResolveShortcutsLanguageIRBackend(
+        &backendContextSize,
+        &backendConformance
+    ), let backendConformance else {
+        throw RuntimeBridgeError(
+            description: "ShortcutsLanguage IRToShortcut Backend capability is unavailable"
+        )
+    }
+    bridgeSetShortpyBackendTarget(backendTarget, backendContextSize)
+
+    guard let backend = bridgeCreateShortcutsLanguageIRBackend(
+        &flags.flags,
+        catalog,
+        database,
+        &flags.toolVisibility
+    ) else {
+        let diagnostic = bridgeShortpyIRBackendLastError().map(String.init(cString:))
+            ?? "unknown native adapter error"
+        throw RuntimeBridgeError(
+            description: "IRToShortcut initialization failed: \(diagnostic)"
+        )
+    }
+    defer {
+        bridgeDestroyShortcutsLanguageIRBackend(backend)
+    }
+
+    let frontend = bridgePythonToIRInit(&flags.flags, database)
+    var frontendResult = FrontendResultStorage()
+    try bridgePythonToIRVisitIntoThrowing(&frontendResult, source, frontend)
+    let frontendPolicyDecisions = bridgeFrontendResultGetErrorPolicyDecisions(
+        &frontendResult
+    )
+    var program = IRProgramStorage()
+    bridgeFrontendResultGetProgram(&program, &frontendResult)
+    bridgeDestroyFrontendResult(&frontendResult)
+    frontendResult = FrontendResultStorage()
+    defer {
+        bridgeDestroyIRProgram(&program)
+    }
+    let frontendIR = "opaque IRProgram (IRPrintable capture is not on the compiler path)"
+
+    guard let controlFlowBindings = bridgeShortpyCaptureControlFlowBindings(&program) else {
+        let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
+            ?? "unknown control-flow binding capture error"
+        throw RuntimeBridgeError(
+            description: "Shortpy control-flow binding capture failed: \(diagnostic)"
+        )
+    }
+    defer {
+        bridgeShortpyDestroyControlFlowBindings(controlFlowBindings)
+    }
+    let recurrencePlans = try shortpyRecurrencePlans(controlFlowBindings)
+    let bindingCaptureTrace = bridgeShortpyIRAdapterLastTrace().map(String.init(cString:)) ?? ""
+    let bindingCaptureReport = ShortpyPassReport(
+        name: "ShortpyControlFlowBindingCapture",
+        calls: 1,
+        changes: Int(bridgeShortpyControlFlowBindingCount(controlFlowBindings)),
+        input: "untouched frontend IRProgram value",
+        output: bindingCaptureTrace.isEmpty
+            ? "lexically scoped native statement bindings"
+            : bindingCaptureTrace
+    )
+
+    var controlFlowPass = IRPassStorage()
+    bridgeControlFlowPassInit(&controlFlowPass, &flags.flags)
+
+    let recurrenceReport = try applyShortpyOwnedPass(
+        name: "ShortpyLoopCarriedRecurrencePreparationPass",
+        program: &program,
+        apply: { program, changes in
+            return bridgeShortpyPrepareLoopCarriedRecurrences(
+                program,
+                controlFlowBindings,
+                changes
+            )
+        }
+    )
+
+    let controlFlowReport = try applyShortpyFixpointPass(
+        name: "ControlFlowOutputInferencePass",
+        program: &program
+    ) { program in
+        try bridgeControlFlowPassApplyOnceThrowing(&program, &controlFlowPass)
+    }
+
+    var variableInliningPass = IRPassStorage()
+    bridgeVariableInliningPassInit(&variableInliningPass, &flags.flags)
+    let variableInliningReport = try applyShortpyFixpointPass(
+        name: "VariableInliningPass",
+        program: &program
+    ) { program in
+        try bridgeVariableInliningPassApplyOnceThrowing(
+            &program,
+            &variableInliningPass
+        )
+    }
+
+    var dropCommentsPass = IRPassStorage()
+    bridgeDropCommentsPassInit(&dropCommentsPass, &flags.flags)
+    try bridgeDropCommentsPassApplyThrowing(&program, &dropCommentsPass)
+    let dropCommentsReport = ShortpyPassReport(
+        name: "DropCommentsPass",
+        calls: 1,
+        changes: -1,
+        input: "native IRProgram value",
+        output: "native IRProgram value"
+    )
+
+    let nestedControlFlowReport = try applyShortpyOwnedPass(
+        name: "ShortpyNestedControlFlowResultPass",
+        program: &program,
+        apply: { program, changes in
+            bridgeShortpyRewriteNestedControlFlowResults(
+                program,
+                controlFlowBindings,
+                changes
+            )
+        }
+    )
+
+    let compiled = try await bridgeShortpyBackendSelected(&program, backend)
+    return ShortpyCompileRun(
+        catalog: catalog,
+        catalogSource: resolvedCatalogSource,
+        flags: flags,
+        compiled: compiled,
+        frontendIR: frontendIR,
+        finalIR: "opaque IRProgram (IRPrintable capture is not on the compiler path)",
+        passes: [
+            bindingCaptureReport,
+            recurrenceReport,
+            controlFlowReport,
+            variableInliningReport,
+            dropCommentsReport,
+            nestedControlFlowReport,
+        ],
+        recurrencePlans: recurrencePlans,
+        frontendPolicyDecisions: frontendPolicyDecisions,
+        backendContextSize: backendContextSize,
+        backendConformance: backendConformance
+    )
+}
+
+private func compileWithRuntimePipeline(
+    _ source: String,
+    pipeline: RuntimePipeline,
+    catalogOverride: AnyObject?,
+    catalogSource: String
+) async throws -> PipelineCompileRun {
+    switch pipeline {
+    case .native:
+        let run = try await compileSource(
+            source,
+            catalogOverride: catalogOverride,
+            catalogSource: catalogSource
+        )
+        return PipelineCompileRun(
+            pipeline: pipeline,
+            catalog: run.catalog,
+            catalogSource: run.catalogSource,
+            compiled: run.compiled,
+            recurrencePlans: [],
+            policyDecisions: errorPolicyDecisions(from: run.compiled),
+            details: [
+                "entrypoint": "ShortcutsLanguage.pythonToShortcut",
+                "owned_passes": [],
+            ]
+        )
+    case .shortpy:
+        let run = try await ShortpyToShortcut(
+            source,
+            catalogOverride: catalogOverride,
+            catalogSource: catalogSource
+        )
+        return PipelineCompileRun(
+            pipeline: pipeline,
+            catalog: run.catalog,
+            catalogSource: run.catalogSource,
+            compiled: run.compiled,
+            recurrencePlans: run.recurrencePlans,
+            policyDecisions: errorPolicyDecisions(
+                from: run.frontendPolicyDecisions,
+                phase: "frontend"
+            ) + errorPolicyDecisions(from: run.compiled),
+            details: [
+                "entrypoint": "ShortpyToShortcut",
+                "passes": run.passes.map(\.json),
+                "recurrencePlans": run.recurrencePlans.map(\.json),
+                "backend_context_size": Int(run.backendContextSize),
+                "backend_conformance": pointerString(run.backendConformance),
+            ]
+        )
+    }
 }
 
 private func pointerString(_ pointer: UnsafeRawPointer?) -> String {
@@ -1652,36 +2347,11 @@ private func appendRecordFileProbeStage(_ stage: String) {
     try? handle.close()
 }
 
-private func workflowFileDataPayloadFromWorkflow(
-    _ workflow: AnyObject,
-    trigger: AnyObject?
-) throws -> WorkflowFileDataPayload {
-    let plistResult = try workflowPlistDictionary(from: workflow)
-    let triggers = workflowUnifiedTriggers(workflow, compiledTrigger: trigger)
-    let root = plistResult.root
-    let data = try plistData(from: root)
-    return WorkflowFileDataPayload(
-        data: data as Data,
-        fileSummary: [
-            "present": false,
-            "class": "WFWorkflowFile",
-            "export_path": "disabled-for-synthetic-python-output",
-            "reason": "WFWorkflowFile initWithDictionary/rootObject/fileDataWithError crashes Shortcuts while releasing synthetic files; see v048/v050 LLDB and crash logs.",
-            "trigger_export": Bool(root["WFWorkflowTriggers"] != nil) ? "WFNewTrigger.serializedRepresentation" : "not-present",
-            "trigger_export_reason": Bool(root["WFWorkflowTriggers"] != nil)
-                ? "workflow.unifiedAutomationTriggers entries were serialized through native WFNewTrigger.serializedRepresentation"
-                : "pythonToShortcut did not produce workflow-level unifiedAutomationTriggers",
-        ],
-        rootSummary: rootSummary(root),
-        actionsSummary: objectSummary(plistResult.actions),
-        triggersSummary: objectSummary(triggers)
-    )
-}
-
 private func workflowRecordFileDataPayloadFromWorkflow(
     _ workflow: AnyObject,
     trigger: AnyObject?,
-    callSaveToRecord: Bool
+    callSaveToRecord: Bool,
+    recurrencePlans: [ShortpyRecurrencePlan] = []
 ) throws -> WorkflowFileDataPayload {
     appendRecordFileProbeStage("enter workflow=\(objectPointerString(workflow)) callSaveToRecord=\(callSaveToRecord)")
     guard objcResponds(workflow, "saveToRecord") else {
@@ -1693,6 +2363,11 @@ private func workflowRecordFileDataPayloadFromWorkflow(
     guard objcResponds(workflow, "record") else {
         throw bridgeFailure("WFWorkflow is missing record")
     }
+
+    let nativeRecurrenceReport = try applyShortpyRecurrenceToWorkflow(
+        workflow,
+        plans: recurrencePlans
+    )
 
     appendRecordFileProbeStage("before recordBefore")
     let recordBefore = performObjectSelector(workflow, "record")
@@ -1747,12 +2422,13 @@ private func workflowRecordFileDataPayloadFromWorkflow(
     guard let root = rootObject as? NSDictionary else {
         throw bridgeFailure("WFWorkflowRecord fileRepresentation data decoded to \(type(of: rootObject)), expected NSDictionary")
     }
-
-    let actions = root["WFWorkflowActions"] as? NSArray
-    let triggers = root["WFWorkflowTriggers"] as? NSArray
+    let finalRoot = root
+    let finalData = data
+    let actions = finalRoot["WFWorkflowActions"] as? NSArray
+    let triggers = finalRoot["WFWorkflowTriggers"] as? NSArray
     retainRecordFileNativeObjects([workflow, recordBefore, record, file, dataObject])
     return WorkflowFileDataPayload(
-        data: data,
+        data: finalData,
         fileSummary: [
             "present": true,
             "class": objectClassName(file),
@@ -1764,99 +2440,455 @@ private func workflowRecordFileDataPayloadFromWorkflow(
             "file": pointerOnlySummary(file),
             "format": format == .binary ? "binary" : (format == .xml ? "xml" : "openstep"),
             "trigger_input": pointerOnlySummary(trigger),
+            "shortpy_recurrence_lowering": nativeRecurrenceReport,
+            "shortpy_recurrence_boundary": recurrencePlans.isEmpty
+                ? "not-required"
+                : "native WFAction reconstruction before WFWorkflow.saveToRecord",
         ],
-        rootSummary: rootSummary(root),
+        rootSummary: rootSummary(finalRoot),
         actionsSummary: objectSummary(actions),
         triggersSummary: objectSummary(triggers)
     )
 }
 
-private func workflowTriggerRecords(from workflow: AnyObject) throws -> NSArray? {
-    guard let triggers = workflowUnifiedTriggers(workflow, compiledTrigger: nil),
-          let triggerCount = collectionCount(triggers),
-          triggerCount > 0 else {
+private struct ShortpyAttachmentPath: Hashable {
+    let components: [String]
+}
+
+private struct ShortpyControlGroup {
+    let openIndex: Int
+    let closeIndex: Int
+    let branches: [Range<Int>]
+}
+
+private func shortpyActionParameters(_ action: NSDictionary) -> NSDictionary {
+    action["WFWorkflowActionParameters"] as? NSDictionary ?? NSDictionary()
+}
+
+private func shortpyControlMode(_ action: NSDictionary) -> Int? {
+    let value = shortpyActionParameters(action)["WFControlFlowMode"]
+    if let number = value as? NSNumber {
+        return number.intValue
+    }
+    return value as? Int
+}
+
+private func shortpyGroupingIdentifier(_ action: NSDictionary) -> String? {
+    let parameters = shortpyActionParameters(action)
+    return stringFromObject(parameters["GroupingIdentifier"] as AnyObject?)
+        ?? stringFromObject(
+            action["WFWorkflowActionGroupingIdentifier"] as AnyObject?
+        )
+}
+
+private func shortpyActionUUID(_ action: NSDictionary) -> String? {
+    let parameters = shortpyActionParameters(action)
+    return stringFromObject(parameters["UUID"] as AnyObject?)
+        ?? stringFromObject(action["WFWorkflowActionUUID"] as AnyObject?)
+}
+
+private func shortpyControlGroups(_ actions: NSArray) -> [ShortpyControlGroup] {
+    var groups: [ShortpyControlGroup] = []
+    for openIndex in 0..<actions.count {
+        guard let open = actions[openIndex] as? NSDictionary,
+              shortpyControlMode(open) == 0,
+              let groupingIdentifier = shortpyGroupingIdentifier(open) else {
+            continue
+        }
+        var intermediary: [Int] = []
+        var closeIndex: Int?
+        for index in (openIndex + 1)..<actions.count {
+            guard let action = actions[index] as? NSDictionary,
+                  shortpyGroupingIdentifier(action) == groupingIdentifier,
+                  let mode = shortpyControlMode(action) else {
+                continue
+            }
+            if mode == 1 {
+                intermediary.append(index)
+            } else if mode == 2 {
+                closeIndex = index
+                break
+            }
+        }
+        guard let closeIndex else {
+            continue
+        }
+        var branches: [Range<Int>] = []
+        var start = openIndex + 1
+        for boundary in intermediary {
+            branches.append(start..<boundary)
+            start = boundary + 1
+        }
+        branches.append(start..<closeIndex)
+        groups.append(
+            ShortpyControlGroup(
+                openIndex: openIndex,
+                closeIndex: closeIndex,
+                branches: branches
+            )
+        )
+    }
+    return groups
+}
+
+private func shortpyFinalActionIndex(
+    in branch: Range<Int>, actions: NSArray
+) -> Int? {
+    for index in branch.reversed() {
+        guard let action = actions[index] as? NSDictionary else {
+            continue
+        }
+        if shortpyControlMode(action) == nil {
+            return index
+        }
+    }
+    return nil
+}
+
+private func shortpyPlanBranches(
+    plan: ShortpyRecurrencePlan,
+    group: ShortpyControlGroup
+) -> [Range<Int>] {
+    var branches = group.branches
+    if plan.controlKind == 2, branches.first?.isEmpty == true {
+        branches.removeFirst()
+    }
+    return branches
+}
+
+private func shortpyActionOutputAttachments(
+    _ value: Any,
+    path: [String] = []
+) -> [ShortpyAttachmentPath: NSDictionary] {
+    if let dictionary = value as? NSDictionary {
+        if stringFromObject(dictionary["Type"] as AnyObject?) == "ActionOutput",
+           stringFromObject(dictionary["OutputUUID"] as AnyObject?) != nil {
+            return [ShortpyAttachmentPath(components: path): dictionary]
+        }
+        var result: [ShortpyAttachmentPath: NSDictionary] = [:]
+        let keys = dictionary.allKeys
+            .map(String.init(describing:))
+            .sorted()
+        for key in keys {
+            guard let child = dictionary[key] else {
+                continue
+            }
+            result.merge(
+                shortpyActionOutputAttachments(child, path: path + [key]),
+                uniquingKeysWith: { current, _ in current }
+            )
+        }
+        return result
+    }
+    if let array = value as? NSArray {
+        var result: [ShortpyAttachmentPath: NSDictionary] = [:]
+        for index in 0..<array.count {
+            result.merge(
+                shortpyActionOutputAttachments(
+                    array[index], path: path + ["#\(index)"]
+                ),
+                uniquingKeysWith: { current, _ in current }
+            )
+        }
+        return result
+    }
+    return [:]
+}
+
+private func shortpySetValue(
+    _ value: Any,
+    at path: ShortpyAttachmentPath,
+    in root: NSMutableDictionary
+) -> Bool {
+    guard let final = path.components.last else {
+        return false
+    }
+    var cursor: Any = root
+    for component in path.components.dropLast() {
+        if component.hasPrefix("#"),
+           let index = Int(component.dropFirst()),
+           let array = cursor as? NSMutableArray,
+           index < array.count {
+            cursor = array[index]
+        } else if let dictionary = cursor as? NSMutableDictionary,
+                  let child = dictionary[component] {
+            cursor = child
+        } else {
+            return false
+        }
+    }
+    if final.hasPrefix("#"),
+       let index = Int(final.dropFirst()),
+       let array = cursor as? NSMutableArray,
+       index < array.count {
+        array[index] = value
+        return true
+    }
+    if let dictionary = cursor as? NSMutableDictionary {
+        dictionary[final] = value
+        return true
+    }
+    return false
+}
+
+private func shortpyRecurrencePaths(
+    plan: ShortpyRecurrencePlan,
+    group: ShortpyControlGroup,
+    actions: NSArray
+) -> [Int: ShortpyAttachmentPath]? {
+    let branches = shortpyPlanBranches(plan: plan, group: group)
+    let branchIndexes = plan.targetBranches + plan.seedBranches
+    guard let maximumBranch = branchIndexes.max(),
+          maximumBranch < branches.count else {
         return nil
     }
-    guard let triggerArray = triggers as? NSArray else {
-        throw bridgeFailure("WFWorkflow unifiedAutomationTriggers returned \(objectClassName(triggers)), expected NSArray")
-    }
-    let records = NSMutableArray(capacity: triggerArray.count)
-    for index in 0..<triggerArray.count {
-        let trigger = triggerArray.object(at: index) as AnyObject
-        guard let serialized = performObjectSelector(trigger, "serializedRepresentation") else {
-            throw bridgeFailure("Unified trigger at index \(index) did not respond with serializedRepresentation")
+    var finalActions: [Int: NSDictionary] = [:]
+    var identifiers = Set<String>()
+    for branchIndex in Set(branchIndexes) {
+        guard let actionIndex = shortpyFinalActionIndex(
+            in: branches[branchIndex], actions: actions
+        ), let action = actions[actionIndex] as? NSDictionary,
+              let identifier = stringFromObject(
+                action["WFWorkflowActionIdentifier"] as AnyObject?
+              ) else {
+            return nil
         }
-        let plistValue = propertyListReadyValue(serialized)
-        guard let dictionary = plistValue as? NSDictionary else {
-            throw bridgeFailure("Unified trigger serializedRepresentation at index \(index) returned \(objectClassName(serialized)), expected NSDictionary")
-        }
-        records.add(dictionary)
+        finalActions[branchIndex] = action
+        identifiers.insert(identifier)
     }
-    return records
+    guard identifiers.count == 1 else {
+        return nil
+    }
+
+    var result: [Int: ShortpyAttachmentPath] = [:]
+    for targetBranch in plan.targetBranches {
+        guard let targetAction = finalActions[targetBranch] else {
+            return nil
+        }
+        let targetAttachments = shortpyActionOutputAttachments(
+            shortpyActionParameters(targetAction)
+        )
+        var candidates = Set<ShortpyAttachmentPath>()
+        for seedBranch in plan.seedBranches {
+            guard let seedAction = finalActions[seedBranch] else {
+                continue
+            }
+            let seedAttachments = shortpyActionOutputAttachments(
+                shortpyActionParameters(seedAction)
+            )
+            for (path, targetAttachment) in targetAttachments {
+                guard let seedAttachment = seedAttachments[path],
+                      let targetUUID = stringFromObject(
+                        targetAttachment["OutputUUID"] as AnyObject?
+                      ),
+                      targetUUID == stringFromObject(
+                        seedAttachment["OutputUUID"] as AnyObject?
+                      ) else {
+                    continue
+                }
+                candidates.insert(path)
+            }
+        }
+        guard candidates.count == 1, let path = candidates.first else {
+            return nil
+        }
+        result[targetBranch] = path
+    }
+    return result
 }
 
-private func workflowPlistDictionary(from workflow: AnyObject) throws -> (root: NSDictionary, actions: NSArray) {
-    guard let actionsObject = performObjectSelector(workflow, "actions"),
-          let actions = actionsObject as? NSArray else {
-        throw bridgeFailure("WFWorkflow did not return an NSArray from actions")
+private func shortpySerializedActionSnapshots(
+    _ workflowActions: NSArray
+) throws -> NSMutableArray {
+    let snapshots = NSMutableArray(capacity: workflowActions.count)
+    for index in 0..<workflowActions.count {
+        let action = workflowActions[index] as AnyObject
+        guard let identifier = stringFromObject(
+            performObjectSelector(action, "identifier")
+        ), !identifier.isEmpty else {
+            throw bridgeFailure(
+                "WFAction at index \(index) did not provide an identifier"
+            )
+        }
+        guard let serialized = performObjectSelector(action, "serializedParameters"),
+              let parameters = propertyListReadyValue(serialized) as? NSDictionary else {
+            throw bridgeFailure(
+                "WFAction \(identifier) at index \(index) did not provide serializedParameters"
+            )
+        }
+        snapshots.add(NSMutableDictionary(dictionary: [
+            "WFWorkflowActionIdentifier": identifier,
+            "WFWorkflowActionParameters": parameters,
+        ]))
     }
-
-    let serializedActions = NSMutableArray(capacity: actions.count)
-    for index in 0..<actions.count {
-        let action = actions.object(at: index) as AnyObject
-        guard let identifier = stringFromObject(performObjectSelector(action, "identifier")),
-              !identifier.isEmpty else {
-            throw bridgeFailure("WFAction at index \(index) did not return identifier")
-        }
-
-        let actionDictionary = NSMutableDictionary()
-        actionDictionary["WFWorkflowActionIdentifier"] = identifier as NSString
-        if let parameters = performObjectSelector(action, "serializedParameters") {
-            actionDictionary["WFWorkflowActionParameters"] = parameters
-        } else {
-            actionDictionary["WFWorkflowActionParameters"] = NSDictionary()
-        }
-        if let uuid = stringFromObject(performObjectSelector(action, "UUID")), !uuid.isEmpty {
-            actionDictionary["WFWorkflowActionUUID"] = uuid as NSString
-        }
-        if let groupingIdentifier = stringFromObject(performObjectSelector(action, "groupingIdentifier")),
-           !groupingIdentifier.isEmpty {
-            actionDictionary["WFWorkflowActionGroupingIdentifier"] = groupingIdentifier as NSString
-        }
-        serializedActions.add(actionDictionary)
-    }
-
-    let root = NSMutableDictionary()
-    root["WFWorkflowActions"] = serializedActions
-    root["WFWorkflowClientVersion"] = "5025.0.29" as NSString
-    copyWorkflowRootMetadata(from: workflow, to: root)
-    if root["WFWorkflowTriggers"] == nil,
-       let triggerRecords = try workflowTriggerRecords(from: workflow) {
-        root["WFWorkflowTriggers"] = triggerRecords
-    }
-    return (root, actions)
+    return snapshots
 }
 
-private func copyWorkflowRootMetadata(from workflow: AnyObject, to root: NSMutableDictionary) {
-    let selectorToRootKey = [
-        "workflowTypes": "WFWorkflowTypes",
-        "inputClasses": "WFWorkflowInputContentItemClasses",
-        "inputContentItemClasses": "WFWorkflowInputContentItemClasses",
-        "noInputBehavior": "WFWorkflowNoInputBehavior",
-    ]
-    for (selector, rootKey) in selectorToRootKey {
-        guard root[rootKey] == nil,
-              let value = performObjectSelector(workflow, selector) else {
+private func applyShortpyRecurrenceLowering(
+    actionSnapshots: NSArray,
+    workflowActions: NSArray,
+    plans: [ShortpyRecurrencePlan]
+) throws -> (actions: NSArray, report: [[String: Any]]) {
+    guard !plans.isEmpty else {
+        return (actionSnapshots, [])
+    }
+    guard let actions = propertyListReadyValue(actionSnapshots) as? NSMutableArray,
+          actions.count == workflowActions.count else {
+        throw bridgeFailure("Shortpy recurrence lowering requires aligned workflow actions")
+    }
+    let groups = shortpyControlGroups(actions)
+    var usedGroups = Set<Int>()
+    var report: [[String: Any]] = []
+
+    for (planIndex, plan) in plans.enumerated() {
+        var selected: (
+            index: Int,
+            group: ShortpyControlGroup,
+            branches: [Range<Int>],
+            paths: [Int: ShortpyAttachmentPath]
+        )?
+        for (groupIndex, group) in groups.enumerated() where !usedGroups.contains(groupIndex) {
+            if let paths = shortpyRecurrencePaths(
+                plan: plan, group: group, actions: actions
+            ) {
+                selected = (
+                    groupIndex,
+                    group,
+                    shortpyPlanBranches(plan: plan, group: group),
+                    paths
+                )
+                break
+            }
+        }
+        guard let selected,
+              let closeAction = actions[selected.group.closeIndex] as? NSDictionary,
+              let closeUUID = shortpyActionUUID(closeAction) else {
+            throw bridgeFailure(
+                "unsupportedLoopCarriedRecurrence: native workflow structure did not uniquely match recurrence plan \(planIndex)"
+            )
+        }
+        let closeWorkflowAction = workflowActions[selected.group.closeIndex] as AnyObject
+        var outputName = stringFromObject(
+            performObjectSelector(closeWorkflowAction, "outputName")
+        )
+        if outputName == nil {
+            outputName = shortpyActionOutputAttachments(actions)
+                .values
+                .first(where: {
+                    stringFromObject($0["OutputUUID"] as AnyObject?) == closeUUID
+                })
+                .flatMap {
+                    stringFromObject($0["OutputName"] as AnyObject?)
+                }
+        }
+        guard let outputName, !outputName.isEmpty else {
+            throw bridgeFailure(
+                "unsupportedLoopCarriedRecurrence: native control-flow output name is unavailable"
+            )
+        }
+
+        var rewrittenBranches: [[String: Any]] = []
+        for targetBranch in plan.targetBranches {
+            guard let path = selected.paths[targetBranch],
+                  let actionIndex = shortpyFinalActionIndex(
+                    in: selected.branches[targetBranch], actions: actions
+                  ), let action = actions[actionIndex] as? NSMutableDictionary,
+                  let parameters = action["WFWorkflowActionParameters"] as? NSMutableDictionary,
+                  let original = shortpyActionOutputAttachments(parameters)[path] else {
+                throw bridgeFailure(
+                    "unsupportedLoopCarriedRecurrence: recursive action attachment disappeared"
+                )
+            }
+            let replacement = NSMutableDictionary(dictionary: original)
+            let previousUUID = stringFromObject(
+                replacement["OutputUUID"] as AnyObject?
+            ) ?? ""
+            replacement["OutputUUID"] = closeUUID as NSString
+            replacement["OutputName"] = outputName as NSString
+            guard shortpySetValue(replacement, at: path, in: parameters) else {
+                throw bridgeFailure(
+                    "unsupportedLoopCarriedRecurrence: could not replace recursive action attachment"
+                )
+            }
+            rewrittenBranches.append([
+                "branch": targetBranch,
+                "actionIndex": actionIndex,
+                "parameterPath": path.components,
+                "fromOutputUUID": previousUUID,
+                "toOutputUUID": closeUUID,
+                "outputName": outputName,
+            ])
+        }
+        usedGroups.insert(selected.index)
+        report.append([
+            "plan": plan.json,
+            "openActionIndex": selected.group.openIndex,
+            "closeActionIndex": selected.group.closeIndex,
+            "rewrites": rewrittenBranches,
+        ])
+    }
+    return (actions, report)
+}
+
+private func applyShortpyRecurrenceToWorkflow(
+    _ workflow: AnyObject,
+    plans: [ShortpyRecurrencePlan]
+) throws -> [[String: Any]] {
+    guard !plans.isEmpty else {
+        return []
+    }
+    guard let workflowActions = performObjectSelector(workflow, "actions") as? NSArray else {
+        throw bridgeFailure("WFWorkflow did not return actions for native recurrence lowering")
+    }
+    let actionSnapshots = try shortpySerializedActionSnapshots(workflowActions)
+    let lowering = try applyShortpyRecurrenceLowering(
+        actionSnapshots: actionSnapshots,
+        workflowActions: workflowActions,
+        plans: plans
+    )
+    guard actionSnapshots.count == lowering.actions.count else {
+        throw bridgeFailure(
+            "unsupportedLoopCarriedRecurrence: native workflow action snapshot changed shape"
+        )
+    }
+
+    var mutatedActionIndices: [Int] = []
+    for index in 0..<lowering.actions.count {
+        guard let originalAction = actionSnapshots[index] as? NSDictionary,
+              let rewrittenAction = lowering.actions[index] as? NSDictionary,
+              let originalParameters = originalAction["WFWorkflowActionParameters"] as? NSDictionary,
+              let rewrittenParameters = rewrittenAction["WFWorkflowActionParameters"] as? NSDictionary else {
+            throw bridgeFailure(
+                "unsupportedLoopCarriedRecurrence: malformed action parameters at index \(index)"
+            )
+        }
+        if originalParameters.isEqual(rewrittenParameters) {
             continue
         }
-        let plistValue = propertyListReadyValue(value)
-        if let array = plistValue as? NSArray, array.count == 0 {
-            continue
+        guard bridgeShortpyReplaceWorkflowActionSerializedParameters(
+            workflow,
+            UInt64(index),
+            rewrittenParameters
+        ) else {
+            throw bridgeFailure(
+                "unsupportedLoopCarriedRecurrence: failed to reconstruct native WFAction at index \(index)"
+            )
         }
-        if let dictionary = plistValue as? NSDictionary, dictionary.count == 0 {
-            continue
-        }
-        root[rootKey] = plistValue
+        mutatedActionIndices.append(index)
+    }
+    guard !mutatedActionIndices.isEmpty else {
+        throw bridgeFailure(
+            "unsupportedLoopCarriedRecurrence: lowering plan produced no native action mutations"
+        )
+    }
+    return lowering.report.map { entry in
+        var nativeEntry = entry
+        nativeEntry["nativeMutation"] = [
+            "boundary": "WFAction initWithIdentifier:definition:serializedParameters:",
+            "actionIndices": mutatedActionIndices,
+            "before": "WFWorkflow.saveToRecord",
+        ]
+        return nativeEntry
     }
 }
 
@@ -1901,10 +2933,31 @@ private func workflowFromWorkflowFileRecordRoute(
     return (workflow, record)
 }
 
-private func pythonCodeFromWorkflow(_ workflow: AnyObject) throws -> (python: String, proxy: AnyObject, context: EditModeContextStorage) {
+private func pythonCodeFromWorkflow(
+    _ workflow: AnyObject,
+    pipeline: RuntimePipeline
+) throws -> PythonExportResult {
+    let exportWorkflow: AnyObject
+    var adaptedActionCount = UInt64(0)
+    switch pipeline {
+    case .native:
+        exportWorkflow = workflow
+    case .shortpy:
+        guard let adapted = bridgeShortpyMakeEditExportWorkflow(
+            workflow,
+            &adaptedActionCount
+        ) else {
+            throw bridgeFailure(
+                "ShortpyEditModeContext could not clone and adapt the native WFWorkflow"
+            )
+        }
+        exportWorkflow = adapted
+    }
     var context = EditModeContextStorage()
-    if let errorPointer = bridgeDescribeEditModeContextNil(&context, workflow) {
-        throw bridgeFailure("editModeContext(for:) threw Swift error pointer \(String(format: "%p", UInt(bitPattern: errorPointer)))")
+    if let errorPointer = bridgeDescribeEditModeContextNil(&context, exportWorkflow) {
+        throw bridgeFailure(
+            "\(pipeline == .native ? "editModeContext(for:)" : "ShortpyEditModeContext") threw Swift error pointer \(String(format: "%p", UInt(bitPattern: errorPointer)))"
+        )
     }
     guard let proxy = objectFromPointer(context.w2) else {
         throw bridgeFailure("editModeContext(for:) did not populate exportedWorkflow at word 2")
@@ -1912,16 +2965,27 @@ private func pythonCodeFromWorkflow(_ workflow: AnyObject) throws -> (python: St
     guard let python = stringFromObject(performObjectSelector(proxy, "pythonCode")), !python.isEmpty else {
         throw bridgeFailure("exportedWorkflow object class \(objectClassName(proxy)) did not return pythonCode")
     }
-    return (python, proxy, context)
+    return PythonExportResult(
+        python: python,
+        proxy: proxy,
+        context: context,
+        pipeline: pipeline,
+        adaptedActionCount: adaptedActionCount
+    )
 }
 
 private func plistToPythonPayload(
     from root: NSDictionary,
     inputLength: Int,
-    mode: String
+    mode: String,
+    pipeline: RuntimePipeline
 ) throws -> [String: Any] {
     let data = try plistData(from: root)
-    var payload = try workflowFileDataToPythonPayload(from: data, mode: mode)
+    var payload = try workflowFileDataToPythonPayload(
+        from: data,
+        mode: mode,
+        pipeline: pipeline
+    )
     payload["input_length"] = inputLength
     payload["plist_input"] = [
         "encoding": "json-dictionary-normalized-to-bplist",
@@ -1932,12 +2996,16 @@ private func plistToPythonPayload(
 
 private func workflowFileDataToPythonPayload(
     from data: Data,
-    mode: String
+    mode: String,
+    pipeline: RuntimePipeline
 ) throws -> [String: Any] {
     let root = try plistRootFromData(data)
     let file = try workflowFileFromData(data)
     let recordRoute = try workflowFromWorkflowFileRecordRoute(file)
-    let pythonResult = try pythonCodeFromWorkflow(recordRoute.workflow)
+    let pythonResult = try pythonCodeFromWorkflow(
+        recordRoute.workflow,
+        pipeline: pipeline
+    )
     let triggers = workflowTriggerMetadata(from: root)
     let importContext = rememberImportedPythonContext(
         source: pythonResult.python,
@@ -1948,6 +3016,15 @@ private func workflowFileDataToPythonPayload(
     return [
         "ok": true,
         "mode": mode,
+        "runtime_pipeline": pipeline.name,
+        "edit_mode_export": [
+            "kind": pipeline == .native
+                ? "DescribeAShortcutAgent.editModeContext(for:)"
+                : "ShortpyEditModeContext over an adapted WFWorkflow copy",
+            "adapted_action_count": Int(pythonResult.adaptedActionCount),
+            "global_hooks": false,
+            "executable_patches": false,
+        ],
         "input_length": data.count,
         "workflow_file": workflowFileSummary(file),
         "record_route": [
@@ -2497,97 +3574,25 @@ private func errorPolicyDecisions(from compiled: CompiledShortcut) -> [[String: 
     }
 
     let decisions = unsafeBitCast(compiled.errorPolicyDecisions, to: [ErrorPolicyDecision].self)
+    return errorPolicyDecisions(from: decisions)
+}
+
+private func errorPolicyDecisions(
+    from decisions: [ErrorPolicyDecision],
+    phase: String? = nil
+) -> [[String: Any]] {
     return decisions.enumerated().map { index, decision in
-        [
+        var payload: [String: Any] = [
             "index": index,
             "input_description": decision.inputDescription,
             "output_description": jsonValue(decision.outputDescription),
             "debug_log": decision.debugLog,
         ]
-    }
-}
-
-@_cdecl("bridge_swift_direct_run")
-public func bridge_swift_direct_run(
-    _ cSource: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cSource else {
-        return strdup(jsonString(["ok": false, "error": "missing source"]))
-    }
-
-    let source = String(cString: cSource)
-    let flags = UInt16(truncatingIfNeeded: rawFlags)
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source)
-        let catalogOverride = importContext?.proxyCatalog
-        let catalogSource = catalogOverride == nil
-            ? "defaultInitialCatalog"
-            : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")"
-        do {
-            let run = try await compileSource(
-                source,
-                catalogOverride: catalogOverride,
-                catalogSource: catalogSource
-            )
-            let policyDecisions = errorPolicyDecisions(from: run.compiled)
-            let workflow = workflowSummary(from: run.compiled)
-            box.payload = jsonString([
-                "ok": true,
-                "mode": "direct-pythonToShortcut",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "catalog": String(describing: type(of: run.catalog)),
-                "catalog_source": run.catalogSource,
-                "latest_import_context": importContextSummary(importContext),
-                "strictness_raw": Int(run.strictness),
-                "log_level_raw": Int(run.logLevel),
-                "drop_comments": true,
-                "validate_catalog_keys_only": false,
-                "error_configuration_prefix": shortHexPrefix(of: run.errorConfiguration),
-                "tool_visibility_mode": "any",
-                "tool_visibility_filter_prefix": shortHexPrefix(of: run.toolVisibility),
-                "flags_storage_size": MemoryLayout<FlagsStorage>.size,
-                "flags_storage_prefix": shortHexPrefix(of: run.flagsStorage),
-                "compiled_size": MemoryLayout<CompiledShortcut>.size,
-                "compiled_prefix": shortHexPrefix(of: run.compiled),
-                "compiled_words": [
-                    pointerString(run.compiled.trigger),
-                    pointerString(run.compiled.workflow),
-                    pointerString(run.compiled.errorPolicyDecisions),
-                ],
-                "workflow": workflow,
-                "error_policy_decision_count": policyDecisions.count,
-                "error_policy_decisions": policyDecisions,
-            ])
-        } catch {
-            let diagnostic = String(describing: error)
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "direct-pythonToShortcut",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "diagnostic": diagnostic,
-                "error_type": String(describing: type(of: error)),
-            ])
+        if let phase {
+            payload["phase"] = phase
         }
-        semaphore.signal()
+        return payload
     }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "direct-pythonToShortcut",
-            "flags": Int(flags),
-            "source_length": source.utf8.count,
-            "error": "direct compiler call timed out",
-        ])
-    }
-
-    return strdup(box.payload)
 }
 
 @_cdecl("bridge_swift_agent_toolbox_init_dump")
@@ -2835,192 +3840,176 @@ public func bridge_swift_toolrenderer_structured_metadata() -> UnsafeMutablePoin
     return strdup(box.payload)
 }
 
-@_cdecl("bridge_swift_python_to_plist")
-public func bridge_swift_python_to_plist(
-    _ cSource: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cSource else {
-        return strdup(jsonString(["ok": false, "error": "missing source"]))
-    }
-
-    let source = String(cString: cSource)
+private func pythonToBplistPayload(
+    source: String,
+    rawFlags: UInt64,
+    pipeline: RuntimePipeline,
+    explicitCatalog: AnyObject? = nil,
+    explicitCatalogSource: String? = nil
+) async -> String {
     let flags = UInt16(truncatingIfNeeded: rawFlags)
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source)
-        let catalogOverride = importContext?.proxyCatalog
-        let catalogSource = catalogOverride == nil
-            ? "defaultInitialCatalog"
-            : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")"
-        do {
-            let run = try await compileSource(
-                source,
-                catalogOverride: catalogOverride,
-                catalogSource: catalogSource
-            )
-            let compiledObjects = compiledShortcutObjectView(run.compiled)
-            guard let workflow = compiledObjects.preferredWorkflow else {
-                throw bridgeFailure("compiled shortcut did not produce a WFWorkflow")
-            }
-            let plistResult = try workflowPlistDictionary(from: workflow)
-            let compiledTrigger = compiledObjects.preferredTrigger
-            let compilerTriggers = workflowUnifiedTriggers(workflow, compiledTrigger: compiledTrigger) as? NSArray
-            let plistRoot = plistResult.root
-            let policyDecisions = errorPolicyDecisions(from: run.compiled)
-            box.payload = jsonString([
-                "ok": true,
-                "mode": "python-to-workflow-plist",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "catalog": String(describing: type(of: run.catalog)),
-                "catalog_source": run.catalogSource,
-                "latest_import_context": importContextSummary(importContext),
-                "workflow": workflowSummary(from: run.compiled),
-                "plist_builder": [
-                    "kind": "compiled WFWorkflow actions plus WFAction.serializedParameters",
-                    "workflow_file_export": "not used",
-                    "unifiedAutomationTriggers_serialized": plistRoot["WFWorkflowTriggers"] != nil,
-                    "trigger_source": plistRoot["WFWorkflowTriggers"] == nil
-                        ? "not-present"
-                        : "WFWorkflow.unifiedAutomationTriggers -> WFNewTrigger.serializedRepresentation",
-                    "compiled_trigger_export": compiledTrigger == nil ? "not-present" : "guarded-off",
-                    "compiled_trigger_export_reason": compiledTrigger == nil
-                        ? "CompiledShortcut.trigger was nil; workflow-level unifiedAutomationTriggers are the native trigger source"
-                        : "CompiledShortcut.trigger is not used when workflow-level unifiedAutomationTriggers are available",
-                    "compiled_trigger": objectSummary(compiledTrigger),
-                    "compiled_trigger_metadata": objectSummary(compilerTriggers as AnyObject?),
-                    "actions_class": objectClassName(plistResult.actions),
-                    "actions_pointer": objectPointerString(plistResult.actions),
-                ],
-                "plist_summary": rootSummary(plistRoot),
-                "plist": jsonReadyValue(plistRoot),
-                "error_policy_decision_count": policyDecisions.count,
-                "error_policy_decisions": policyDecisions,
-            ])
-        } catch {
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "python-to-workflow-plist",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
-            ])
+    let importContext = importedPythonContext(matchingRefsIn: source)
+    let catalogOverride = explicitCatalog ?? importContext?.proxyCatalog
+    let catalogSource = explicitCatalogSource ?? (catalogOverride == nil
+        ? "defaultInitialCatalog"
+        : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")")
+    do {
+        let run = try await compileWithRuntimePipeline(
+            source,
+            pipeline: pipeline,
+            catalogOverride: catalogOverride,
+            catalogSource: catalogSource
+        )
+        let compiledObjects = compiledShortcutObjectView(run.compiled)
+        guard let workflow = compiledObjects.preferredWorkflow else {
+            throw bridgeFailure("compiled shortcut did not produce a WFWorkflow")
         }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "python-to-workflow-plist",
+        let fileDataResult = try workflowRecordFileDataPayloadFromWorkflow(
+            workflow,
+            trigger: compiledObjects.preferredTrigger,
+            callSaveToRecord: true,
+            recurrencePlans: run.recurrencePlans
+        )
+        return jsonString([
+            "ok": true,
+            "mode": "python-to-workflow-file-data",
+            "runtime_pipeline": pipeline.name,
             "flags": Int(flags),
             "source_length": source.utf8.count,
-            "error": "python-to-plist call timed out",
+            "catalog": String(describing: type(of: run.catalog)),
+            "catalog_source": run.catalogSource,
+            "latest_import_context": importContextSummary(importContext),
+            "pipeline": run.details.merging([
+                "recurrenceLowering": fileDataResult.fileSummary[
+                    "shortpy_recurrence_lowering"
+                ] ?? [],
+            ]) { _, new in new },
+            "workflow": [
+                "workflow": pointerOnlySummary(workflow),
+                "trigger": pointerOnlySummary(compiledObjects.preferredTrigger),
+            ],
+            "plist_builder": [
+                "kind": "native WFWorkflowRecord.fileRepresentation whole-file serializer",
+                "serializer_path": "WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
+                "workflow_file": fileDataResult.fileSummary,
+                "root": fileDataResult.rootSummary,
+                "actions": fileDataResult.actionsSummary,
+                "unifiedAutomationTriggers": fileDataResult.triggersSummary,
+            ],
+            "plist_payload": [
+                "format": "com.apple.binary-property-list",
+                "encoding": "base64",
+                "length": fileDataResult.data.count,
+                "data": fileDataResult.data.base64EncodedString(),
+            ],
+            "error_policy_decision_count": run.policyDecisions.count,
+            "error_policy_decisions": run.policyDecisions,
+        ])
+    } catch {
+        return jsonString([
+            "ok": false,
+            "mode": "python-to-workflow-file-data",
+            "runtime_pipeline": pipeline.name,
+            "flags": Int(flags),
+            "source_length": source.utf8.count,
+            "diagnostic": String(describing: error),
+            "error_type": String(describing: type(of: error)),
         ])
     }
-
-    return strdup(box.payload)
 }
 
-@_cdecl("bridge_swift_python_to_bplist")
-public func bridge_swift_python_to_bplist(
+@_cdecl("bridge_swift_pipeline_python_to_bplist")
+public func bridge_swift_pipeline_python_to_bplist(
     _ cSource: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
+    _ rawFlags: UInt64,
+    _ rawPipeline: UInt64
 ) -> UnsafeMutablePointer<CChar>? {
     guard let cSource else {
         return strdup(jsonString(["ok": false, "error": "missing source"]))
     }
-
     let source = String(cString: cSource)
-    let flags = UInt16(truncatingIfNeeded: rawFlags)
     let semaphore = DispatchSemaphore(value: 0)
     let box = ResultBox()
-
     Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source)
-        let catalogOverride = importContext?.proxyCatalog
-        let catalogSource = catalogOverride == nil
-            ? "defaultInitialCatalog"
-            : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")"
         do {
-            let run = try await compileSource(
-                source,
-                catalogOverride: catalogOverride,
-                catalogSource: catalogSource
+            let pipeline = try RuntimePipeline.decode(rawPipeline)
+            box.payload = await pythonToBplistPayload(
+                source: source,
+                rawFlags: rawFlags,
+                pipeline: pipeline
             )
-            let compiledObjects = compiledShortcutObjectView(run.compiled)
-            guard let workflow = compiledObjects.preferredWorkflow else {
-                throw bridgeFailure("compiled shortcut did not produce a WFWorkflow")
-            }
-            let fileDataResult = try workflowRecordFileDataPayloadFromWorkflow(
-                workflow,
-                trigger: compiledObjects.preferredTrigger,
-                callSaveToRecord: true
-            )
-            let policyDecisions = errorPolicyDecisions(from: run.compiled)
-            let plistBase64 = fileDataResult.data.base64EncodedString()
-            box.payload = jsonString([
-                "ok": true,
-                "mode": "python-to-workflow-file-data",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "catalog": String(describing: type(of: run.catalog)),
-                "catalog_source": run.catalogSource,
-                "latest_import_context": importContextSummary(importContext),
-                "workflow": [
-                    "workflow": pointerOnlySummary(workflow),
-                    "trigger": pointerOnlySummary(compiledObjects.preferredTrigger),
-                ],
-                "plist_builder": [
-                    "kind": "native WFWorkflowRecord.fileRepresentation whole-file serializer",
-                    "workflow_file_export": "enabled",
-                    "workflow_file_import_primitive": "WFWorkflowFile initWithFileData:name:error:",
-                    "unifiedAutomationTriggers_serialized": Bool(fileDataResult.triggersSummary["present"] as? Bool ?? false),
-                    "trigger_source": Bool(fileDataResult.triggersSummary["present"] as? Bool ?? false)
-                        ? "WFWorkflowRecord.fileRepresentation serialized WFWorkflowTriggers"
-                        : "not-present",
-                    "serializer_path": "ShortcutsLanguage.pythonToShortcut -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
-                    "workflow_file": fileDataResult.fileSummary,
-                    "root": fileDataResult.rootSummary,
-                    "actions": fileDataResult.actionsSummary,
-                    "unifiedAutomationTriggers": fileDataResult.triggersSummary,
-                ],
-                "plist_payload": [
-                    "format": "com.apple.binary-property-list",
-                    "encoding": "base64",
-                    "length": fileDataResult.data.count,
-                    "data": plistBase64,
-                ],
-                "error_policy_decision_count": policyDecisions.count,
-                "error_policy_decisions": policyDecisions,
-            ])
         } catch {
             box.payload = jsonString([
                 "ok": false,
                 "mode": "python-to-workflow-file-data",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
+                "runtime_pipeline_raw": Int(rawPipeline),
                 "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
             ])
         }
         semaphore.signal()
     }
-
     if semaphore.wait(timeout: .now() + 30) == .timedOut {
         box.payload = jsonString([
             "ok": false,
             "mode": "python-to-workflow-file-data",
-            "flags": Int(flags),
-            "source_length": source.utf8.count,
+            "runtime_pipeline_raw": Int(rawPipeline),
             "error": "python-to-workflow-file-data call timed out",
         ])
     }
+    return strdup(box.payload)
+}
 
+@_cdecl("bridge_swift_pipeline_python_to_bplist_with_catalog_metadata")
+public func bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
+    _ cSource: UnsafePointer<CChar>?,
+    _ cCatalogMetadata: UnsafePointer<CChar>?,
+    _ rawFlags: UInt64,
+    _ rawPipeline: UInt64
+) -> UnsafeMutablePointer<CChar>? {
+    guard let cSource, let cCatalogMetadata else {
+        return strdup(jsonString([
+            "ok": false,
+            "error": "missing source or catalog metadata",
+        ]))
+    }
+    let source = String(cString: cSource)
+    let catalogMetadataText = String(cString: cCatalogMetadata)
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = ResultBox()
+    Task.detached {
+        do {
+            let pipeline = try RuntimePipeline.decode(rawPipeline)
+            guard let catalogData = catalogMetadataText.data(using: .utf8) else {
+                throw bridgeFailure("catalog metadata was not valid UTF-8")
+            }
+            let catalog = try pythonWorkflowProxyDecodeCatalog(catalogData)
+            box.payload = await pythonToBplistPayload(
+                source: source,
+                rawFlags: rawFlags,
+                pipeline: pipeline,
+                explicitCatalog: catalog,
+                explicitCatalogSource: "WFPythonWorkflowProxy.decodeCatalog(from:) input"
+            )
+        } catch {
+            box.payload = jsonString([
+                "ok": false,
+                "mode": "python-to-workflow-file-data-with-catalog-metadata",
+                "runtime_pipeline_raw": Int(rawPipeline),
+                "catalog_metadata_length": catalogMetadataText.utf8.count,
+                "diagnostic": String(describing: error),
+                "error_type": String(describing: type(of: error)),
+            ])
+        }
+        semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + 30) == .timedOut {
+        box.payload = jsonString([
+            "ok": false,
+            "mode": "python-to-workflow-file-data-with-catalog-metadata",
+            "runtime_pipeline_raw": Int(rawPipeline),
+            "error": "python-to-workflow-file-data catalog call timed out",
+        ])
+    }
     return strdup(box.payload)
 }
 
@@ -3033,7 +4022,7 @@ private func recordFileProbePayload(
     importContext: ImportedPythonContext?
 ) async -> String {
     do {
-        let run = try await compileSource(
+        let run = try await ShortpyToShortcut(
             source,
             catalogOverride: catalogOverride,
             catalogSource: catalogSource
@@ -3046,7 +4035,8 @@ private func recordFileProbePayload(
         let fileDataResult = try workflowRecordFileDataPayloadFromWorkflow(
             workflow,
             trigger: compiledObjects.preferredTrigger,
-            callSaveToRecord: callSaveToRecord
+            callSaveToRecord: callSaveToRecord,
+            recurrencePlans: run.recurrencePlans
         )
         appendRecordFileProbeStage("before plist base64")
         let plistBase64 = fileDataResult.data.base64EncodedString()
@@ -3062,6 +4052,14 @@ private func recordFileProbePayload(
             "catalog": String(describing: type(of: run.catalog)),
             "catalog_source": run.catalogSource,
             "latest_import_context": importContextSummary(importContext),
+            "shortpy_pipeline": [
+                "entrypoint": "ShortpyToShortcut",
+                "passes": run.passes.map(\.json),
+                "recurrencePlans": run.recurrencePlans.map(\.json),
+                "recurrenceLowering": fileDataResult.fileSummary[
+                    "shortpy_recurrence_lowering"
+                ] ?? [],
+            ],
             "workflow": [
                 "workflow": pointerOnlySummary(workflow),
                 "trigger": pointerOnlySummary(compiledObjects.preferredTrigger),
@@ -3069,8 +4067,8 @@ private func recordFileProbePayload(
             "plist_builder": [
                 "kind": "native WFWorkflowRecord.fileRepresentation whole-file serializer probe",
                 "path": callSaveToRecord
-                    ? "ShortcutsLanguage.pythonToShortcut -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:"
-                    : "ShortcutsLanguage.pythonToShortcut -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
+                    ? "ShortpyToShortcut -> PythonToIR -> Shortpy IR passes -> native IR passes -> IRToShortcut -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:"
+                    : "ShortpyToShortcut -> PythonToIR -> Shortpy IR passes -> native IR passes -> IRToShortcut -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
                 "static_evidence": "LLDB proved saveToRecord asserts the workflow databaseAccessQueue; the bridge now performs the same queue hop directly before calling saveToRecord. WFWorkflowRecord.fileRepresentation initializes WFWorkflowFile storage then calls WFRecord.writeToStorage:error:.",
                 "workflow_file": fileDataResult.fileSummary,
                 "root": fileDataResult.rootSummary,
@@ -3224,157 +4222,59 @@ public func bridge_swift_python_record_file_probe_with_catalog_metadata(
     return copied
 }
 
-@_cdecl("bridge_swift_python_to_bplist_with_catalog_metadata")
-public func bridge_swift_python_to_bplist_with_catalog_metadata(
-    _ cSource: UnsafePointer<CChar>?,
-    _ cCatalogMetadata: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
+@_cdecl("bridge_swift_pipeline_plist_to_python")
+public func bridge_swift_pipeline_plist_to_python(
+    _ cJson: UnsafePointer<CChar>?,
+    _ rawPipeline: UInt64
 ) -> UnsafeMutablePointer<CChar>? {
-    guard let cSource else {
-        return strdup(jsonString(["ok": false, "error": "missing source"]))
-    }
-    guard let cCatalogMetadata else {
-        return strdup(jsonString(["ok": false, "error": "missing catalog metadata"]))
-    }
-
-    let source = String(cString: cSource)
-    let catalogMetadataText = String(cString: cCatalogMetadata)
-    let flags = UInt16(truncatingIfNeeded: rawFlags)
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        do {
-            guard let catalogData = catalogMetadataText.data(using: .utf8) else {
-                throw bridgeFailure("catalog metadata was not valid UTF-8")
-            }
-            let catalog = try pythonWorkflowProxyDecodeCatalog(catalogData)
-            let run = try await compileSource(
-                source,
-                catalogOverride: catalog,
-                catalogSource: "WFPythonWorkflowProxy.decodeCatalog(from:) input"
-            )
-            let compiledObjects = compiledShortcutObjectView(run.compiled)
-            guard let workflow = compiledObjects.preferredWorkflow else {
-                throw bridgeFailure("compiled shortcut did not produce a WFWorkflow")
-            }
-            let fileDataResult = try workflowRecordFileDataPayloadFromWorkflow(
-                workflow,
-                trigger: compiledObjects.preferredTrigger,
-                callSaveToRecord: true
-            )
-            let policyDecisions = errorPolicyDecisions(from: run.compiled)
-            let plistBase64 = fileDataResult.data.base64EncodedString()
-            box.payload = jsonString([
-                "ok": true,
-                "mode": "python-to-workflow-file-data-with-catalog-metadata",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "catalog_metadata_length": catalogMetadataText.utf8.count,
-                "catalog": objectSummary(catalog),
-                "catalog_source": run.catalogSource,
-                "workflow": [
-                    "workflow": pointerOnlySummary(workflow),
-                    "trigger": pointerOnlySummary(compiledObjects.preferredTrigger),
-                ],
-                "plist_builder": [
-                    "kind": "native WFWorkflowRecord.fileRepresentation whole-file serializer",
-                    "workflow_file_export": "enabled",
-                    "workflow_file_import_primitive": "WFWorkflowFile initWithFileData:name:error:",
-                    "unifiedAutomationTriggers_serialized": Bool(fileDataResult.triggersSummary["present"] as? Bool ?? false),
-                    "trigger_source": Bool(fileDataResult.triggersSummary["present"] as? Bool ?? false)
-                        ? "WFWorkflowRecord.fileRepresentation serialized WFWorkflowTriggers"
-                        : "not-present",
-                    "serializer_path": "ShortcutsLanguage.pythonToShortcut -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
-                    "workflow_file": fileDataResult.fileSummary,
-                    "root": fileDataResult.rootSummary,
-                    "actions": fileDataResult.actionsSummary,
-                    "unifiedAutomationTriggers": fileDataResult.triggersSummary,
-                ],
-                "plist_payload": [
-                    "format": "com.apple.binary-property-list",
-                    "encoding": "base64",
-                    "length": fileDataResult.data.count,
-                    "data": plistBase64,
-                ],
-                "error_policy_decision_count": policyDecisions.count,
-                "error_policy_decisions": policyDecisions,
-            ])
-        } catch {
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "python-to-workflow-file-data-with-catalog-metadata",
-                "flags": Int(flags),
-                "source_length": source.utf8.count,
-                "catalog_metadata_length": catalogMetadataText.utf8.count,
-                "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
-            ])
-        }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "python-to-workflow-file-data-with-catalog-metadata",
-            "flags": Int(flags),
-            "source_length": source.utf8.count,
-            "catalog_metadata_length": catalogMetadataText.utf8.count,
-            "error": "python-to-bplist catalog metadata call timed out",
-        ])
-    }
-
-    return strdup(box.payload)
-}
-
-@_cdecl("bridge_swift_plist_to_python")
-public func bridge_swift_plist_to_python(_ cJson: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
     guard let cJson else {
         return strdup(jsonString(["ok": false, "error": "missing plist JSON"]))
     }
-
     let text = String(cString: cJson)
     do {
+        let pipeline = try RuntimePipeline.decode(rawPipeline)
         let root = try plistRootFromJsonText(text)
-        let payload = jsonString(try plistToPythonPayload(
+        return strdup(jsonString(try plistToPythonPayload(
             from: root,
             inputLength: text.utf8.count,
-            mode: "workflow-plist-to-python"
-        ))
-        return strdup(payload)
+            mode: "workflow-plist-to-python",
+            pipeline: pipeline
+        )))
     } catch {
         return strdup(jsonString([
             "ok": false,
             "mode": "workflow-plist-to-python",
             "input_length": text.utf8.count,
+            "runtime_pipeline_raw": Int(rawPipeline),
             "diagnostic": String(describing: error),
             "error_type": String(describing: type(of: error)),
         ]))
     }
 }
 
-@_cdecl("bridge_swift_bplist_to_python")
-public func bridge_swift_bplist_to_python(
+@_cdecl("bridge_swift_pipeline_bplist_to_python")
+public func bridge_swift_pipeline_bplist_to_python(
     _ cBytes: UnsafePointer<UInt8>?,
-    _ length: Int
+    _ length: Int,
+    _ rawPipeline: UInt64
 ) -> UnsafeMutablePointer<CChar>? {
     guard let cBytes, length >= 0 else {
         return strdup(jsonString(["ok": false, "error": "missing plist bytes"]))
     }
-
     do {
+        let pipeline = try RuntimePipeline.decode(rawPipeline)
         let data = Data(bytes: cBytes, count: length)
-        let payload = jsonString(try workflowFileDataToPythonPayload(
+        return strdup(jsonString(try workflowFileDataToPythonPayload(
             from: data,
-            mode: "workflow-file-data-to-python"
-        ))
-        return strdup(payload)
+            mode: "workflow-file-data-to-python",
+            pipeline: pipeline
+        )))
     } catch {
         return strdup(jsonString([
             "ok": false,
             "mode": "workflow-file-data-to-python",
             "input_length": length,
+            "runtime_pipeline_raw": Int(rawPipeline),
             "diagnostic": String(describing: error),
             "error_type": String(describing: type(of: error)),
         ]))

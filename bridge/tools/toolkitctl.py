@@ -16,13 +16,6 @@ from pathlib import Path
 DEFAULT_DEVICE = "booted"
 HOST_TOOLKIT_ACTIVE = Path.home() / "Library/Shortcuts/ToolKit/Tools-active"
 ADJUSTABLE_PYTHON_NAME_TABLES = ("Tools", "Triggers")
-SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES = {
-    "is.workflow.actions.dictionary": "dictionary",
-    "is.workflow.actions.gettext": "text",
-    "is.workflow.actions.getvalueforkey": "get_dictionary_value",
-    "is.workflow.actions.list": "list",
-    "is.workflow.actions.nothing": "nothing",
-}
 TOOL_VISIBILITY_VISIBLE_FOR_SHORTCUTS = 0x1
 TOOL_VISIBILITY_APPROVED = 0x4
 REQUIRED_TOOLRENDERER_VISIBILITY_FLAGS = (
@@ -649,97 +642,6 @@ def adjust_duplicate_python_names(conn: sqlite3.Connection) -> dict:
     return report
 
 
-def repair_shortcuts_language_intrinsic_python_names(conn: sqlite3.Connection) -> dict:
-    report = {
-        "source": "ShortcutsLanguage AST intrinsic action names",
-        "candidate_count": len(SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES),
-        "matched_count": 0,
-        "change_count": 0,
-        "collision_rename_count": 0,
-        "changes": [],
-        "collision_renames": [],
-        "missing_action_ids": [],
-    }
-    if not adjustable_table(conn, "Tools"):
-        report["skipped"] = True
-        report["reason"] = "Tools table does not expose rowId, id, and pythonName"
-        return report
-
-    conn.row_factory = sqlite3.Row
-    used = {
-        row[0]
-        for row in conn.execute(
-            "SELECT pythonName FROM Tools WHERE pythonName IS NOT NULL AND pythonName != ''"
-        )
-    }
-    for identifier, intrinsic_name in SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES.items():
-        target = conn.execute(
-            "SELECT rowId, id, pythonName FROM Tools WHERE id = ? ORDER BY rowId LIMIT 1",
-            (identifier,),
-        ).fetchone()
-        if target is None:
-            report["missing_action_ids"].append(identifier)
-            continue
-        report["matched_count"] += 1
-
-        collisions = list(conn.execute(
-            "SELECT rowId, id, pythonName FROM Tools WHERE pythonName = ? AND rowId != ? ORDER BY rowId",
-            (intrinsic_name, target["rowId"]),
-        ))
-        if collisions:
-            used.discard(intrinsic_name)
-        for collision in collisions:
-            collision_id = identifier_text(collision["id"])
-            replacement = unique_python_name(
-                canonical_python_name(collision_id, collision["pythonName"]),
-                used,
-                collision["rowId"],
-            )
-            conn.execute(
-                "UPDATE Tools SET pythonName = ? WHERE rowId = ?",
-                (replacement, collision["rowId"]),
-            )
-            report["collision_renames"].append({
-                "rowId": collision["rowId"],
-                "id": collision_id,
-                "oldPythonName": collision["pythonName"],
-                "newPythonName": replacement,
-                "reservedForActionId": identifier,
-            })
-
-        old_name = target["pythonName"]
-        used.add(intrinsic_name)
-        if old_name == intrinsic_name:
-            continue
-        conn.execute(
-            "UPDATE Tools SET pythonName = ? WHERE rowId = ?",
-            (intrinsic_name, target["rowId"]),
-        )
-        report["changes"].append({
-            "rowId": target["rowId"],
-            "id": identifier,
-            "oldPythonName": old_name,
-            "newPythonName": intrinsic_name,
-        })
-
-    report["change_count"] = len(report["changes"])
-    report["collision_rename_count"] = len(report["collision_renames"])
-    return report
-
-
-def needs_shortcuts_language_intrinsic_name_repair(conn: sqlite3.Connection) -> bool:
-    if not adjustable_table(conn, "Tools"):
-        return False
-    for identifier, intrinsic_name in SHORTCUTS_LANGUAGE_INTRINSIC_ACTION_NAMES.items():
-        row = conn.execute(
-            "SELECT pythonName FROM Tools WHERE id = ? ORDER BY rowId LIMIT 1",
-            (identifier,),
-        ).fetchone()
-        if row is not None and row[0] != intrinsic_name:
-            return True
-    return False
-
-
 TOOLRENDERER_NEUTRAL_CONTAINER_BUNDLE_VERSION = "shortpy-toolrenderer-names-v1"
 
 
@@ -1174,7 +1076,6 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
     try:
         needs_adjustment = (
             has_duplicate_python_names(conn)
-            or needs_shortcuts_language_intrinsic_name_repair(conn)
             or needs_toolrenderer_name_alignment(conn)
             or needs_toolrenderer_visibility_adjustment(conn)
         )
@@ -1186,7 +1087,6 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
     try:
         overlay = overlay_python_names(conn, overlay_path) if overlay_path else None
         adjustment = adjust_duplicate_python_names(conn)
-        intrinsic_name_repair = repair_shortcuts_language_intrinsic_python_names(conn)
         toolrenderer_name_alignment = align_toolrenderer_python_names(conn)
         visibility_adjustment = adjust_toolrenderer_visibility(conn)
         conn.commit()
@@ -1200,14 +1100,11 @@ def adjust_sqlite_in_place(sqlite_path: Path, backup: bool = True, overlay_sourc
         "backup": target_description(created_backup) if created_backup else None,
         "python_name_overlay": overlay,
         "duplicate_adjustment": adjustment,
-        "shortcuts_language_intrinsic_name_repair": intrinsic_name_repair,
         "toolrenderer_name_alignment": toolrenderer_name_alignment,
         "toolrenderer_visibility_adjustment": visibility_adjustment,
         "restart_required": bool(
             (overlay or {}).get("change_count", 0) > 0
             or adjustment.get("change_count", 0) > 0
-            or intrinsic_name_repair.get("change_count", 0) > 0
-            or intrinsic_name_repair.get("collision_rename_count", 0) > 0
             or toolrenderer_name_alignment.get("changed_count", 0) > 0
             or visibility_adjustment.get("changed_count", 0) > 0
         ),
@@ -1225,7 +1122,6 @@ def prepare_adjusted_sqlite(sqlite_path: Path, out: Path | None, out_dir: Path |
         referential_closure_repair = repair_referential_enumeration_closure(conn)
         overlay = overlay_python_names(conn, source) if base else None
         adjustment = adjust_duplicate_python_names(conn)
-        intrinsic_name_repair = repair_shortcuts_language_intrinsic_python_names(conn)
         toolrenderer_name_alignment = align_toolrenderer_python_names(conn)
         visibility_adjustment = adjust_toolrenderer_visibility(conn)
         conn.commit()
@@ -1240,7 +1136,6 @@ def prepare_adjusted_sqlite(sqlite_path: Path, out: Path | None, out_dir: Path |
         "referential_closure_repair": referential_closure_repair,
         "python_name_overlay": overlay,
         "duplicate_adjustment": adjustment,
-        "shortcuts_language_intrinsic_name_repair": intrinsic_name_repair,
         "toolrenderer_name_alignment": toolrenderer_name_alignment,
         "toolrenderer_visibility_adjustment": visibility_adjustment,
     }
@@ -1379,7 +1274,6 @@ def activate_adjusted(device: str, sqlite_path: Path, out_dir: Path | None, out:
         "referential_closure_repair": prepared["referential_closure_repair"],
         "python_name_overlay": prepared["python_name_overlay"],
         "duplicate_adjustment": prepared["duplicate_adjustment"],
-        "shortcuts_language_intrinsic_name_repair": prepared["shortcuts_language_intrinsic_name_repair"],
         "toolrenderer_name_alignment": prepared["toolrenderer_name_alignment"],
         "toolrenderer_visibility_adjustment": prepared["toolrenderer_visibility_adjustment"],
         "replacement": replacement,

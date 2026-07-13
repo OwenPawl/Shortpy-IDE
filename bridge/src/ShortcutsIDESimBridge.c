@@ -18,7 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BRIDGE_VERSION "sim-0.1.27-sqlite-visible-shortcuts"
+#define BRIDGE_VERSION "sim-0.1.28-shortpy-runtime-pipeline"
 #define SOCKET_NAME "shortcuts-ide-bridge-sim.sock"
 #define DEFAULT_SOCKET_PATH "/tmp/" SOCKET_NAME
 #define DEFAULT_LOG_PATH "/tmp/shortcuts-ide-bridge-sim.log"
@@ -45,17 +45,21 @@
 #define SHORTCUTS_GENERATOR_METADATA                                           \
   "AssetData/toolEmbeddingDatabase.json"
 
-extern char *bridge_swift_direct_run(const char *source, uint64_t flags);
-extern char *bridge_swift_python_to_plist(const char *source, uint64_t flags);
-extern char *bridge_swift_plist_to_python(const char *plist_json);
-extern char *bridge_swift_python_to_bplist(const char *source, uint64_t flags);
-extern char *bridge_swift_python_to_bplist_with_catalog_metadata(
-    const char *source, const char *catalog_metadata, uint64_t flags);
+extern char *bridge_swift_pipeline_python_to_bplist(const char *source,
+                                                     uint64_t flags,
+                                                     uint64_t pipeline);
+extern char *bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
+    const char *source, const char *catalog_metadata, uint64_t flags,
+    uint64_t pipeline);
 extern char *bridge_swift_python_record_file_probe(const char *source,
                                                    uint64_t flags);
 extern char *bridge_swift_python_record_file_probe_with_catalog_metadata(
     const char *source, const char *catalog_metadata, uint64_t flags);
-extern char *bridge_swift_bplist_to_python(const uint8_t *bytes, size_t len);
+extern char *bridge_swift_pipeline_plist_to_python(const char *plist_json,
+                                                    uint64_t pipeline);
+extern char *bridge_swift_pipeline_bplist_to_python(const uint8_t *bytes,
+                                                     size_t len,
+                                                     uint64_t pipeline);
 extern char *bridge_swift_agent_toolbox_query(const char *query,
                                               const char *kind,
                                               uint64_t limit);
@@ -410,13 +414,12 @@ static void status_json(char *response, size_t cap) {
            "\"pending_generation\":%llu,"
            "\"last_event\":\"%s\","
            "\"commands\":[\"status\",\"last\",\"clear\",\"set-source-b64\","
-           "\"direct-run-b64\",\"direct-run-b64-flags\","
-           "\"python-to-plist-b64-flags\",\"plist-to-python-b64\","
-           "\"python-to-bplist-b64-flags\","
-           "\"python-to-bplist-catalog-b64-flags\","
+           "\"pipeline-python-to-bplist-b64-flags\","
+           "\"pipeline-python-to-bplist-catalog-b64-flags\","
+           "\"pipeline-plist-to-python-b64\","
+           "\"pipeline-plist-data-to-python-b64\","
            "\"record-file-probe-b64-flags\","
            "\"record-file-probe-catalog-b64-flags\","
-           "\"plist-data-to-python-b64\","
            "\"agent-toolbox-init-dump\",\"agent-toolbox-query-b64\","
            "\"agent-toolbox-query-mainactor-b64\","
            "\"resolve-entity-b64\","
@@ -472,44 +475,6 @@ static bool parse_flags_payload(const char *cmd, const char *prefix,
   return true;
 }
 
-static void handle_source_command(const char *event, const char *cmd,
-                                  const char *payload, uint64_t flags,
-                                  char *response, size_t cap,
-                                  char *(*runner)(const char *, uint64_t)) {
-  uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
-  if (!decoded) {
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"failed to allocate source buffer\"}");
-    return;
-  }
-  ssize_t n = decode_base64(payload, decoded, MAX_SOURCE);
-  if (n < 0) {
-    free(decoded);
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"invalid base64 or source too large\"}");
-    return;
-  }
-  decoded[n] = 0;
-
-  char *result = runner((const char *)decoded, flags);
-  if (!result) {
-    free(decoded);
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"%s runner returned null\"}", event);
-    return;
-  }
-
-  char source_prefix[128];
-  snprintf(source_prefix, sizeof(source_prefix), "%s flags=%llu", event,
-           (unsigned long long)flags);
-  remember_result(event, source_prefix, (const char *)decoded, (size_t)n, result);
-  append_log("%s flags=%llu length=%zd", event, (unsigned long long)flags, n);
-  strlcpy(response, result, cap);
-  free(result);
-  free(decoded);
-  (void)cmd;
-}
-
 static void handle_source_command_uncached(const char *event, const char *cmd,
                                            const char *payload, uint64_t flags,
                                            char *response, size_t cap,
@@ -547,6 +512,88 @@ static void handle_source_command_uncached(const char *event, const char *cmd,
   free(result);
   free(decoded);
   (void)cmd;
+}
+
+static void handle_pipeline_source_command(
+    const char *event, const char *payload, uint64_t flags, uint64_t pipeline,
+    char *response, size_t cap,
+    char *(*runner)(const char *, uint64_t, uint64_t)) {
+  uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
+  if (!decoded) {
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"failed to allocate source buffer\"}");
+    return;
+  }
+  ssize_t n = decode_base64(payload, decoded, MAX_SOURCE);
+  if (n < 0) {
+    free(decoded);
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"invalid base64 or source too large\"}");
+    return;
+  }
+  decoded[n] = 0;
+  char *result = runner((const char *)decoded, flags, pipeline);
+  if (!result) {
+    free(decoded);
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"%s runner returned null\"}", event);
+    return;
+  }
+  char source_prefix[128];
+  snprintf(source_prefix, sizeof(source_prefix),
+           "%s pipeline=%llu flags=%llu", event,
+           (unsigned long long)pipeline, (unsigned long long)flags);
+  remember_result(event, source_prefix, (const char *)decoded, (size_t)n,
+                  result);
+  append_log("%s pipeline=%llu flags=%llu length=%zd", event,
+             (unsigned long long)pipeline, (unsigned long long)flags, n);
+  strlcpy(response, result, cap);
+  free(result);
+  free(decoded);
+}
+
+static void handle_pipeline_catalog_command(const char *sourcePayload,
+                                            const char *catalogPayload,
+                                            uint64_t flags,
+                                            uint64_t pipeline, char *response,
+                                            size_t cap) {
+  uint8_t *source = calloc(1, MAX_SOURCE + 1);
+  uint8_t *catalog = calloc(1, MAX_PLIST_BYTES + 1);
+  if (!source || !catalog) {
+    free(source);
+    free(catalog);
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"failed to allocate catalog compile buffers\"}");
+    return;
+  }
+  ssize_t sourceLength = decode_base64(sourcePayload, source, MAX_SOURCE);
+  ssize_t catalogLength =
+      decode_base64(catalogPayload, catalog, MAX_PLIST_BYTES);
+  if (sourceLength < 0 || catalogLength < 0) {
+    free(source);
+    free(catalog);
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"invalid catalog compile base64\"}");
+    return;
+  }
+  source[sourceLength] = 0;
+  catalog[catalogLength] = 0;
+  char *result = bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
+      (const char *)source, (const char *)catalog, flags, pipeline);
+  if (!result) {
+    free(source);
+    free(catalog);
+    snprintf(response, cap,
+             "{\"ok\":false,\"error\":\"pipeline catalog compiler returned null\"}");
+    return;
+  }
+  remember_result("pipeline_python_to_bplist_catalog",
+                  "pipeline_python_to_bplist_catalog", (const char *)source,
+                  (size_t)sourceLength, result);
+  strlcpy(response, result, cap);
+  free(result);
+  free(source);
+  free(catalog);
 }
 
 static void handle_command(const char *cmd, char *response, size_t cap) {
@@ -593,43 +640,31 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
     return;
   }
 
-  if (strncmp(cmd, "direct-run-b64 ", 15) == 0) {
-    handle_source_command("direct_run", cmd, cmd + 15, 0, response, cap,
-                          bridge_swift_direct_run);
-    return;
-  }
   uint64_t flags = 0;
   const char *payload = NULL;
-  if (parse_flags_payload(cmd, "direct-run-b64-flags ", &flags, &payload)) {
-    if (!payload) {
+  const char *pipeline_compile_prefix =
+      "pipeline-python-to-bplist-b64-flags ";
+  if (strncmp(cmd, pipeline_compile_prefix,
+              strlen(pipeline_compile_prefix)) == 0) {
+    const char *cursor = cmd + strlen(pipeline_compile_prefix);
+    char *pipeline_end = NULL;
+    uint64_t pipeline = strtoull(cursor, &pipeline_end, 10);
+    if (pipeline_end == cursor || *pipeline_end != ' ') {
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid direct flags syntax\"}");
+               "{\"ok\":false,\"error\":\"invalid runtime pipeline syntax\"}");
       return;
     }
-    handle_source_command("direct_run", cmd, payload, flags, response, cap,
-                          bridge_swift_direct_run);
-    return;
-  }
-  if (parse_flags_payload(cmd, "python-to-plist-b64-flags ", &flags,
-                          &payload)) {
-    if (!payload) {
+    cursor = pipeline_end + 1;
+    char *flags_end = NULL;
+    flags = strtoull(cursor, &flags_end, 10);
+    if (flags_end == cursor || *flags_end != ' ') {
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid python-to-plist flags syntax\"}");
+               "{\"ok\":false,\"error\":\"invalid pipeline compile flags syntax\"}");
       return;
     }
-    handle_source_command("python_to_plist", cmd, payload, flags, response, cap,
-                          bridge_swift_python_to_plist);
-    return;
-  }
-  if (parse_flags_payload(cmd, "python-to-bplist-b64-flags ", &flags,
-                          &payload)) {
-    if (!payload) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid python-to-bplist flags syntax\"}");
-      return;
-    }
-    handle_source_command("python_to_bplist", cmd, payload, flags, response, cap,
-                          bridge_swift_python_to_bplist);
+    handle_pipeline_source_command(
+        "pipeline_python_to_bplist", flags_end + 1, flags, pipeline, response,
+        cap, bridge_swift_pipeline_python_to_bplist);
     return;
   }
   if (parse_flags_payload(cmd, "record-file-probe-b64-flags ", &flags,
@@ -644,62 +679,36 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
                                    bridge_swift_python_record_file_probe);
     return;
   }
-  const char *catalog_compile_prefix = "python-to-bplist-catalog-b64-flags ";
-  if (strncmp(cmd, catalog_compile_prefix, strlen(catalog_compile_prefix)) == 0) {
-    const char *cursor = cmd + strlen(catalog_compile_prefix);
-    char *end = NULL;
-    flags = strtoull(cursor, &end, 10);
-    if (end == cursor || *end != ' ') {
+  const char *pipeline_catalog_compile_prefix =
+      "pipeline-python-to-bplist-catalog-b64-flags ";
+  if (strncmp(cmd, pipeline_catalog_compile_prefix,
+              strlen(pipeline_catalog_compile_prefix)) == 0) {
+    char *cursor = (char *)cmd + strlen(pipeline_catalog_compile_prefix);
+    char *pipelineEnd = NULL;
+    uint64_t pipeline = strtoull(cursor, &pipelineEnd, 10);
+    if (pipelineEnd == cursor || *pipelineEnd != ' ') {
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid python-to-bplist catalog flags syntax\"}");
+               "{\"ok\":false,\"error\":\"invalid catalog runtime pipeline syntax\"}");
       return;
     }
-    char *source_payload = end + 1;
-    char *catalog_payload = strchr(source_payload, ' ');
-    if (!catalog_payload) {
+    cursor = pipelineEnd + 1;
+    char *flagsEnd = NULL;
+    flags = strtoull(cursor, &flagsEnd, 10);
+    if (flagsEnd == cursor || *flagsEnd != ' ') {
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"missing python-to-bplist catalog payload\"}");
+               "{\"ok\":false,\"error\":\"invalid pipeline catalog flags syntax\"}");
       return;
     }
-    *catalog_payload++ = 0;
-    uint8_t *decoded_source = calloc(1, MAX_SOURCE + 1);
-    uint8_t *decoded_catalog = calloc(1, MAX_PLIST_BYTES + 1);
-    if (!decoded_source || !decoded_catalog) {
-      free(decoded_source);
-      free(decoded_catalog);
+    char *sourcePayload = flagsEnd + 1;
+    char *catalogPayload = strchr(sourcePayload, ' ');
+    if (!catalogPayload) {
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"failed to allocate catalog compile buffers\"}");
+               "{\"ok\":false,\"error\":\"missing pipeline catalog payload\"}");
       return;
     }
-    ssize_t source_len = decode_base64(source_payload, decoded_source, MAX_SOURCE);
-    ssize_t catalog_len =
-        decode_base64(catalog_payload, decoded_catalog, MAX_PLIST_BYTES);
-    if (source_len < 0 || catalog_len < 0) {
-      free(decoded_source);
-      free(decoded_catalog);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid base64 or source/catalog too large\"}");
-      return;
-    }
-    decoded_source[source_len] = 0;
-    decoded_catalog[catalog_len] = 0;
-    char *result = bridge_swift_python_to_bplist_with_catalog_metadata(
-        (const char *)decoded_source, (const char *)decoded_catalog, flags);
-    if (!result) {
-      free(decoded_source);
-      free(decoded_catalog);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"python_to_bplist_catalog runner returned null\"}");
-      return;
-    }
-    remember_result("python_to_bplist_catalog", "python_to_bplist_catalog",
-                    (const char *)decoded_source, (size_t)source_len, result);
-    append_log("python_to_bplist_catalog flags=%llu source_length=%zd catalog_length=%zd",
-               (unsigned long long)flags, source_len, catalog_len);
-    strlcpy(response, result, cap);
-    free(result);
-    free(decoded_source);
-    free(decoded_catalog);
+    *catalogPayload++ = 0;
+    handle_pipeline_catalog_command(sourcePayload, catalogPayload, flags,
+                                    pipeline, response, cap);
     return;
   }
   const char *record_probe_catalog_prefix =
@@ -1008,15 +1017,23 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
     free(decoded);
     return;
   }
-  if (strncmp(cmd, "plist-to-python-b64 ", 20) == 0) {
-    const char *plist_payload = cmd + 20;
+  const char *pipeline_plist_prefix = "pipeline-plist-to-python-b64 ";
+  if (strncmp(cmd, pipeline_plist_prefix, strlen(pipeline_plist_prefix)) == 0) {
+    const char *cursor = cmd + strlen(pipeline_plist_prefix);
+    char *pipeline_end = NULL;
+    uint64_t pipeline = strtoull(cursor, &pipeline_end, 10);
+    if (pipeline_end == cursor || *pipeline_end != ' ') {
+      snprintf(response, cap,
+               "{\"ok\":false,\"error\":\"invalid plist runtime pipeline syntax\"}");
+      return;
+    }
     uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
     if (!decoded) {
       snprintf(response, cap,
                "{\"ok\":false,\"error\":\"failed to allocate plist JSON buffer\"}");
       return;
     }
-    ssize_t n = decode_base64(plist_payload, decoded, MAX_SOURCE);
+    ssize_t n = decode_base64(pipeline_end + 1, decoded, MAX_SOURCE);
     if (n < 0) {
       free(decoded);
       snprintf(response, cap,
@@ -1024,23 +1041,34 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
       return;
     }
     decoded[n] = 0;
-    char *result = bridge_swift_plist_to_python((const char *)decoded);
+    char *result = bridge_swift_pipeline_plist_to_python(
+        (const char *)decoded, pipeline);
     if (!result) {
       free(decoded);
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"plist-to-python runner returned null\"}");
+               "{\"ok\":false,\"error\":\"pipeline plist-to-python runner returned null\"}");
       return;
     }
-    remember_result("plist_to_python", "plist_to_python", (const char *)decoded,
-                    (size_t)n, result);
-    append_log("plist_to_python length=%zd", n);
+    remember_result("pipeline_plist_to_python", "pipeline_plist_to_python",
+                    (const char *)decoded, (size_t)n, result);
     strlcpy(response, result, cap);
     free(result);
     free(decoded);
     return;
   }
-  if (strncmp(cmd, "plist-data-to-python-b64 ", 25) == 0) {
-    const char *plist_payload = cmd + 25;
+  const char *pipeline_plist_data_prefix =
+      "pipeline-plist-data-to-python-b64 ";
+  if (strncmp(cmd, pipeline_plist_data_prefix,
+              strlen(pipeline_plist_data_prefix)) == 0) {
+    const char *cursor = cmd + strlen(pipeline_plist_data_prefix);
+    char *pipeline_end = NULL;
+    uint64_t pipeline = strtoull(cursor, &pipeline_end, 10);
+    if (pipeline_end == cursor || *pipeline_end != ' ') {
+      snprintf(response, cap,
+               "{\"ok\":false,\"error\":\"invalid plist-data runtime pipeline syntax\"}");
+      return;
+    }
+    const char *plist_payload = pipeline_end + 1;
     size_t payload_len = strlen(plist_payload);
     size_t decoded_cap = (payload_len * 3) / 4 + 4;
     if (decoded_cap > MAX_PLIST_BYTES) {
@@ -1061,16 +1089,16 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
                "{\"ok\":false,\"error\":\"invalid base64 or plist data too large\"}");
       return;
     }
-    char *result = bridge_swift_bplist_to_python(decoded, (size_t)n);
+    char *result = bridge_swift_pipeline_bplist_to_python(
+        decoded, (size_t)n, pipeline);
     if (!result) {
       free(decoded);
       snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"plist-data-to-python runner returned null\"}");
+               "{\"ok\":false,\"error\":\"pipeline plist-data-to-python runner returned null\"}");
       return;
     }
-    remember_result("bplist_to_python", "plist_data_to_python", "", (size_t)n,
-                    result);
-    append_log("bplist_to_python length=%zd", n);
+    remember_result("pipeline_bplist_to_python",
+                    "pipeline_plist_data_to_python", "", (size_t)n, result);
     strlcpy(response, result, cap);
     free(result);
     free(decoded);
@@ -1079,13 +1107,12 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
   snprintf(response, cap,
            "{\"ok\":false,\"error\":\"unknown command\","
            "\"commands\":[\"status\",\"last\",\"clear\",\"set-source-b64\","
-           "\"direct-run-b64\",\"direct-run-b64-flags\","
-           "\"python-to-plist-b64-flags\",\"plist-to-python-b64\","
-           "\"python-to-bplist-b64-flags\","
-           "\"python-to-bplist-catalog-b64-flags\","
+           "\"pipeline-python-to-bplist-b64-flags\","
+           "\"pipeline-python-to-bplist-catalog-b64-flags\","
+           "\"pipeline-plist-to-python-b64\","
+           "\"pipeline-plist-data-to-python-b64\","
            "\"record-file-probe-b64-flags\","
            "\"record-file-probe-catalog-b64-flags\","
-           "\"plist-data-to-python-b64\","
            "\"agent-toolbox-query-b64\","
            "\"resolve-entity-b64\","
            "\"catalog-dump-latest\","

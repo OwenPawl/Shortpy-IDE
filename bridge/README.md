@@ -12,7 +12,12 @@ Current target:
 The production unsigned workflow export path is:
 
 ```text
-ShortcutsLanguage.pythonToShortcut
+ShortpyToShortcut
+  -> ShortcutsLanguage.PythonToIR
+  -> Shortpy owned IR corrections
+  -> ShortcutsLanguage native IR passes
+  -> ShortcutsLanguage.IRToShortcut
+  -> captured recurrence correction on native WFAction parameters (if required)
   -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync
   -> WFWorkflow.saveToRecord
   -> WFWorkflow.record
@@ -27,6 +32,15 @@ ShortcutsLanguage.pythonToShortcut
 ```sh
 make -C bridge clean all
 ```
+
+Build the Apple-native reference path without the owned C IR adapter with:
+
+```sh
+make -C bridge BUILD_DIR=build-sim-native-only ENABLE_SHORTPY_PIPELINE=0
+```
+
+The host CLI selects the runtime path with the global
+`--pipeline shortpy|native` option. There is no automatic fallback.
 
 The default `Makefile` expects Xcode's iPhoneSimulator SDK and the iOS 27.0 simulator runtime to be installed. Override `SDKROOT`, `SIM_RUNTIME_ROOT`, or `TARGET` if needed.
 
@@ -73,34 +87,52 @@ The host CLI unwraps AEA1 envelopes with the macOS `aea`, `aa`, and `openssl` to
 
 For iCloud links, the host CLI calls `https://www.icloud.com/shortcuts/api/records/<UUID>`, handles `{"error":true,"reason":"..."}` as an import diagnostic, downloads `fields.shortcut.value.downloadURL`, and sends those unsigned workflow plist bytes to the simulator bridge.
 
-Post-import action-name canonicalization is semantic and fail-closed. Named AST
-calls are matched against workflow action identities, retained ToolRenderer
-native function names, ToolKit aliases, and parameter names. A global monotonic
-semantic alignment permits literal/control-flow gaps without positional shifts;
-ambiguous matches remain unchanged with structured diagnostics.
+Import adapts ambiguous action identity before native Python rendering. A
+temporary workflow clone replaces only real Add/Set/Get Variable and Comment
+objects with per-object export adapters that emit explicit ToolKit calls;
+structural control flow and all unaffected actions remain on Apple's exporter.
 
-Python-syntax actions retain their ToolKit names during preparation; for
-example, list literals are lowered internally to `com_apple_shortcuts_list`.
-Other
-value-rendered actions are reified only when one canonical action and one
-serialized parameter agree. Loop-carried branch results receive an alias-only
-seed assignment when same-call keyword recurrence identifies one existing seed;
-ambiguous control flow remains unchanged.
+Editable Python is not normalized before compilation. `ShortpyToShortcut`
+owns the compiler pass boundary while retaining Apple's parser, diagnostics,
+action lowerer, and workflow serializer. It captures lexical control-result
+bindings from untouched frontend IR, applies narrow metadata-driven corrections
+for nested control values and loop-carried recurrence preparation, then runs
+Apple's native control-flow inference and variable-inlining passes. Because
+Apple's backend cannot consume a forward reference to its enclosing control
+statement, captured recurrences receive a separate fail-closed native action
+correction that changes only the recursive branch's action-output attachment
+before `saveToRecord`. The implementation resolves
+Swift types, enum cases, fields, and protocol witnesses by name/metadata and
+does not hook executable text or use framework-relative addresses.
 
-Before native compilation, the host CLI applies a narrow owned control-flow
-normalization pass. Complete menu and conditional accumulators become native
-branch-result assignments, `elif` chains become nested conditionals so each
-condition uses Apple's working primary lowerer, and nested control-flow values
-crossing a Repeat Results boundary receive a collision-free same-line alias.
-Explicit non-result list mutations lower internally through native Set/Add/Get
-Variable actions and are restored to normal list syntax on import. The pass
-does not patch the dylib, edit workflow plists, or replace Apple's parser,
-diagnostics, variable inlining, action lowerer, or workflow serializer.
+Import rendering uses workflow Tool IDs only where Apple's Python exporter is
+ambiguous or lossy. Native Comment and real Set/Get Variable actions become
+their explicit ToolKit functions. Real Add Variable remains natural
+`.append(...)` when that syntax is required to establish a named-variable token;
+subscript/cast inputs that would materialize extra actions use the explicit
+ToolKit function. Structural Repeat/If/Menu accumulators remain Apple-style
+Python. List literals remain the native list structural form, while actions such
+as Get Item from List retain their ToolKit definitions. The generated Python is
+self-contained and recompiles without the source workflow.
 
-Compilation uses an imported `WFParameterStateCatalog` only while legacy source
-still contains matching `ref(...)` handles. Editable inline metadata rebuilds
-its catalog from the source text, and ordinary ref-free source uses
-`defaultInitialCatalog` even when an import context is resident in the bridge.
+Editable inline metadata rebuilds its `WFParameterStateCatalog` from the source
+text. Ordinary ref-free source uses `defaultInitialCatalog`; visible editor
+source does not depend on a catalog sidecar.
+
+## Live Regression
+
+With the simulator bridge connected, run:
+
+```sh
+python3 bridge/tests/runtime_shortpy_to_shortcut.py
+```
+
+The suite performs public `Python -> plist -> Python -> plist -> Python` cycles
+for conditional, `elif`, and menu loop-carried recurrence; nested Repeat
+Results; explicit variable actions; list/Get Item from List; comments; root
+decorators; and inline trigger catalog metadata. It requires stable action
+identifier/control-mode shapes and semantic action-output edges across both
+compiled workflows.
 
 ## Metadata Boundary
 
@@ -121,7 +153,12 @@ Filter actions use the finite ShortcutsLanguage query surface
 (`query`, operators, sort order, limit, and scope) for parameter metadata while
 their displayed definition block remains native ToolRenderer text.
 
-Inline catalog metadata compilation goes through a separate binding adapter. The adapter is shaped for native `WFParameterMetadataProvider.binding(toolID:)` / `binding(triggerID:)` extraction and currently falls back internally to ToolKit-derived host/key data only when no native binding has been proven. That fallback is not a VS Code documentation or completion source.
+Inline catalog metadata compilation uses the native action/trigger ID and raw
+parameter key from the active Tool database as the catalog host/key. Runtime
+proof showed `ToolRenderer.ParameterMetadataProvider.binding(toolID:)` and
+`binding(triggerID:)` expose annotation/default callback metadata rather than a
+`WFParameterStateCatalogEntryHandle`. Missing IDs or keys therefore fail with
+`unsupportedInlineCatalogContext`; the bridge does not guess a mapping.
 
 ## Optional Live Injection
 

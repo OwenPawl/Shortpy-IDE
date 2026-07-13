@@ -8,14 +8,21 @@ This repository is intentionally small. It contains the current working bridge a
 
 - `bridge/`: injected iOS Simulator dylib, bridge control CLI, internal catalog-binding helpers, and build files.
 - `vscode-extension/`: VS Code custom editor, Python tooling, and the bundled Headless Shortcuts host-sync runtime.
-- `docs/`: implementation notes, TODO, and selected proof reports.
+- `docs/`: implementation notes, TODO, and selected proof reports. Start with
+  [`SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md`](docs/SHORTPY_TO_SHORTCUT_IMPLEMENTATION.md)
+  for the compiler architecture and abstraction audit.
 
 ## Current Runtime Boundary
 
 Python-to-workflow plist export now uses Apple's native whole-workflow record serializer:
 
 ```text
-ShortcutsLanguage.pythonToShortcut
+ShortpyToShortcut
+  -> ShortcutsLanguage.PythonToIR
+  -> Shortpy owned IR corrections
+  -> ShortcutsLanguage native IR passes
+  -> ShortcutsLanguage.IRToShortcut
+  -> captured recurrence correction on native WFAction parameters (if required)
   -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync
   -> WFWorkflow.saveToRecord
   -> WFWorkflow.record
@@ -32,12 +39,16 @@ does not expose. Native Comment actions are editable as explicit
 `com_apple_shortcuts_comment(...)` calls. Once the Python source changes,
 export uses the native compiler.
 
-The compiler adapter also preserves native Repeat Results and variable
-aggrandizements. It lowers nested control-flow results to native output
-assignments and selectively uses `com_apple_shortcuts_add_to_variable(...)`
-when a natural `.append(...)` subscript or cast would otherwise materialize an
-extra action. Ordinary appends remain natural so user-defined variable tokens
-retain their native scope.
+The compiler adapter preserves native Repeat Results, loop-carried branch
+values, and variable aggrandizements without rewriting editable Python. Its
+owned IR corrections run between Apple's frontend and native IR passes. A
+separate fail-closed native action correction repairs only captured recursive
+branch edges before `saveToRecord`; it derives branch structure, control UUIDs,
+and output names from the `WFWorkflow`. Import
+uses `com_apple_shortcuts_add_to_variable(...)` only when a natural
+`.append(...)` subscript or cast would otherwise materialize an extra action;
+ordinary appends remain natural so user-defined variable tokens retain their
+native scope.
 
 `Shortcuts IDE: Sync With Host Shortcuts` links the editor to a host workflow
 ID. It automatically pushes when only the editor changed and pulls through the
@@ -48,7 +59,7 @@ preserving host-owned presentation metadata such as the shortcut icon.
 
 Editable Python uses inline catalog/parameter-state metadata instead of visible `ref(...)` handles. The bridge reconstructs any required compiler catalog from that source representation. Ref-free source without inline catalog values compiles with `defaultInitialCatalog`; the compiler no longer silently falls back to the latest imported workflow catalog.
 
-VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then rebuilds the visible cache from that local interface plus the active sqlite names. Live native ToolRenderer refresh is an explicit command because it can occupy the simulator bridge for a long time. Function and decorator hovers show exact native ToolRenderer definition blocks; keyword hovers show the specific parameter type/default/docs plus stable referenced enum/type material. Environment-specific enum cases are omitted because they depend on the active runtime catalog. The prepared ToolKit gives every tool a neutral ToolRenderer naming context and uses its normalized sqlite `pythonName` as the native render name. Visible metadata then accepts definitions only by exact Python-name equality; it does not rewrite or synthesize definition text. The bridge also ensures selected DB rows have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) set before ToolRenderer refresh so native ToolRenderer renders actions that were present in the DB but hidden from the generative surface. ToolKit sqlite data is not a user-facing documentation source; it remains an internal bridge source for compiler names and a temporary fallback for catalog host/key binding until native metadata-provider binding extraction is implemented.
+VS Code visible metadata comes from Apple's ToolRenderer Python interface. The extension loads cached ToolRenderer metadata at startup for offline hovers, completions, highlighting, signature help, search, and static Shortpy diagnostics, then rebuilds the visible cache from that local interface plus the active sqlite names. Live native ToolRenderer refresh is an explicit command because it can occupy the simulator bridge for a long time. Function and decorator hovers show exact native ToolRenderer definition blocks; keyword hovers show the specific parameter type/default/docs plus referenced enum/type material. Runtime-shaped definitions and enum cases remain visible with a notice that they came from the current simulator and may differ elsewhere. The prepared ToolKit gives every tool a neutral ToolRenderer naming context and uses its normalized sqlite `pythonName` as the native render name. Visible metadata then accepts definitions only by exact Python-name equality; it does not rewrite or synthesize definition text. The bridge also ensures selected DB rows have both `visibleForShortcuts` (`0x1`) and `approved` (`0x4`) set before ToolRenderer refresh so native ToolRenderer renders actions that were present in the DB but hidden from the generative surface. ToolKit sqlite data is not a user-facing documentation source; its native tool/trigger IDs and raw parameter keys are the catalog host identity used internally for inline `Resolved[...]`/`Picked[...]` metadata.
 
 ## Quick Start
 
@@ -76,8 +87,8 @@ ToolKit source of truth. On connect it launches the simulator bridge, waits for
 Shortcuts' launch-time ToolKit indexing to settle, creates an adjusted copy,
 repairs missing enum rows that are still referenced by typed parameter
 relationships or type instances, rewrites duplicate action/trigger Python names
-from their native identifiers, reserves the finite ShortcutsLanguage action
-names used by dictionary/list/text/nothing/subscript syntax, aligns every tool's
+from their native identifiers, preserves ToolKit action names used behind
+dictionary/list/text/nothing/subscript syntax, aligns every tool's
 normalized `pythonName` with its native ToolRenderer render name through a
 dedicated neutral naming container, sets the ToolRenderer visibility/approval bits, backs up the
 simulator's resolved `Tools-active` target, replaces that target file with the
@@ -124,21 +135,27 @@ bridge/tools/bridgectl.py --raw plist-data-to-python --text 'https://www.icloud.
 
 Signed import unwraps either `anyone` or `people-who-know-me` AEA1 envelopes host-side. iCloud import resolves `fields.shortcut.value.downloadURL` from the public record API. Both paths send the resulting unsigned `Shortcut.wflow` plist to the simulator edit-mode converter.
 
-Imported action names are canonicalized by matching each named Python call to
-the workflow's action identifiers, retained ToolRenderer native function names,
-ToolKit display aliases, and accepted
-parameter names. Literal and control-flow actions do not consume call positions.
-Ambiguous aliases or excess calls are left unchanged and reported in
-`name_canonicalization` instead of being guessed by sequence order.
+Imported action identity is handled at the native edit-export boundary. A
+temporary workflow clone adapts only ambiguous real Add/Set/Get Variable and
+Comment actions into explicit ToolKit call nodes; Apple's normal exporter
+renders all structural control flow and unaffected actions.
 
-The prepared ToolKit keeps actions represented by Python syntax on their native
-intrinsic names, so dictionary/list/text/nothing/subscript expressions remain
-ordinary Python. Other actions that WorkflowKit renders as values can still be
-reified as canonical ToolKit calls under unique parameter and output/order
-consensus. A separate fail-closed AST pass initializes loop-carried branch
-results only when recursive and nonrecursive calls identify one existing seed.
-Diagnostics are returned in `value_action_reification` and
-`control_flow_initialization`.
+The prepared ToolKit preserves native action Python names such as
+`com_apple_shortcuts_list`; ShortcutsLanguage independently lowers
+dictionary/list/text/nothing/subscript syntax to those actions. Import uses
+explicit ToolKit functions for real actions whose native Python form is
+ambiguous or lossy, while structural list and control-flow syntax stays in
+Apple's native form.
+
+Compilation does not rewrite the editable Python. `ShortpyToShortcut` parses
+the unchanged source with `PythonToIR`, captures lexical control-result
+bindings, applies narrow native IR corrections for nested control values and
+loop-carried recurrence preparation, then runs Apple's control-flow inference,
+variable inlining, and backend. Captured recurrences receive one structural
+action-output edge correction on native `WFAction.serializedParameters` before
+the workflow-record serializer runs.
+The implementation resolves Swift
+metadata by name and does not hook executable text or use fixed addresses.
 
 Static editor diagnostics treat ToolRenderer as a positive metadata source.
 They validate parameters only when the rendered signature is complete and

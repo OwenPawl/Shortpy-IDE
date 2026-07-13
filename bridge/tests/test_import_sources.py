@@ -66,68 +66,55 @@ def main() -> None:
     else:
         raise AssertionError("iCloud API error response did not raise")
 
-    comment_source = """def shortcut() -> None:
-    # Line one
-    # Line two
-    action()
-""" + "    # \n"
-    comment_origins = [
-        {
-            "actionIndex": 0,
-            "actionIdentifier": "is.workflow.actions.comment",
-            "actionParameters": {"WFCommentActionText": "Line one\nLine two"},
-        },
-        {
-            "actionIndex": 1,
-            "actionIdentifier": "is.workflow.actions.notification",
-            "actionParameters": {},
-        },
-        {
-            "actionIndex": 2,
-            "actionIdentifier": "is.workflow.actions.comment",
-            "actionParameters": {},
-        },
-    ]
-    canonical_comments, comment_report = (
-        bridgectl.canonicalize_imported_comment_actions(
-            comment_source, comment_origins
+    original_toolkit_items = bridgectl.toolkit_items
+    try:
+        bridgectl.toolkit_items = lambda kind, name: ([{
+            "id": "com.apple.shortcuts.OpenAppIntent",
+            "pythonName": "com_apple_shortcuts_open_app_intent",
+            "parameters": [{"pythonName": "app", "key": "app"}],
+        }] if kind == "actions" and name == "com_apple_shortcuts_open_app_intent" else [])
+        action_binding = bridgectl.catalog_host_binding_for_context(
+            "com_apple_shortcuts_open_app_intent", "app"
         )
-    )
-    assert 'com_apple_shortcuts_comment(comment="Line one\\nLine two")' in canonical_comments
-    assert 'com_apple_shortcuts_comment(comment="")' in canonical_comments
-    assert "    # Line one" not in canonical_comments
-    assert comment_report["replacement_count"] == 2
-    assert comment_report["unresolved"] == []
+        assert action_binding == {
+            "source": "active-tool-database",
+            "hostAndKey": {
+                "handle": {"action": {"identifier": "com.apple.shortcuts.OpenAppIntent"}},
+                "key": "app",
+            },
+        }
 
-    edge_comment_source = """def shortcut() -> None:
-    # # literal hash
-    # trailing newline
-""" + "    # \n    action()\n"
-    edge_comment_origins = [
-        {
-            "actionIndex": 0,
-            "actionIdentifier": "is.workflow.actions.comment",
-            "actionParameters": {"WFCommentActionText": "# literal hash"},
-        },
-        {
-            "actionIndex": 1,
-            "actionIdentifier": "is.workflow.actions.comment",
-            "actionParameters": {"WFCommentActionText": "trailing newline\n"},
-        },
-        {
-            "actionIndex": 2,
-            "actionIdentifier": "is.workflow.actions.notification",
-            "actionParameters": {},
-        },
-    ]
-    canonical_edges, edge_report = bridgectl.canonicalize_imported_comment_actions(
-        edge_comment_source, edge_comment_origins
-    )
-    assert 'com_apple_shortcuts_comment(comment="# literal hash")' in canonical_edges
-    assert 'com_apple_shortcuts_comment(comment="trailing newline\\n")' in canonical_edges
-    assert "    # " not in canonical_edges
-    assert edge_report["replacement_count"] == 2
-    assert edge_report["unresolved"] == []
+        bridgectl.toolkit_items = lambda kind, name: ([{
+            "id": "com.apple.shortcuts.WFAppInFocusTrigger.opened",
+            "pythonName": "when_app_opened",
+            "parameters": [{"pythonName": "app", "key": "WFSelectedApps"}],
+        }] if kind == "triggers" and name == "when_app_opened" else [])
+        trigger_binding = bridgectl.catalog_host_binding_for_context(
+            "when_app_opened", "app"
+        )
+        assert trigger_binding == {
+            "source": "active-tool-database",
+            "hostAndKey": {
+                "handle": {
+                    "trigger": {
+                        "identifier": "WFAppInFocusTrigger",
+                        "variant": "opened",
+                    }
+                },
+                "key": "WFSelectedApps",
+            },
+        }
+
+        bridgectl.toolkit_items = lambda _kind, _name: []
+        try:
+            bridgectl.catalog_host_binding_for_context("missing_action", "entity")
+        except bridgectl.InlineCatalogError as exc:
+            assert exc.diagnostics[0]["code"] == "unsupportedInlineCatalogContext"
+            assert "active Tool database" in exc.diagnostics[0]["message"]
+        else:
+            raise AssertionError("missing catalog host/key did not fail closed")
+    finally:
+        bridgectl.toolkit_items = original_toolkit_items
 
     print("import-sources-ok")
 

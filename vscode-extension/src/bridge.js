@@ -8,7 +8,7 @@ const path = require("path");
 
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 const METADATA_MAX_BUFFER = 128 * 1024 * 1024;
-const BRIDGE_DYLIB_RELATIVE_PATH = path.join("build-sim", "libShortcutsIDESimBridge-v019.dylib");
+const BRIDGE_DYLIB_RELATIVE_PATH = path.join("build-sim", "libShortcutsIDESimBridge-v020.dylib");
 const BRIDGE_RUNTIME_MARKER = ".shortpy-bridge-runtime.json";
 
 function bridgeCtlPathForRoot(root) {

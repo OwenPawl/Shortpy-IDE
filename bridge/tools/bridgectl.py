@@ -810,6 +810,21 @@ def normalize_query_filter_item(item: object) -> object:
     }
 
 
+def python_name_from_label(value: object) -> str:
+    """Normalize native parameter keys for metadata aliases only."""
+    if not isinstance(value, str):
+        return ""
+    words = []
+    for token in re.findall(r"[0-9A-Za-z]+", value):
+        if token.isupper() or (len(token) > 1 and token[:-1].isupper() and token[-1] == "s"):
+            words.append(token.lower())
+            continue
+        token = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", token)
+        token = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", token)
+        words.extend(part.lower() for part in token.split("_") if part)
+    return "_".join(words)
+
+
 def visible_compiler_parameter_names(parameter: dict) -> list[str]:
     names = [
         name
@@ -1520,27 +1535,14 @@ def trigger_identifier_and_variant(item: dict) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def state_variant_from_call(call: ast.Call) -> str:
-    for keyword in call.keywords:
-        if keyword.arg != "state":
-            continue
-        value = keyword.value
-        if isinstance(value, ast.Attribute):
-            return value.attr.lower()
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            return value.value.lower()
-    return "opened"
+def active_tool_database_binding_for_context(action_name: str, parameter_name: str) -> dict:
+    """Build the native catalog host/key from the active ToolKit identity.
 
-
-def native_metadata_provider_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict | None:
-    # TODO: Replace the internal fallback below by exporting the native
-    # WFParameterMetadataProvider.binding(toolID:) and binding(triggerID:) results.
-    # Keep this adapter boundary stable so inline catalog compilation does not
-    # depend on ToolKit sqlite records once native binding extraction is proven.
-    return None
-
-
-def internal_toolkit_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict:
+    ToolRenderer.ParameterMetadataProvider.binding(toolID:) returns parameter
+    annotation/default callbacks, not a WFParameterStateCatalogEntryHandle.
+    The catalog handle's durable identity is the native tool/trigger ID plus
+    the raw parameter key from the active Tool database.
+    """
     trigger_items = toolkit_items("triggers", action_name)
     if trigger_items:
         trigger_item = trigger_items[0]
@@ -1548,19 +1550,8 @@ def internal_toolkit_binding_for_context(action_name: str, parameter_name: str, 
         key = preferred_parameter_key(trigger_item, parameter_name)
         if parsed and key:
             identifier, variant = parsed
-            if action_name == "when_app_opened" and parameter_name == "app":
-                variant = state_variant_from_call(call)
-                if variant not in {"opened", "closed"}:
-                    raise InlineCatalogError([
-                        {
-                            "code": "unsupportedInlineCatalogContext",
-                            "message": f"Unsupported when_app_opened state for inline app metadata: {variant}",
-                            "actionName": action_name,
-                            "actionParameter": parameter_name,
-                        }
-                    ])
             return {
-                "source": "internal-toolkit-fallback",
+                "source": "active-tool-database",
                 "hostAndKey": {
                     "handle": {
                         "trigger": {
@@ -1577,7 +1568,7 @@ def internal_toolkit_binding_for_context(action_name: str, parameter_name: str, 
         key = preferred_parameter_key(action_item, parameter_name)
         if isinstance(identifier, str) and key:
             return {
-                "source": "internal-toolkit-fallback",
+                "source": "active-tool-database",
                 "hostAndKey": {
                     "handle": {
                         "action": {
@@ -1590,21 +1581,15 @@ def internal_toolkit_binding_for_context(action_name: str, parameter_name: str, 
     raise InlineCatalogError([
         {
             "code": "unsupportedInlineCatalogContext",
-            "message": f"Inline catalog metadata for {action_name}.{parameter_name} has no native metadata-provider binding and no internal fallback; refusing to guess a host/key.",
+            "message": f"Inline catalog metadata for {action_name}.{parameter_name} has no native tool/trigger ID and raw parameter key in the active Tool database; refusing to guess a catalog host/key.",
             "actionName": action_name,
             "actionParameter": parameter_name,
         }
     ])
 
 
-def metadata_provider_binding_for_context(action_name: str, parameter_name: str, call: ast.Call) -> dict:
-    native_binding = native_metadata_provider_binding_for_context(action_name, parameter_name, call)
-    if native_binding is not None:
-        return {
-            "source": "native-metadata-provider",
-            **native_binding,
-        }
-    return internal_toolkit_binding_for_context(action_name, parameter_name, call)
+def catalog_host_binding_for_context(action_name: str, parameter_name: str) -> dict:
+    return active_tool_database_binding_for_context(action_name, parameter_name)
 
 
 def stable_ref_tag(entry: dict, used: set[str]) -> str:
@@ -1763,170 +1748,6 @@ def _repeat_output_candidates(tree: ast.AST) -> list[dict]:
     return candidates
 
 
-def _byte_line_offsets(source: bytes) -> list[int]:
-    offsets: list[int] = []
-    cursor = 0
-    for line in source.splitlines(keepends=True):
-        offsets.append(cursor)
-        cursor += len(line)
-    if not offsets:
-        offsets.append(0)
-    return offsets
-
-
-def _node_byte_span(node: ast.AST, offsets: list[int]) -> tuple[int, int]:
-    return (
-        offsets[node.lineno - 1] + node.col_offset,
-        offsets[node.end_lineno - 1] + node.end_col_offset,
-    )
-
-
-def normalize_nested_repeat_results(source: bytes) -> dict:
-    report = {
-        "present": False,
-        "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "native repeat-result assignment with same-line alias fallback",
-        "line_count_preserved": True,
-        "transformations": [],
-    }
-    try:
-        text = source.decode("utf-8")
-        tree = ast.parse(text)
-    except (UnicodeDecodeError, SyntaxError) as exc:
-        report["status"] = "skipped"
-        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
-        return {"source": source, "rewritten": False, "report": report}
-
-    candidates = _repeat_output_candidates(tree)
-    producers: dict[tuple[int, str], dict] = {
-        (id(candidate["block"]), candidate["accumulator"]): {
-            "index": candidate["loop_index"],
-            "kind": "finite-repeat"
-            if (
-                isinstance(candidate["loop"].iter, ast.Call)
-                and isinstance(candidate["loop"].iter.func, ast.Name)
-                and candidate["loop"].iter.func.id == "range"
-            )
-            else "repeat-with-each",
-        }
-        for candidate in candidates
-    }
-    for block in _statement_blocks(tree):
-        for index, statement in enumerate(block):
-            target = _branch_result_assignment_name(statement)
-            if target is not None:
-                producers[(id(block), target)] = {
-                    "index": index,
-                    "kind": "if" if isinstance(statement, ast.If) else "menu",
-                }
-    existing_names = {
-        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
-    }
-    offsets = _byte_line_offsets(source)
-    edits: list[tuple[int, int, bytes]] = []
-
-    for parent in candidates:
-        argument = parent["argument"]
-        child_dependencies: dict[str, dict] = {}
-        for node in ast.walk(argument):
-            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
-                continue
-            child = producers.get((id(parent["loop"].body), node.id))
-            if child is not None and child["index"] < parent["append_index"]:
-                child_dependencies[node.id] = child
-        if not child_dependencies:
-            continue
-
-        argument_start, argument_end = _node_byte_span(argument, offsets)
-        child_names = sorted(child_dependencies)
-        child_kinds = sorted(
-            {child["kind"] for child in child_dependencies.values()}
-        )
-        transformation = {
-            "line": parent["append_statement"].lineno,
-            "parentAccumulator": parent["accumulator"],
-            "childAccumulator": child_names[0],
-            "childAccumulators": child_names,
-            "parentLoop": "repeat-with-each"
-            if not (
-                isinstance(parent["loop"].iter, ast.Call)
-                and isinstance(parent["loop"].iter.func, ast.Name)
-                and parent["loop"].iter.func.id == "range"
-            )
-            else "finite-repeat",
-            "childControlFlow": child_kinds[0]
-            if len(child_kinds) == 1
-            else "mixed",
-        }
-
-        # A non-name value expression already materializes a native action output.
-        # Making that action the loop's final assignment lets ShortcutsLanguage use
-        # it as Repeat Results without emitting an Append/Get Variable helper pair.
-        if not isinstance(argument, ast.Name):
-            assignment = parent["block"][parent["assignment_index"]]
-            assignment_start, assignment_end = _node_byte_span(
-                assignment, offsets
-            )
-            append_start, append_end = _node_byte_span(
-                parent["append_statement"], offsets
-            )
-            edits.append((assignment_start, assignment_end, b""))
-            edits.append(
-                (
-                    append_start,
-                    append_end,
-                    parent["accumulator"].encode("utf-8")
-                    + b" = "
-                    + source[argument_start:argument_end],
-                )
-            )
-            transformation["lowering"] = "native-repeat-result-assignment"
-            transformation["removedInitializerLine"] = assignment.lineno
-            report["transformations"].append(transformation)
-            continue
-
-        suffix = 1
-        while True:
-            alias = f"__shortpy_control_flow_value_{suffix}"
-            suffix += 1
-            if alias not in existing_names:
-                existing_names.add(alias)
-                break
-
-        append_start, _append_end = _node_byte_span(
-            parent["append_statement"], offsets
-        )
-        edits.append(
-            (
-                append_start,
-                append_start,
-                alias.encode("utf-8")
-                + b" = "
-                + source[argument_start:argument_end]
-                + b"; ",
-            )
-        )
-        edits.append((argument_start, argument_end, alias.encode("utf-8")))
-        transformation["lowering"] = "same-line-alias-fallback"
-        transformation["alias"] = alias
-        report["transformations"].append(transformation)
-
-    rewritten = source
-    for start, end, replacement in sorted(
-        edits, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-    report["present"] = bool(report["transformations"])
-    report["status"] = "applied" if report["present"] else "skipped"
-    if not report["present"]:
-        report["reason"] = "no nested synthetic repeat-result boundary was found"
-    return {
-        "source": rewritten,
-        "rewritten": rewritten != source,
-        "report": report,
-    }
-
-
 def _conditional_leaf_bodies(statement: ast.If) -> list[list[ast.stmt]] | None:
     if not statement.body or not statement.orelse:
         return None
@@ -1973,277 +1794,6 @@ def _branch_result_appends(
     return (target, appends) if target is not None else None
 
 
-def _branch_result_assignment_name(statement: ast.stmt) -> str | None:
-    if isinstance(statement, ast.If):
-        bodies = _conditional_leaf_bodies(statement)
-        if bodies is None:
-            return None
-    elif isinstance(statement, ast.Match):
-        bodies = [case.body for case in statement.cases]
-        if not bodies or any(not body for body in bodies):
-            return None
-    else:
-        return None
-    targets = []
-    for body in bodies:
-        assignment = value_assignment_target(body[-1])
-        if assignment is None:
-            return None
-        targets.append(assignment[0].id)
-    return targets[0] if targets and len(set(targets)) == 1 else None
-
-
-def normalize_branch_results_and_elifs(source: bytes) -> dict:
-    report = {
-        "present": False,
-        "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "branch-result assignments and nested else-if lowering",
-        "line_count_preserved": True,
-        "branch_transformations": [],
-        "elif_transformations": [],
-    }
-    try:
-        text = source.decode("utf-8")
-        tree = ast.parse(text)
-    except (UnicodeDecodeError, SyntaxError) as exc:
-        report["status"] = "skipped"
-        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
-        return {"source": source, "rewritten": False, "report": report}
-
-    offsets = _byte_line_offsets(source)
-    edits: list[tuple[int, int, bytes]] = []
-    transformed_assignments: set[int] = set()
-    for block in _statement_blocks(tree):
-        empty_assignments: dict[str, tuple[int, ast.Assign]] = {}
-        for index, statement in enumerate(block):
-            assigned_name = _empty_list_assignment_name(statement)
-            if assigned_name is not None:
-                empty_assignments[assigned_name] = (index, statement)
-                continue
-            branch_result = _branch_result_appends(statement)
-            if branch_result is None:
-                continue
-            accumulator, appends = branch_result
-            assignment = empty_assignments.get(accumulator)
-            if assignment is None or not _loads_name(block[index + 1 :], accumulator):
-                continue
-            assignment_index, assignment_statement = assignment
-            if id(assignment_statement) not in transformed_assignments:
-                start, end = _node_byte_span(assignment_statement, offsets)
-                edits.append((start, end, b"pass"))
-                transformed_assignments.add(id(assignment_statement))
-            for append_statement, argument in appends:
-                start, end = _node_byte_span(append_statement, offsets)
-                argument_start, argument_end = _node_byte_span(argument, offsets)
-                edits.append(
-                    (
-                        start,
-                        end,
-                        accumulator.encode("utf-8")
-                        + b" = "
-                        + source[argument_start:argument_end],
-                    )
-                )
-            report["branch_transformations"].append(
-                {
-                    "kind": "if" if isinstance(statement, ast.If) else "menu",
-                    "line": statement.lineno,
-                    "accumulator": accumulator,
-                    "assignmentLine": assignment_statement.lineno,
-                    "branchCount": len(appends),
-                }
-            )
-
-    lines = source.splitlines(keepends=True)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        start, _end = _node_byte_span(node, offsets)
-        if source[start : start + 4] != b"elif":
-            continue
-        indent = lines[node.lineno - 1][: node.col_offset]
-        edits.append(
-            (
-                start,
-                start + 4,
-                b"else:\n" + indent + b"    if",
-            )
-        )
-        for line_number in range(node.lineno + 1, node.end_lineno + 1):
-            edits.append((offsets[line_number - 1], offsets[line_number - 1], b"    "))
-        report["elif_transformations"].append(
-            {
-                "line": node.lineno,
-                "endLine": node.end_lineno,
-                "insertedLineCount": 1,
-            }
-        )
-
-    rewritten = source
-    for start, end, replacement in sorted(
-        edits, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-    report["present"] = bool(
-        report["branch_transformations"] or report["elif_transformations"]
-    )
-    report["status"] = "applied" if report["present"] else "skipped"
-    report["line_count_preserved"] = not bool(report["elif_transformations"])
-    if not report["present"]:
-        report["reason"] = "no complete branch-result or elif shape was found"
-    return {
-        "source": rewritten,
-        "rewritten": rewritten != source,
-        "report": report,
-    }
-
-
-def normalize_variable_aliases(source: bytes) -> dict:
-    report = {
-        "present": False,
-        "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "single-use alias def-use collapse",
-        "line_count_preserved": False,
-        "aliases": [],
-    }
-    rewritten = source
-    for _iteration in range(20):
-        try:
-            text = rewritten.decode("utf-8")
-            tree = ast.parse(text)
-        except (UnicodeDecodeError, SyntaxError) as exc:
-            report["status"] = "partial" if report["aliases"] else "skipped"
-            report["reason"] = f"source was not parseable by the host Python AST: {exc}"
-            break
-        offsets = _byte_line_offsets(rewritten)
-        loads: dict[str, list[ast.Name]] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                loads.setdefault(node.id, []).append(node)
-        edit: tuple[int, int, bytes, int, int, str, str] | None = None
-
-        for block in _statement_blocks(tree):
-            for index in range(1, len(block)):
-                alias = value_assignment_target(block[index])
-                if alias is None or not isinstance(alias[1], ast.Name):
-                    continue
-                destination = alias[0].id
-                source_name = alias[1].id
-                if len(loads.get(source_name, [])) != 1:
-                    continue
-
-                previous_assignment = value_assignment_target(block[index - 1])
-                if (
-                    previous_assignment is not None
-                    and previous_assignment[0].id == source_name
-                ):
-                    target_start, target_end = _node_byte_span(
-                        previous_assignment[0], offsets
-                    )
-                    line_start, line_end = _line_span_for_statement(
-                        text, block[index], line_offsets_for(text)
-                    )
-                    edit = (
-                        target_start,
-                        target_end,
-                        destination.encode("utf-8"),
-                        line_start,
-                        line_end,
-                        source_name,
-                        destination,
-                    )
-                    break
-
-                producer = block[index - 1]
-                producer_target = _branch_result_assignment_name(producer)
-                if producer_target != source_name:
-                    continue
-                target_nodes = []
-                if isinstance(producer, ast.If):
-                    bodies = _conditional_leaf_bodies(producer) or []
-                elif isinstance(producer, ast.Match):
-                    bodies = [case.body for case in producer.cases]
-                else:
-                    bodies = []
-                for body in bodies:
-                    assignment = value_assignment_target(body[-1])
-                    if assignment is not None and assignment[0].id == source_name:
-                        target_nodes.append(assignment[0])
-                if not target_nodes:
-                    continue
-                replacements = [
-                    (*_node_byte_span(target, offsets), destination.encode("utf-8"))
-                    for target in target_nodes
-                ]
-                line_start, line_end = _line_span_for_statement(
-                    text, block[index], line_offsets_for(text)
-                )
-                for start, end, replacement in sorted(
-                    replacements + [(line_start, line_end, b"")],
-                    key=lambda item: item[0],
-                    reverse=True,
-                ):
-                    rewritten = (
-                        rewritten[:start] + replacement + rewritten[end:]
-                    )
-                report["aliases"].append(
-                    {
-                        "from": source_name,
-                        "to": destination,
-                        "line": block[index].lineno,
-                        "producer": "if"
-                        if isinstance(producer, ast.If)
-                        else "menu",
-                    }
-                )
-                edit = ()
-                break
-            if edit is not None:
-                break
-
-        if edit is None:
-            break
-        if edit == ():
-            continue
-        (
-            target_start,
-            target_end,
-            target_replacement,
-            line_start,
-            line_end,
-            source_name,
-            destination,
-        ) = edit
-        for start, end, replacement in sorted(
-            [
-                (target_start, target_end, target_replacement),
-                (line_start, line_end, b""),
-            ],
-            key=lambda item: item[0],
-            reverse=True,
-        ):
-            rewritten = rewritten[:start] + replacement + rewritten[end:]
-        report["aliases"].append(
-            {
-                "from": source_name,
-                "to": destination,
-                "line": text.count("\n", 0, line_start) + 1,
-                "producer": "assignment",
-            }
-        )
-
-    report["present"] = bool(report["aliases"])
-    report["line_count_preserved"] = not report["present"]
-    report.setdefault("status", "applied" if report["present"] else "skipped")
-    if not report["present"] and "reason" not in report:
-        report["reason"] = "no single-use alias chain was found"
-    return {
-        "source": rewritten,
-        "rewritten": rewritten != source,
-        "report": report,
-    }
-
-
 def _variable_atom_requires_explicit_action(node: ast.AST) -> bool:
     def classify(value: ast.AST) -> tuple[bool, bool]:
         if isinstance(value, ast.Name):
@@ -2266,284 +1816,6 @@ def _variable_atom_requires_explicit_action(node: ast.AST) -> bool:
 
     valid, requires_explicit = classify(node)
     return valid and requires_explicit
-
-
-def normalize_explicit_variable_mutations(source: bytes) -> dict:
-    report = {
-        "present": False,
-        "source": "Shortpy owned control-flow frontend normalization",
-        "strategy": "explicit Set/Add/Get Variable data flow",
-        "line_count_preserved": True,
-        "variables": [],
-    }
-    try:
-        text = source.decode("utf-8")
-        tree = ast.parse(text)
-    except (UnicodeDecodeError, SyntaxError) as exc:
-        report["status"] = "skipped"
-        report["reason"] = f"source was not parseable by the host Python AST: {exc}"
-        return {"source": source, "rewritten": False, "report": report}
-
-    repeat_accumulators = {
-        candidate["accumulator"] for candidate in _repeat_output_candidates(tree)
-    }
-    parent = {
-        id(child): node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
-    existing_names = {
-        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
-    }
-    assignments: dict[str, list[tuple[ast.stmt, ast.AST]]] = {}
-    append_calls: dict[str, list[ast.Call]] = {}
-    for node in ast.walk(tree):
-        assignment = value_assignment_target(node)
-        if assignment is not None:
-            target, value = assignment
-            assignments.setdefault(target.id, []).append((node, value))
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "append"
-            and isinstance(node.func.value, ast.Name)
-            and len(node.args) == 1
-            and not node.keywords
-        ):
-            append_calls.setdefault(node.func.value.id, []).append(node)
-
-    offsets = _byte_line_offsets(source)
-    edits: list[tuple[int, int, bytes]] = []
-    for name, calls in append_calls.items():
-        if name in repeat_accumulators:
-            continue
-        explicit_calls = [
-            call
-            for call in calls
-            if _variable_atom_requires_explicit_action(call.args[0])
-        ]
-        natural_calls = [call for call in calls if call not in explicit_calls]
-        definitions = sorted(
-            assignments.get(name, []), key=lambda item: item[0].lineno
-        )
-        first_mutation_line = min(call.lineno for call in calls)
-        definitions = [
-            item for item in definitions if item[0].lineno < first_mutation_line
-        ]
-        assignment_statement = None
-        initial_value = None
-        if len(definitions) == 1:
-            candidate_statement, candidate_value = definitions[0]
-            if not any(
-                isinstance(node, ast.Name)
-                and isinstance(node.ctx, ast.Load)
-                and node.id == name
-                for node in ast.walk(candidate_value)
-            ):
-                assignment_statement = candidate_statement
-                initial_value = candidate_value
-
-        if assignment_statement is not None and initial_value is not None:
-            assignment_start, assignment_end = _node_byte_span(
-                assignment_statement, offsets
-            )
-            value_start, value_end = _node_byte_span(initial_value, offsets)
-            edits.append(
-                (
-                    assignment_start,
-                    assignment_end,
-                    b"com_apple_shortcuts_set_variable(input="
-                    + source[value_start:value_end]
-                    + b", variable="
-                    + json.dumps(name).encode("utf-8")
-                    + b")",
-                )
-            )
-
-        receiver_ids = {id(call.func.value) for call in calls}
-        natural_binding_line = (
-            min(call.lineno for call in natural_calls) if natural_calls else None
-        )
-        read_groups: dict[int, tuple[ast.stmt, list[ast.Name]]] = {}
-        for node in ast.walk(tree):
-            if (
-                not isinstance(node, ast.Name)
-                or not isinstance(node.ctx, ast.Load)
-                or node.id != name
-                or id(node) in receiver_ids
-            ):
-                continue
-            if (
-                assignment_statement is not None
-                and node.lineno <= assignment_statement.lineno
-            ):
-                continue
-            if (
-                assignment_statement is None
-                and node.lineno < first_mutation_line
-            ):
-                continue
-            if (
-                assignment_statement is None
-                and natural_binding_line is not None
-                and node.lineno >= natural_binding_line
-            ):
-                continue
-            parent_node = parent.get(id(node))
-            if (
-                isinstance(parent_node, ast.Call)
-                and isinstance(parent_node.func, ast.Name)
-                and parent_node.func.id
-                in {
-                    "com_apple_shortcuts_get_variable",
-                    "com_apple_shortcuts_set_variable",
-                    "com_apple_shortcuts_add_to_variable",
-                }
-            ):
-                continue
-            statement: ast.AST | None = node
-            while statement is not None and not isinstance(statement, ast.stmt):
-                statement = parent.get(id(statement))
-            if not isinstance(statement, ast.stmt):
-                continue
-            group = read_groups.setdefault(
-                id(statement), (statement, [])
-            )
-            group[1].append(node)
-
-        read_count = 0
-        for statement, reads in read_groups.values():
-            suffix = 1
-            while True:
-                alias = f"__shortpy_variable_value_{suffix}"
-                suffix += 1
-                if alias not in existing_names:
-                    existing_names.add(alias)
-                    break
-            statement_start, _statement_end = _node_byte_span(statement, offsets)
-            edits.append(
-                (
-                    statement_start,
-                    statement_start,
-                    (
-                        alias
-                        + " = com_apple_shortcuts_get_variable(variable="
-                        + json.dumps(name)
-                        + "); "
-                    ).encode("utf-8"),
-                )
-            )
-            for read in reads:
-                start, end = _node_byte_span(read, offsets)
-                edits.append((start, end, alias.encode("utf-8")))
-                read_count += 1
-        if assignment_statement is not None or explicit_calls or read_count:
-            report["variables"].append(
-                {
-                    "name": name,
-                    "assignmentLine": assignment_statement.lineno
-                    if assignment_statement is not None
-                    else None,
-                    "mutationCount": len(calls),
-                    "explicitMutationCount": len(explicit_calls),
-                    "naturalMutationCount": len(natural_calls),
-                    "readCount": read_count,
-                    "appendLowering": "selective com_apple_shortcuts_add_to_variable",
-                }
-            )
-
-    rewritten = source
-    for start, end, replacement in sorted(
-        edits, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-
-    try:
-        append_tree = ast.parse(rewritten.decode("utf-8"))
-    except (UnicodeDecodeError, SyntaxError) as exc:
-        report["status"] = "failed"
-        report["reason"] = f"variable data-flow rewrite was not parseable: {exc}"
-        return {"source": source, "rewritten": False, "report": report}
-    append_offsets = _byte_line_offsets(rewritten)
-    append_edits: list[tuple[int, int, bytes]] = []
-    for node in ast.walk(append_tree):
-        if (
-            not isinstance(node, ast.Call)
-            or not isinstance(node.func, ast.Attribute)
-            or node.func.attr != "append"
-            or not isinstance(node.func.value, ast.Name)
-            or node.func.value.id in repeat_accumulators
-            or len(node.args) != 1
-            or node.keywords
-            or not _variable_atom_requires_explicit_action(node.args[0])
-        ):
-            continue
-        call_start, call_end = _node_byte_span(node, append_offsets)
-        argument_start, argument_end = _node_byte_span(node.args[0], append_offsets)
-        append_edits.append(
-            (
-                call_start,
-                call_end,
-                b"com_apple_shortcuts_add_to_variable(variable="
-                + json.dumps(node.func.value.id).encode("utf-8")
-                + b", input="
-                + rewritten[argument_start:argument_end]
-                + b")",
-            )
-        )
-    for start, end, replacement in sorted(
-        append_edits, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-    report["present"] = bool(report["variables"])
-    report["status"] = "applied" if report["present"] else "skipped"
-    if not report["present"]:
-        report["reason"] = "no non-control-flow list mutation was found"
-    return {
-        "source": rewritten,
-        "rewritten": rewritten != source,
-        "report": report,
-    }
-
-
-def normalize_control_flow_source(source: bytes) -> dict:
-    aliases = normalize_variable_aliases(source)
-    branches = normalize_branch_results_and_elifs(aliases["source"])
-    repeats = normalize_nested_repeat_results(branches["source"])
-    variables = normalize_explicit_variable_mutations(repeats["source"])
-    reports = [
-        aliases["report"],
-        branches["report"],
-        repeats["report"],
-        variables["report"],
-    ]
-    transformations = sum(
-        len(report.get("branch_transformations", []))
-        + len(report.get("elif_transformations", []))
-        + len(report.get("transformations", []))
-        + len(report.get("variables", []))
-        + len(report.get("aliases", []))
-        for report in reports
-    )
-    return {
-        "source": variables["source"],
-        "rewritten": bool(
-            aliases["rewritten"]
-            or branches["rewritten"]
-            or repeats["rewritten"]
-            or variables["rewritten"]
-        ),
-        "report": {
-            "present": transformations > 0,
-            "source": "Shortpy owned control-flow frontend normalization",
-            "strategy": "native control-flow outputs plus explicit variable data flow",
-            "transformation_count": transformations,
-            "line_count_preserved": all(
-                report.get("line_count_preserved", True) for report in reports
-            ),
-            "stages": reports,
-        },
-    }
 
 
 def inline_catalog_literals(value_node: ast.AST, parameter_info: dict) -> list[ast.Dict]:
@@ -2588,7 +1860,7 @@ def rewrite_inline_catalog_metadata(source: bytes) -> dict:
             for literal_node in literal_nodes:
                 try:
                     metadata = literal_json_value(literal_node)
-                    binding = metadata_provider_binding_for_context(action_name, keyword.arg, node)
+                    binding = catalog_host_binding_for_context(action_name, keyword.arg)
                     entry = {
                         "actionName": action_name,
                         "actionParameter": keyword.arg,
@@ -2692,20 +1964,12 @@ def attach_inline_catalog_summary(response: dict, prepared: dict, expand_respons
     return response
 
 
-def attach_control_flow_normalization_summary(
-    response: dict, normalized: dict
-) -> dict:
-    report = normalized.get("report")
-    if isinstance(report, dict) and report.get("present"):
-        response["control_flow_normalization"] = report
-    return response
-
-
 def _compile_prepared_python_to_bplist(
     socket_path: str,
     prepared: dict,
     flags: int,
     catalog_payload: object | None,
+    pipeline: str = "shortpy",
 ) -> dict:
     native_catalog_payload = (
         native_catalog_json(catalog_payload)
@@ -2717,6 +1981,7 @@ def _compile_prepared_python_to_bplist(
         expand_response = expand_inline_catalog(socket_path, prepared["entries"])
         native_catalog_payload = expand_response.get("catalog")
     payload = base64.b64encode(prepared["source"]).decode("ascii")
+    pipeline_raw = {"native": 0, "shortpy": 1}[pipeline]
     if native_catalog_payload is not None:
         catalog_text = json.dumps(
             native_catalog_payload, sort_keys=True, separators=(",", ":")
@@ -2724,11 +1989,12 @@ def _compile_prepared_python_to_bplist(
         catalog_b64 = base64.b64encode(catalog_text).decode("ascii")
         raw = send_command(
             socket_path,
-            f"python-to-bplist-catalog-b64-flags {flags} {payload} {catalog_b64}",
+            f"pipeline-python-to-bplist-catalog-b64-flags {pipeline_raw} {flags} {payload} {catalog_b64}",
         )
     else:
         raw = send_command(
-            socket_path, f"python-to-bplist-b64-flags {flags} {payload}"
+            socket_path,
+            f"pipeline-python-to-bplist-b64-flags {pipeline_raw} {flags} {payload}",
         )
     return attach_inline_catalog_summary(
         json.loads(raw), prepared, expand_response
@@ -2740,30 +2006,12 @@ def compile_python_to_bplist(
     source: bytes,
     flags: int,
     catalog_payload: object | None = None,
+    pipeline: str = "shortpy",
 ) -> dict:
-    normalized = normalize_control_flow_source(source)
-    if (
-        normalized["rewritten"]
-        and not normalized["report"].get("line_count_preserved", True)
-    ):
-        original_prepared = rewrite_inline_catalog_metadata(source)
-        preflight = _compile_prepared_python_to_bplist(
-            socket_path, original_prepared, flags, catalog_payload
-        )
-        if not preflight.get("ok"):
-            preflight["control_flow_preflight"] = {
-                "usedOriginalSource": True,
-                "reason": "preserve user-source diagnostic locations",
-            }
-            return attach_control_flow_normalization_summary(
-                preflight, normalized
-            )
-
-    prepared = rewrite_inline_catalog_metadata(normalized["source"])
-    response = _compile_prepared_python_to_bplist(
-        socket_path, prepared, flags, catalog_payload
+    prepared = rewrite_inline_catalog_metadata(source)
+    return _compile_prepared_python_to_bplist(
+        socket_path, prepared, flags, catalog_payload, pipeline
     )
-    return attach_control_flow_normalization_summary(response, normalized)
 
 
 def sign_shortcut_response(
@@ -3107,8 +2355,7 @@ def compile_python_record_file_probe(
     flags: int,
     catalog_payload: object | None = None,
 ) -> dict:
-    normalized = normalize_control_flow_source(source)
-    prepared = rewrite_inline_catalog_metadata(normalized["source"])
+    prepared = rewrite_inline_catalog_metadata(source)
     native_catalog_payload = native_catalog_json(catalog_payload) if catalog_payload is not None else None
     expand_response = None
     if prepared.get("entries"):
@@ -3122,8 +2369,7 @@ def compile_python_record_file_probe(
         raw = send_command(socket_path, f"record-file-probe-catalog-b64-flags {flags} {payload} {catalog_b64}")
     else:
         raw = send_command(socket_path, f"record-file-probe-b64-flags {flags} {payload}")
-    response = attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
-    return attach_control_flow_normalization_summary(response, normalized)
+    return attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
 
 
 def python_literal(value: object) -> str:
@@ -3180,1237 +2426,6 @@ def replace_refs_with_inline_metadata(source: str, metadata_by_tag: dict[str, ob
         return literal
 
     return re.sub(r"ref\((0x[0-9a-fA-F]+)\)", repl, source), replacements
-
-
-def action_origins_from_plist_object(value: object) -> list[dict]:
-    if not isinstance(value, dict):
-        return []
-    actions = value.get("WFWorkflowActions")
-    if not isinstance(actions, list):
-        return []
-    origins = []
-    for index, action in enumerate(actions):
-        if not isinstance(action, dict):
-            continue
-        identifier = action.get("WFWorkflowActionIdentifier")
-        if not isinstance(identifier, str) or not identifier:
-            continue
-        uuid = action.get("WFWorkflowActionUUID")
-        parameters = action.get("WFWorkflowActionParameters")
-        origins.append({
-            "actionIndex": index,
-            "actionIdentifier": identifier,
-            "actionUUID": uuid if isinstance(uuid, str) and uuid else None,
-            "actionParameters": parameters if isinstance(parameters, dict) else {},
-        })
-    return origins
-
-
-def action_identifiers_from_plist_object(value: object) -> list[str]:
-    return [origin["actionIdentifier"] for origin in action_origins_from_plist_object(value)]
-
-
-def action_origins_from_plist_data(data: bytes) -> list[dict]:
-    try:
-        return action_origins_from_plist_object(plistlib.loads(data))
-    except Exception:
-        return []
-
-
-def action_identifiers_from_plist_data(data: bytes) -> list[str]:
-    return [origin["actionIdentifier"] for origin in action_origins_from_plist_data(data)]
-
-
-def action_origins_from_plist_json(data: bytes) -> list[dict]:
-    try:
-        return action_origins_from_plist_object(json.loads(data.decode("utf-8")))
-    except Exception:
-        return []
-
-
-def action_identifiers_from_plist_json(data: bytes) -> list[str]:
-    return [origin["actionIdentifier"] for origin in action_origins_from_plist_json(data)]
-
-
-def toolkit_action_items_by_identifier() -> dict[str, dict]:
-    metadata = current_toolkit_metadata()
-    output: dict[str, dict] = {}
-    for item in metadata.get("actions", []) or []:
-        if not isinstance(item, dict):
-            continue
-        identifier = item.get("id")
-        python_name = item.get("pythonName")
-        if isinstance(identifier, str) and isinstance(python_name, str) and identifier and python_name:
-            output[identifier] = item
-    return output
-
-
-def toolkit_action_previous_python_names_by_identifier() -> dict[str, str]:
-    selection_path = Path(__file__).resolve().parents[1] / "logs" / "shortpy-toolkit-selection.json"
-    try:
-        selection = json.loads(selection_path.read_text())
-        changes = selection.get("duplicate_adjustment", {}).get("tables", {}).get("Tools", {}).get("changes", [])
-    except Exception:
-        return {}
-    output = {}
-    for change in changes:
-        if not isinstance(change, dict):
-            continue
-        identifier = change.get("id")
-        old_name = change.get("oldPythonName")
-        if isinstance(identifier, str) and identifier and isinstance(old_name, str) and old_name:
-            output[identifier] = old_name
-    return output
-
-
-def toolrenderer_action_native_aliases_by_identifier() -> dict[str, set[str]]:
-    metadata_path = Path(__file__).resolve().parents[1] / "logs" / "vscode-extension-toolrenderer-interface.json"
-    try:
-        metadata = json.loads(metadata_path.read_text())
-    except Exception:
-        return {}
-    output: dict[str, set[str]] = {}
-    for item in metadata.get("actions", []) or []:
-        if not isinstance(item, dict):
-            continue
-        identifier = item.get("nativeIdentifier") or item.get("id")
-        if not isinstance(identifier, str) or not identifier:
-            continue
-        development = item.get("developmentProperties")
-        if not isinstance(development, dict):
-            development = {}
-        aliases = unique_strings([
-            item.get("canonicalizedFrom"),
-            item.get("nativePythonName"),
-            development.get("function_name"),
-            development.get("functionName"),
-        ])
-        if aliases:
-            output.setdefault(identifier, set()).update(aliases)
-    return output
-
-
-def python_name_from_label(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    words = []
-    for token in re.findall(r"[0-9A-Za-z]+", value):
-        if token.isupper() or (len(token) > 1 and token[:-1].isupper() and token[-1] == "s"):
-            words.append(token.lower())
-            continue
-        token = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", token)
-        token = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", token)
-        words.extend(part.lower() for part in token.split("_") if part)
-    return "_".join(words)
-
-
-def parameter_aliases(parameter: object) -> set[str]:
-    if not isinstance(parameter, dict):
-        return set()
-    values = unique_strings([
-        parameter.get("pythonName"),
-        parameter.get("name"),
-        parameter.get("key"),
-        parameter.get("rawKey"),
-        parameter.get("aliases"),
-        parameter.get("acceptedNames"),
-    ])
-    aliases = set(values)
-    for value in values:
-        aliases.add(python_name_from_label(value))
-        if value.startswith("WF") and len(value) > 2:
-            aliases.add(python_name_from_label(value[2:]))
-    return {alias for alias in aliases if alias}
-
-
-def action_canonicalization_descriptors(action_origins: list[object]) -> list[dict]:
-    toolkit_items = toolkit_action_items_by_identifier()
-    previous_names = toolkit_action_previous_python_names_by_identifier()
-    native_aliases = toolrenderer_action_native_aliases_by_identifier()
-    descriptors = []
-    for fallback_index, origin_value in enumerate(action_origins):
-        if isinstance(origin_value, str):
-            origin = {
-                "actionIndex": fallback_index,
-                "actionIdentifier": origin_value,
-                "actionUUID": None,
-            }
-        elif isinstance(origin_value, dict):
-            origin = {
-                "actionIndex": origin_value.get("actionIndex", fallback_index),
-                "actionIdentifier": origin_value.get("actionIdentifier"),
-                "actionUUID": origin_value.get("actionUUID"),
-                "actionParameters": origin_value.get("actionParameters", {}),
-            }
-        else:
-            continue
-        identifier = origin.get("actionIdentifier")
-        if not isinstance(identifier, str) or not identifier:
-            continue
-        item = toolkit_items.get(identifier)
-        if not item:
-            continue
-        canonical_name = item.get("pythonName")
-        if not isinstance(canonical_name, str) or not canonical_name:
-            continue
-        aliases = {canonical_name, python_name_from_label(item.get("displayName"))}
-        aliases.update(native_aliases.get(identifier, set()))
-        previous_name = previous_names.get(identifier)
-        if previous_name:
-            aliases.add(previous_name)
-        parameters = item.get("parameters")
-        has_parameter_metadata = isinstance(parameters, list)
-        action_parameters = origin.get("actionParameters")
-        if not isinstance(action_parameters, dict):
-            action_parameters = {}
-        accepted_parameters = set()
-        present_parameter_names = set()
-        for parameter in parameters or []:
-            accepted_parameters.update(parameter_aliases(parameter))
-            if not isinstance(parameter, dict):
-                continue
-            raw_keys = unique_strings([parameter.get("key"), parameter.get("rawKey")])
-            if not any(key in action_parameters for key in raw_keys):
-                continue
-            python_name = parameter.get("pythonName")
-            if not isinstance(python_name, str) or not python_name:
-                python_name = python_name_from_label(parameter.get("name") or parameter.get("key"))
-            if python_name:
-                present_parameter_names.add(python_name)
-        raw_parameter_keys = {
-            parameter.get("key")
-            for parameter in parameters or []
-            if isinstance(parameter, dict)
-        }
-        if "WFContentItemFilter" in raw_parameter_keys:
-            accepted_parameters.update({"query", "query_operator", "query_sort_order", "scope"})
-        output_aliases = {
-            python_name_from_label(item.get("displayName")),
-        }
-        for key in ("CustomOutputName", "WFCustomOutputName"):
-            output_aliases.add(python_name_from_label(action_parameters.get(key)))
-        descriptors.append({
-            **origin,
-            "canonicalName": canonical_name,
-            "nativeAliases": {alias for alias in aliases if alias},
-            "outputAliases": {alias for alias in output_aliases if alias},
-            "acceptedParameters": accepted_parameters,
-            "presentParameterNames": present_parameter_names,
-            "hasParameterMetadata": has_parameter_metadata,
-            "isStructural": "WFControlFlowMode" in action_parameters or "GroupingIdentifier" in action_parameters,
-        })
-    return descriptors
-
-
-def local_function_names(tree: ast.AST) -> set[str]:
-    return {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and isinstance(node.name, str)
-    }
-
-
-def imported_action_call_name(node: ast.AST, locals_: set[str]) -> ast.Name | None:
-    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-        return None
-    name = node.func.id
-    if name in locals_ or name in {"ref", "dict", "list", "set", "tuple", "str", "int", "float", "bool"}:
-        return None
-    if name in {"runnable", "input_fallback"} or name.startswith("when_"):
-        return None
-    return node.func
-
-
-def imported_action_call_candidates(tree: ast.AST, locals_: set[str]) -> list[tuple[ast.Call, ast.Name]]:
-    candidates = []
-    for node in ast.walk(tree):
-        candidate = imported_action_call_name(node, locals_)
-        if candidate is not None:
-            assert isinstance(node, ast.Call)
-            candidates.append((node, candidate))
-    return sorted(candidates, key=lambda item: (item[1].lineno, item[1].col_offset))
-
-
-def call_matches_action_descriptor(call: ast.Call, descriptor: dict) -> bool:
-    keyword_names = {keyword.arg for keyword in call.keywords if isinstance(keyword.arg, str)}
-    if not keyword_names:
-        return True
-    if not descriptor["hasParameterMetadata"]:
-        return False
-    return keyword_names.issubset(descriptor["acceptedParameters"])
-
-
-def monotonic_feasible_action_indexes(entries: list[dict]) -> list[set[int]] | None:
-    if not entries:
-        return []
-    forward: list[set[int]] = []
-    for offset, entry in enumerate(entries):
-        previous = forward[offset - 1] if offset else None
-        reachable = {
-            descriptor["actionIndex"]
-            for descriptor in entry["descriptors"]
-            if previous is None or any(previous_index < descriptor["actionIndex"] for previous_index in previous)
-        }
-        forward.append(reachable)
-
-    backward: list[set[int]] = [set() for _entry in entries]
-    for offset in range(len(entries) - 1, -1, -1):
-        following = backward[offset + 1] if offset + 1 < len(entries) else None
-        backward[offset] = {
-            descriptor["actionIndex"]
-            for descriptor in entries[offset]["descriptors"]
-            if following is None or any(following_index > descriptor["actionIndex"] for following_index in following)
-        }
-
-    feasible = [
-        forward[offset].intersection(backward[offset])
-        for offset in range(len(entries))
-    ]
-    return feasible if all(feasible) else None
-
-
-def canonicalize_imported_action_names(source: str, action_origins: list[object]) -> tuple[str, dict]:
-    report = {
-        "present": False,
-        "source": "workflow action identities and ToolKit action metadata",
-        "strategy": "callee-alias-or-monotonic-parameter-consensus",
-        "status": "skipped",
-        "replacement_count": 0,
-        "matched_call_count": 0,
-        "unresolved_call_count": 0,
-        "ignored_call_count": 0,
-        "replacements": [],
-        "unresolved_calls": [],
-        "ignored_calls": [],
-    }
-    if not source or not action_origins:
-        report["reason"] = "source or workflow action identities are unavailable"
-        return source, report
-    descriptors = action_canonicalization_descriptors(action_origins)
-    if not descriptors:
-        report["reason"] = "no workflow actions resolved to ToolKit action metadata"
-        return source, report
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        report["reason"] = "native Python could not be parsed"
-        return source, report
-    calls = imported_action_call_candidates(tree, local_function_names(tree))
-    if not calls:
-        report["reason"] = "native Python contains no named call candidates"
-        return source, report
-
-    call_matches = []
-    for call, func_node in calls:
-        alias_descriptors = [
-            descriptor
-            for descriptor in descriptors
-            if func_node.id in descriptor["nativeAliases"]
-        ]
-        compatible = [
-            descriptor
-            for descriptor in alias_descriptors
-            if call_matches_action_descriptor(call, descriptor)
-        ]
-        inferred_descriptors = []
-        if not alias_descriptors and func_node.id.startswith("com_"):
-            inferred_descriptors = [
-                descriptor
-                for descriptor in descriptors
-                if not descriptor["isStructural"] and call_matches_action_descriptor(call, descriptor)
-            ]
-        if alias_descriptors or func_node.id.startswith("com_"):
-            call_matches.append({
-                "call": call,
-                "func": func_node,
-                "aliasDescriptors": alias_descriptors,
-                "compatibleDescriptors": compatible,
-                "inferredDescriptors": inferred_descriptors,
-            })
-    if not call_matches:
-        report["reason"] = "no named calls match the workflow action metadata"
-        return source, report
-
-    compatible_counts = {}
-    descriptor_capacity = {}
-    for match in call_matches:
-        name = match["func"].id
-        if match["compatibleDescriptors"]:
-            compatible_counts[name] = compatible_counts.get(name, 0) + 1
-    for descriptor in descriptors:
-        for alias in descriptor["nativeAliases"]:
-            descriptor_capacity.setdefault(alias, set()).add(descriptor["actionIndex"])
-
-    line_offsets = line_offsets_for(source)
-    replacements: list[tuple[int, int, str, str]] = []
-    replacement_details = []
-    unresolved = []
-    ignored = []
-    monotonic_entries = []
-    matched_call_count = 0
-    for match in call_matches:
-        func_node = match["func"]
-        old_name = func_node.id
-        if not match["aliasDescriptors"]:
-            keyword_names = {
-                keyword.arg
-                for keyword in match["call"].keywords
-                if isinstance(keyword.arg, str)
-            }
-            if keyword_names == {"_from"}:
-                ignored.append({
-                    "name": old_name,
-                    "line": func_node.lineno,
-                    "column": func_node.col_offset,
-                    "reason": "conversion helper is not a workflow action call",
-                    "candidateActionIdentifiers": [],
-                })
-                continue
-            inferred = match["inferredDescriptors"]
-            if not inferred:
-                unresolved.append({
-                    "name": old_name,
-                    "line": func_node.lineno,
-                    "column": func_node.col_offset,
-                    "reason": "reserved native call has no parameter-compatible workflow action",
-                    "candidateActionIdentifiers": [],
-                })
-                continue
-            monotonic_entries.append({
-                "match": match,
-                "descriptors": inferred,
-                "inferred": True,
-            })
-            continue
-        compatible = match["compatibleDescriptors"]
-        if not compatible:
-            detail = {
-                "name": old_name,
-                "line": func_node.lineno,
-                "column": func_node.col_offset,
-                "reason": "call parameters do not match the workflow action metadata",
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"]
-                    for descriptor in match["aliasDescriptors"]
-                }),
-            }
-            keyword_names = {
-                keyword.arg
-                for keyword in match["call"].keywords
-                if isinstance(keyword.arg, str)
-            }
-            if keyword_names == {"_from"}:
-                detail["reason"] = "conversion helper is not a workflow action call"
-                ignored.append(detail)
-            else:
-                unresolved.append(detail)
-            continue
-        if compatible_counts.get(old_name, 0) > len(descriptor_capacity.get(old_name, set())):
-            unresolved.append({
-                "name": old_name,
-                "line": func_node.lineno,
-                "column": func_node.col_offset,
-                "reason": "more compatible calls than workflow action instances",
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"] for descriptor in compatible
-                }),
-            })
-            continue
-        canonical_names = {descriptor["canonicalName"] for descriptor in compatible}
-        if len(canonical_names) != 1:
-            unresolved.append({
-                "name": old_name,
-                "line": func_node.lineno,
-                "column": func_node.col_offset,
-                "reason": "workflow action identities disagree on the canonical name",
-                "candidateCanonicalNames": sorted(canonical_names),
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"] for descriptor in compatible
-                }),
-            })
-            continue
-        canonical_name = next(iter(canonical_names))
-        monotonic_entries.append({
-            "match": match,
-            "descriptors": compatible,
-            "inferred": False,
-        })
-        matched_call_count += 1
-        if old_name == canonical_name:
-            continue
-        start, end = node_span(func_node, line_offsets)
-        replacements.append((start, end, old_name, canonical_name))
-        replacement_details.append({
-            "from": old_name,
-            "to": canonical_name,
-            "line": func_node.lineno,
-            "column": func_node.col_offset,
-            "actionIdentifiers": sorted({
-                descriptor["actionIdentifier"] for descriptor in compatible
-            }),
-            "actionIndexes": sorted({
-                descriptor["actionIndex"] for descriptor in compatible
-            }),
-            "matchSource": "callee-alias-parameter-consensus",
-        })
-
-    monotonic_entries.sort(key=lambda entry: (
-        entry["match"]["func"].lineno,
-        entry["match"]["func"].col_offset,
-    ))
-    feasible_indexes = monotonic_feasible_action_indexes(monotonic_entries)
-    for offset, entry in enumerate(monotonic_entries):
-        if not entry["inferred"]:
-            continue
-        match = entry["match"]
-        func_node = match["func"]
-        old_name = func_node.id
-        if feasible_indexes is None:
-            unresolved.append({
-                "name": old_name,
-                "line": func_node.lineno,
-                "column": func_node.col_offset,
-                "reason": "reserved native call has no complete monotonic workflow alignment",
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"] for descriptor in entry["descriptors"]
-                }),
-            })
-            continue
-        matching = [
-            descriptor
-            for descriptor in entry["descriptors"]
-            if descriptor["actionIndex"] in feasible_indexes[offset]
-        ]
-        canonical_names = {descriptor["canonicalName"] for descriptor in matching}
-        if len(canonical_names) != 1:
-            unresolved.append({
-                "name": old_name,
-                "line": func_node.lineno,
-                "column": func_node.col_offset,
-                "reason": "monotonic workflow provenance does not identify one canonical name",
-                "candidateCanonicalNames": sorted(canonical_names),
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"] for descriptor in matching
-                }),
-                "candidateActionIndexes": sorted(feasible_indexes[offset]),
-            })
-            continue
-        canonical_name = next(iter(canonical_names))
-        matched_call_count += 1
-        start, end = node_span(func_node, line_offsets)
-        replacements.append((start, end, old_name, canonical_name))
-        replacement_details.append({
-            "from": old_name,
-            "to": canonical_name,
-            "line": func_node.lineno,
-            "column": func_node.col_offset,
-            "actionIdentifiers": sorted({
-                descriptor["actionIdentifier"] for descriptor in matching
-            }),
-            "actionIndexes": sorted(feasible_indexes[offset]),
-            "matchSource": "monotonic-parameter-provenance",
-        })
-    rewritten = source
-    for start, end, _old_name, canonical_name in sorted(replacements, key=lambda item: item[0], reverse=True):
-        rewritten = rewritten[:start] + canonical_name + rewritten[end:]
-    status = "partial" if unresolved else ("applied" if matched_call_count else "skipped")
-    report.update({
-        "present": bool(replacements),
-        "status": status,
-        "replacement_count": len(replacement_details),
-        "matched_call_count": matched_call_count,
-        "unresolved_call_count": len(unresolved),
-        "ignored_call_count": len(ignored),
-        "replacements": replacement_details,
-        "unresolved_calls": unresolved,
-        "ignored_calls": ignored,
-    })
-    if status == "skipped":
-        report["reason"] = "matching aliases were conversion helpers, not workflow action calls"
-    return rewritten, report
-
-
-def value_assignment_target(node: ast.AST) -> tuple[ast.Name, ast.AST] | None:
-    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-        return node.targets[0], node.value
-    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-        return node.target, node.value
-    return None
-
-
-def output_name_matches_alias(name: str, alias: str) -> bool:
-    if name == alias:
-        return True
-    suffix = name[len(alias):] if name.startswith(alias) else ""
-    return bool(suffix) and suffix.isdigit()
-
-
-def monotonic_assignments(candidate_indexes: list[list[int]], limit: int = 512) -> tuple[list[list[int]], bool]:
-    solutions: list[list[int]] = []
-    truncated = False
-
-    def visit(offset: int, previous: int, path: list[int]) -> None:
-        nonlocal truncated
-        if truncated:
-            return
-        if offset == len(candidate_indexes):
-            solutions.append(path.copy())
-            if len(solutions) >= limit:
-                truncated = True
-            return
-        for index in candidate_indexes[offset]:
-            if index <= previous:
-                continue
-            path.append(index)
-            visit(offset + 1, index, path)
-            path.pop()
-
-    visit(0, -1, [])
-    return solutions, truncated
-
-
-def call_action_index_evidence(tree: ast.AST, descriptors: list[dict]) -> tuple[list[tuple[tuple[int, int], int]], set[int]]:
-    calls = []
-    uncertain_indexes = set()
-    for call, func in imported_action_call_candidates(tree, local_function_names(tree)):
-        compatible = [
-            descriptor
-            for descriptor in descriptors
-            if func.id in descriptor["nativeAliases"] and call_matches_action_descriptor(call, descriptor)
-        ]
-        canonical_names = {descriptor["canonicalName"] for descriptor in compatible}
-        if len(canonical_names) != 1:
-            uncertain_indexes.update(descriptor["actionIndex"] for descriptor in compatible)
-            continue
-        indexes = sorted({descriptor["actionIndex"] for descriptor in compatible})
-        if not indexes:
-            continue
-        calls.append({
-            "position": (func.lineno, func.col_offset),
-            "indexes": indexes,
-        })
-
-    if not calls:
-        return [], uncertain_indexes
-    calls.sort(key=lambda item: item["position"])
-
-    forward = []
-    for offset, item in enumerate(calls):
-        previous = forward[offset - 1] if offset else None
-        reachable = {
-            index
-            for index in item["indexes"]
-            if previous is None or any(previous_index < index for previous_index in previous)
-        }
-        forward.append(reachable)
-
-    backward: list[set[int]] = [set() for _ in calls]
-    for offset in range(len(calls) - 1, -1, -1):
-        following = backward[offset + 1] if offset + 1 < len(calls) else None
-        backward[offset] = {
-            index
-            for index in calls[offset]["indexes"]
-            if following is None or any(following_index > index for following_index in following)
-        }
-
-    feasible = [
-        forward[offset].intersection(backward[offset])
-        for offset in range(len(calls))
-    ]
-    if any(not indexes for indexes in feasible):
-        all_indexes = {
-            index
-            for item in calls
-            for index in item["indexes"]
-        }
-        return [], uncertain_indexes.union(all_indexes)
-
-    anchors = [
-        (calls[offset]["position"], next(iter(indexes)))
-        for offset, indexes in enumerate(feasible)
-        if len(indexes) == 1
-    ]
-    possible_used_indexes = uncertain_indexes.union(*feasible)
-    return anchors, possible_used_indexes
-
-
-def docstring_expression_ids(tree: ast.AST) -> set[int]:
-    output = set()
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if not isinstance(body, list) or not body:
-            continue
-        first = body[0]
-        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
-            output.add(id(first))
-    return output
-
-
-def reify_imported_value_actions(source: str, action_origins: list[object]) -> tuple[str, dict]:
-    report = {
-        "present": False,
-        "source": "workflow action identities, serialized parameter presence, and ToolKit action metadata",
-        "strategy": "output-alias-or-monotonic-value-parameter-consensus",
-        "status": "skipped",
-        "replacement_count": 0,
-        "candidate_count": 0,
-        "unresolved_count": 0,
-        "replacements": [],
-        "unresolved": [],
-    }
-    if not source or not action_origins:
-        report["reason"] = "source or workflow action identities are unavailable"
-        return source, report
-    descriptors = action_canonicalization_descriptors(action_origins)
-    if not descriptors:
-        report["reason"] = "no workflow actions resolved to ToolKit action metadata"
-        return source, report
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        report["reason"] = "native Python could not be parsed"
-        return source, report
-
-    anchors, possible_call_indexes = call_action_index_evidence(tree, descriptors)
-    eligible_descriptors = [
-        descriptor
-        for descriptor in descriptors
-        if len(descriptor["presentParameterNames"]) == 1
-        and not descriptor["isStructural"]
-        and descriptor["canonicalName"] not in descriptor["outputAliases"]
-        and descriptor["actionIndex"] not in possible_call_indexes
-    ]
-    docstring_ids = docstring_expression_ids(tree)
-    candidates = []
-    for node in ast.walk(tree):
-        assignment = value_assignment_target(node)
-        target = None
-        if assignment is not None:
-            target, value = assignment
-            if isinstance(value, ast.Call):
-                continue
-        elif isinstance(node, ast.Expr) and id(node) not in docstring_ids and not isinstance(node.value, ast.Call):
-            value = node.value
-        else:
-            continue
-        position = (value.lineno, value.col_offset)
-        previous_indexes = [index for anchor_position, index in anchors if anchor_position < position]
-        next_indexes = [index for anchor_position, index in anchors if anchor_position > position]
-        lower_bound = max(previous_indexes) if previous_indexes else -1
-        upper_bound = min(next_indexes) if next_indexes else None
-        matching_descriptors = [
-            descriptor
-            for descriptor in eligible_descriptors
-            if descriptor["actionIndex"] > lower_bound
-            and (upper_bound is None or descriptor["actionIndex"] < upper_bound)
-            and (
-                target is None
-                or any(output_name_matches_alias(target.id, alias) for alias in descriptor["outputAliases"])
-            )
-        ]
-        if matching_descriptors:
-            candidates.append({
-                "target": target,
-                "value": value,
-                "descriptors": matching_descriptors,
-            })
-    candidates.sort(key=lambda item: (item["value"].lineno, item["value"].col_offset))
-    if not candidates:
-        report["reason"] = "native Python contains no value expressions matching unclaimed workflow actions"
-        return source, report
-
-    descriptor_by_index = {descriptor["actionIndex"]: descriptor for descriptor in eligible_descriptors}
-    solutions, truncated = monotonic_assignments([
-        sorted({descriptor["actionIndex"] for descriptor in candidate["descriptors"]})
-        for candidate in candidates
-    ])
-
-    line_offsets = line_offsets_for(source)
-    replacements: list[tuple[int, int, str]] = []
-    replacement_details = []
-    unresolved = []
-    for candidate_offset, candidate in enumerate(candidates):
-        target = candidate["target"]
-        possible_descriptors = [] if truncated else [
-            descriptor_by_index[index]
-            for index in sorted({solution[candidate_offset] for solution in solutions})
-            if index in descriptor_by_index
-        ]
-        pairs = {
-            (descriptor["canonicalName"], next(iter(descriptor["presentParameterNames"])))
-            for descriptor in possible_descriptors
-        }
-        display_target = target.id if target is not None else None
-        if truncated or not solutions or len(pairs) != 1:
-            unresolved.append({
-                "target": display_target,
-                "line": candidate["value"].lineno,
-                "column": candidate["value"].col_offset,
-                "reason": "workflow action order and metadata do not identify exactly one canonical action and present parameter",
-                "candidateCanonicalCalls": sorted(f"{name}({parameter}=...)" for name, parameter in pairs),
-                "candidateActionIdentifiers": sorted({
-                    descriptor["actionIdentifier"] for descriptor in possible_descriptors
-                }),
-            })
-            continue
-        canonical_name, parameter_name = next(iter(pairs))
-        value = candidate["value"]
-        start, end = node_span(value, line_offsets)
-        original_value = source[start:end]
-        replacement = f"{canonical_name}({parameter_name}={original_value})"
-        matching = [descriptor for descriptor in possible_descriptors if descriptor["canonicalName"] == canonical_name]
-        replacements.append((start, end, replacement))
-        replacement_details.append({
-            "target": display_target,
-            "parameter": parameter_name,
-            "to": canonical_name,
-            "line": value.lineno,
-            "column": value.col_offset,
-            "actionIdentifiers": sorted({descriptor["actionIdentifier"] for descriptor in matching}),
-            "actionIndexes": sorted({descriptor["actionIndex"] for descriptor in matching}),
-        })
-
-    rewritten = source
-    for start, end, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-    report.update({
-        "present": bool(replacements),
-        "status": "partial" if unresolved else ("applied" if replacements else "skipped"),
-        "replacement_count": len(replacement_details),
-        "candidate_count": len(candidates),
-        "unresolved_count": len(unresolved),
-        "replacements": replacement_details,
-        "unresolved": unresolved,
-    })
-    if not replacements and not unresolved:
-        report["reason"] = "no value assignments could be reified"
-    return rewritten, report
-
-
-def expression_loads_name(node: ast.AST, name: str) -> bool:
-    return any(
-        isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id == name
-        for item in ast.walk(node)
-    )
-
-
-def pure_reference_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-        return node.id
-    if (
-        isinstance(node, ast.JoinedStr)
-        and len(node.values) == 1
-        and isinstance(node.values[0], ast.FormattedValue)
-        and isinstance(node.values[0].value, ast.Name)
-        and isinstance(node.values[0].value.ctx, ast.Load)
-    ):
-        return node.values[0].value.id
-    return None
-
-
-def loop_assignment_calls(loop: ast.For) -> dict[str, list[ast.Call]]:
-    output: dict[str, list[ast.Call]] = {}
-
-    class Visitor(ast.NodeVisitor):
-        def visit_For(self, node: ast.For) -> None:
-            return
-
-        def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
-            return
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            return
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            return
-
-        def visit_Lambda(self, node: ast.Lambda) -> None:
-            return
-
-        def visit_Assign(self, node: ast.Assign) -> None:
-            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
-                output.setdefault(node.targets[0].id, []).append(node.value)
-            self.generic_visit(node.value)
-
-        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-            if isinstance(node.target, ast.Name) and isinstance(node.value, ast.Call):
-                output.setdefault(node.target.id, []).append(node.value)
-            if node.value is not None:
-                self.generic_visit(node.value)
-
-    visitor = Visitor()
-    for statement in loop.body:
-        visitor.visit(statement)
-    return output
-
-
-def initialize_imported_loop_carried_values(source: str) -> tuple[str, dict]:
-    report = {
-        "present": False,
-        "source": "native Python AST control-flow recurrence",
-        "strategy": "same-call-keyword-recurrence-seed-consensus",
-        "status": "skipped",
-        "initialization_count": 0,
-        "initializations": [],
-    }
-    if not source:
-        report["reason"] = "source is unavailable"
-        return source, report
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        report["reason"] = "native Python could not be parsed"
-        return source, report
-
-    function_arguments = set()
-    for function in [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        function_arguments.update(argument.arg for argument in function.args.args)
-        function_arguments.update(argument.arg for argument in function.args.posonlyargs)
-        function_arguments.update(argument.arg for argument in function.args.kwonlyargs)
-        if function.args.vararg is not None:
-            function_arguments.add(function.args.vararg.arg)
-        if function.args.kwarg is not None:
-            function_arguments.add(function.args.kwarg.arg)
-
-    line_offsets = line_offsets_for(source)
-    insertions: dict[int, list[tuple[str, str, int]]] = {}
-    for loop in [node for node in ast.walk(tree) if isinstance(node, ast.For)]:
-        defined_before = set(function_arguments)
-        defined_before.update(
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Store)
-            and getattr(node, "lineno", loop.lineno) < loop.lineno
-        )
-        for target, calls in loop_assignment_calls(loop).items():
-            if target in defined_before:
-                continue
-            seeds = set()
-            for recursive_call in calls:
-                recursive_function = ast.dump(recursive_call.func, include_attributes=False)
-                for keyword in recursive_call.keywords:
-                    if not isinstance(keyword.arg, str) or not expression_loads_name(keyword.value, target):
-                        continue
-                    for seed_call in calls:
-                        if seed_call is recursive_call:
-                            continue
-                        if ast.dump(seed_call.func, include_attributes=False) != recursive_function:
-                            continue
-                        seed_keyword = next(
-                            (
-                                candidate
-                                for candidate in seed_call.keywords
-                                if candidate.arg == keyword.arg
-                                and not expression_loads_name(candidate.value, target)
-                            ),
-                            None,
-                        )
-                        if seed_keyword is None:
-                            continue
-                        seed_name = pure_reference_name(seed_keyword.value)
-                        if seed_name in defined_before:
-                            seeds.add(seed_name)
-            if len(seeds) == 1:
-                insertions.setdefault(line_offsets[loop.lineno - 1], []).append(
-                    (target, next(iter(seeds)), loop.lineno)
-                )
-
-    rewritten = source
-    details = []
-    for offset, values in sorted(insertions.items(), reverse=True):
-        line_end = source.find("\n", offset)
-        if line_end < 0:
-            line_end = len(source)
-        line = source[offset:line_end]
-        indent = re.match(r"[ \t]*", line).group(0)
-        unique_values = sorted(set(values))
-        text = "".join(f"{indent}{target} = {seed}\n" for target, seed, _line in unique_values)
-        rewritten = rewritten[:offset] + text + rewritten[offset:]
-        details.extend({
-            "target": target,
-            "seed": seed,
-            "beforeLine": line_number,
-        } for target, seed, line_number in unique_values)
-
-    report.update({
-        "present": bool(details),
-        "status": "applied" if details else "skipped",
-        "initialization_count": len(details),
-        "initializations": sorted(details, key=lambda item: (item["beforeLine"], item["target"])),
-    })
-    if not details:
-        report["reason"] = "no uninitialized loop-carried recurrence has a unique existing seed"
-    return rewritten, report
-
-
-def _line_span_for_statement(
-    source: str, statement: ast.stmt, offsets: list[int]
-) -> tuple[int, int]:
-    start = offsets[statement.lineno - 1]
-    if statement.end_lineno < len(offsets):
-        end = offsets[statement.end_lineno]
-    else:
-        end = len(source)
-    return start, end
-
-
-def canonicalize_imported_named_variables(
-    source: str, action_origins: list[object]
-) -> tuple[str, dict]:
-    report = {
-        "present": False,
-        "source": "native Set/Get Variable workflow actions",
-        "strategy": "restore natural list mutation syntax",
-        "setVariables": [],
-        "getVariables": [],
-    }
-    origins = [origin for origin in action_origins if isinstance(origin, dict)]
-    set_names = {
-        origin.get("actionParameters", {}).get("WFVariableName")
-        for origin in origins
-        if origin.get("actionIdentifier") == "is.workflow.actions.setvariable"
-    }
-    set_names = {name for name in set_names if isinstance(name, str) and name}
-    get_names: set[str] = set()
-    for index, origin in enumerate(origins):
-        if origin.get("actionIdentifier") != "is.workflow.actions.getvariable":
-            continue
-        for previous in reversed(origins[:index]):
-            if previous.get("actionIdentifier") != "is.workflow.actions.gettext":
-                continue
-            value = previous.get("actionParameters", {}).get("WFTextActionText")
-            if isinstance(value, str) and value:
-                get_names.add(value)
-            break
-    if not set_names and not get_names:
-        report["status"] = "skipped"
-        report["reason"] = "workflow contains no native Set/Get Variable actions"
-        return source, report
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        report["status"] = "skipped"
-        report["reason"] = "native Python could not be parsed"
-        return source, report
-
-    offsets = line_offsets_for(source)
-    parent = {
-        id(child): node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
-    edits: list[tuple[int, int, str]] = []
-    removed_statement_ids: set[int] = set()
-
-    for block in _statement_blocks(tree):
-        for index in range(1, len(block)):
-            first = value_assignment_target(block[index - 1])
-            second = value_assignment_target(block[index])
-            if first is None or second is None:
-                continue
-            first_target, first_value = first
-            second_target, second_value = second
-            if (
-                second_target.id in set_names
-                and isinstance(second_value, ast.Name)
-                and second_value.id == first_target.id
-            ):
-                uses = [
-                    node
-                    for node in ast.walk(tree)
-                    if isinstance(node, ast.Name)
-                    and isinstance(node.ctx, ast.Load)
-                    and node.id == first_target.id
-                ]
-                if len(uses) == 1:
-                    start, end = node_span(first_target, offsets)
-                    edits.append((start, end, second_target.id))
-                    start, end = _line_span_for_statement(
-                        source, block[index], offsets
-                    )
-                    edits.append((start, end, ""))
-                    removed_statement_ids.add(id(block[index]))
-                    report["setVariables"].append(second_target.id)
-
-            if (
-                isinstance(first_value, ast.Constant)
-                and isinstance(first_value.value, str)
-                and first_value.value in get_names
-                and isinstance(second_value, ast.Name)
-                and second_value.id == first_target.id
-            ):
-                variable_name = first_value.value
-                for node in ast.walk(tree):
-                    if (
-                        isinstance(node, ast.Name)
-                        and isinstance(node.ctx, ast.Load)
-                        and node.id == second_target.id
-                        and node.lineno > block[index].lineno
-                    ):
-                        start, end = node_span(node, offsets)
-                        edits.append((start, end, variable_name))
-                for statement in (block[index - 1], block[index]):
-                    if id(statement) in removed_statement_ids:
-                        continue
-                    start, end = _line_span_for_statement(
-                        source, statement, offsets
-                    )
-                    edits.append((start, end, ""))
-                    removed_statement_ids.add(id(statement))
-                report["getVariables"].append(variable_name)
-
-    rewritten = source
-    for start, end, replacement in sorted(
-        edits, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        rewritten = rewritten[:start] + replacement + rewritten[end:]
-    report["setVariables"] = sorted(set(report["setVariables"]))
-    report["getVariables"] = sorted(set(report["getVariables"]))
-    report["present"] = rewritten != source
-    report["status"] = "applied" if report["present"] else "skipped"
-    if not report["present"]:
-        report["reason"] = "native variable actions did not match the exporter alias shape"
-    return rewritten, report
-
-
-def canonicalize_imported_comment_actions(
-    source: str, action_origins: list[object]
-) -> tuple[str, dict]:
-    report = {
-        "present": False,
-        "source": "native Comment actions and WFCommentActionText",
-        "strategy": "replace exported hash-comment blocks with ToolKit action calls",
-        "status": "skipped",
-        "action_count": 0,
-        "replacement_count": 0,
-        "replacements": [],
-        "unresolved": [],
-    }
-    comments = []
-    for origin in action_origins:
-        if (
-            not isinstance(origin, dict)
-            or origin.get("actionIdentifier") != "is.workflow.actions.comment"
-        ):
-            continue
-        parameters = origin.get("actionParameters")
-        value = parameters.get("WFCommentActionText", "") if isinstance(parameters, dict) else ""
-        comments.append({
-            "actionIndex": origin.get("actionIndex"),
-            "text": value if isinstance(value, str) else str(value),
-        })
-    report["action_count"] = len(comments)
-    if not source or not comments:
-        report["reason"] = "workflow contains no Comment actions"
-        return source, report
-
-    lines = source.splitlines(keepends=True)
-    cursor = 0
-    edits = []
-
-    def comment_content(line: str) -> tuple[str, str] | None:
-        body = line.rstrip("\r\n")
-        indent = body[: len(body) - len(body.lstrip(" \t"))]
-        stripped = body[len(indent):]
-        if not stripped.startswith("#"):
-            return None
-        content = stripped[1:]
-        if content.startswith(" "):
-            content = content[1:]
-        return indent, content
-
-    for comment in comments:
-        expected = (
-            comment["text"]
-            .replace("\r\n", "\n")
-            .replace("\r", "\n")
-            .split("\n")
-        )
-        match = None
-        for start in range(cursor, len(lines) - len(expected) + 1):
-            parsed = [comment_content(lines[start + offset]) for offset in range(len(expected))]
-            if any(item is None for item in parsed):
-                continue
-            assert all(item is not None for item in parsed)
-            if [item[1] for item in parsed] != expected:
-                continue
-            indents = {item[0] for item in parsed}
-            if len(indents) != 1:
-                continue
-            match = (start, start + len(expected), parsed[0][0])
-            break
-        if match is None:
-            report["unresolved"].append({
-                "actionIndex": comment["actionIndex"],
-                "text": comment["text"],
-            })
-            continue
-        start, end, indent = match
-        newline = "\n"
-        if lines[end - 1].endswith("\r\n"):
-            newline = "\r\n"
-        elif not lines[end - 1].endswith(("\n", "\r")):
-            newline = ""
-        replacement = (
-            f"{indent}com_apple_shortcuts_comment(comment="
-            f"{json.dumps(comment['text'], ensure_ascii=False)}){newline}"
-        )
-        edits.append((start, end, replacement))
-        report["replacements"].append({
-            "actionIndex": comment["actionIndex"],
-            "sourceStartLine": start + 1,
-            "sourceEndLine": end,
-            "textLength": len(comment["text"]),
-        })
-        cursor = end
-
-    for start, end, replacement in reversed(edits):
-        lines[start:end] = [replacement]
-    rewritten = "".join(lines)
-    report["replacement_count"] = len(edits)
-    report["present"] = rewritten != source
-    report["status"] = "applied" if report["present"] else "skipped"
-    if not report["present"]:
-        report["reason"] = "exported comment blocks did not match native Comment actions"
-    return rewritten, report
-
-
-def canonicalize_import_response(response: dict, action_origins: list[object]) -> dict:
-    source = response.get("python_code")
-    if not isinstance(source, str):
-        return response
-    comments, comment_report = canonicalize_imported_comment_actions(
-        source, action_origins
-    )
-    if comments != source:
-        response.setdefault("raw_python_code_before_comment_reification", source)
-    response["comment_action_reification"] = comment_report
-    rewritten, report = canonicalize_imported_action_names(comments, action_origins)
-    if rewritten != comments:
-        response.setdefault("raw_python_code_before_name_canonicalization", comments)
-    response["name_canonicalization"] = report
-    reified, value_report = reify_imported_value_actions(rewritten, action_origins)
-    if reified != rewritten:
-        response.setdefault("raw_python_code_before_value_reification", rewritten)
-    response["value_action_reification"] = value_report
-    named_variables, named_variable_report = canonicalize_imported_named_variables(
-        reified, action_origins
-    )
-    if named_variables != reified:
-        response.setdefault("raw_python_code_before_named_variable_canonicalization", reified)
-    response["named_variable_canonicalization"] = named_variable_report
-    initialized, control_flow_report = initialize_imported_loop_carried_values(
-        named_variables
-    )
-    if initialized != named_variables:
-        response.setdefault(
-            "raw_python_code_before_control_flow_initialization", named_variables
-        )
-    response["python_code"] = initialized
-    response["python_length"] = len(initialized.encode("utf-8"))
-    response["control_flow_initialization"] = control_flow_report
-    return response
 
 
 def inline_catalog_import_response(socket_path: str, response: dict) -> dict:
@@ -4532,23 +2547,18 @@ def main() -> int:
     parser.add_argument(
         "--raw", action="store_true", help="Print bridge JSON response on one line"
     )
+    parser.add_argument(
+        "--pipeline",
+        choices=["shortpy", "native"],
+        default=os.environ.get("SHORTPY_RUNTIME_PIPELINE", "shortpy"),
+        help="Runtime conversion pipeline [shortpy]",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     sub.add_parser("last")
     sub.add_parser("clear")
     set_source = sub.add_parser("set-source")
     add_source_args(set_source)
-    direct_run = sub.add_parser(
-        "direct-run",
-        help="Run source through ShortcutsLanguage.pythonToShortcut in-process",
-    )
-    add_source_args(direct_run)
-    direct_run.add_argument(
-        "--flags",
-        type=int,
-        default=0,
-        help="Bridge transport flags passed to direct-run-b64-flags [0]",
-    )
     python_to_plist = sub.add_parser(
         "python-to-plist",
         help="Compile Python through ShortcutsLanguage and return the WFWorkflowFile plist dictionary",
@@ -4558,7 +2568,7 @@ def main() -> int:
         "--flags",
         type=int,
         default=0,
-        help="Bridge transport flags passed to python-to-plist-b64-flags [0]",
+        help="Bridge transport flags passed to the selected runtime pipeline [0]",
     )
     python_to_bplist = sub.add_parser(
         "python-to-bplist",
@@ -4569,7 +2579,7 @@ def main() -> int:
         "--flags",
         type=int,
         default=0,
-        help="Bridge transport flags passed to python-to-bplist-b64-flags [0]",
+        help="Bridge transport flags passed to the selected runtime pipeline [0]",
     )
     python_to_bplist.add_argument(
         "--sign",
@@ -4664,7 +2674,7 @@ def main() -> int:
     retrieve_triggers.add_argument("--refresh-interface", action="store_true")
     transpiler = sub.add_parser(
         "get-transpiler-feedback",
-        help="Agent-compatible wrapper around ShortcutsLanguage.pythonToShortcut validation",
+        help="Agent-compatible wrapper around ShortpyToShortcut validation",
     )
     add_source_args(transpiler)
     transpiler.add_argument("--flags", type=int, default=0)
@@ -4722,31 +2732,28 @@ def main() -> int:
         print_response(raw, not args.raw)
         return 0
 
-    if args.command == "direct-run":
-        normalized = normalize_control_flow_source(read_source(args))
-        payload = base64.b64encode(normalized["source"]).decode("ascii")
-        raw = send_command(args.socket, f"direct-run-b64-flags {args.flags} {payload}")
-        response = attach_control_flow_normalization_summary(
-            json.loads(raw), normalized
-        )
-        print_response(json.dumps(response), not args.raw)
-        return 0
-
     if args.command == "python-to-plist":
-        normalized = normalize_control_flow_source(read_source(args))
-        payload = base64.b64encode(normalized["source"]).decode("ascii")
-        raw = send_command(
-            args.socket, f"python-to-plist-b64-flags {args.flags} {payload}"
+        response = compile_python_to_bplist(
+            args.socket,
+            read_source(args),
+            args.flags,
+            pipeline=args.pipeline,
         )
-        response = attach_control_flow_normalization_summary(
-            json.loads(raw), normalized
-        )
+        payload = response.get("plist_payload", {}).get("data")
+        if response.get("ok") and isinstance(payload, str):
+            response["mode"] = "python-to-workflow-plist"
+            response["plist"] = plistlib.loads(base64.b64decode(payload))
         print_response(json.dumps(response), not args.raw)
         return 0
 
     if args.command == "python-to-bplist":
         try:
-            response = compile_python_to_bplist(args.socket, read_source(args), args.flags)
+            response = compile_python_to_bplist(
+                args.socket,
+                read_source(args),
+                args.flags,
+                pipeline=args.pipeline,
+            )
             if args.sign_shortcut:
                 response = sign_shortcut_response(response, args.sign_mode, args.shortcuts_cli)
         except InlineCatalogError as exc:
@@ -4784,22 +2791,26 @@ def main() -> int:
 
     if args.command == "plist-to-python":
         plist_json = read_source(args)
-        action_origins = action_origins_from_plist_json(plist_json)
         payload = base64.b64encode(plist_json).decode("ascii")
-        response = json.loads(send_command(args.socket, f"plist-to-python-b64 {payload}"))
+        pipeline_raw = {"native": 0, "shortpy": 1}[args.pipeline]
+        response = json.loads(send_command(
+            args.socket,
+            f"pipeline-plist-to-python-b64 {pipeline_raw} {payload}",
+        ))
         response = inline_catalog_import_response(args.socket, response)
-        response = canonicalize_import_response(response, action_origins)
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0
 
     if args.command == "plist-data-to-python":
         try:
             plist_data, signed_import, icloud_import = workflow_import_source_bytes(read_source(args))
-            action_origins = action_origins_from_plist_data(plist_data)
             payload = base64.b64encode(plist_data).decode("ascii")
-            response = json.loads(send_command(args.socket, f"plist-data-to-python-b64 {payload}"))
+            pipeline_raw = {"native": 0, "shortpy": 1}[args.pipeline]
+            response = json.loads(send_command(
+                args.socket,
+                f"pipeline-plist-data-to-python-b64 {pipeline_raw} {payload}",
+            ))
             response = inline_catalog_import_response(args.socket, response)
-            response = canonicalize_import_response(response, action_origins)
             if signed_import is not None:
                 response["signed_shortcut_import"] = signed_import
             if icloud_import is not None:

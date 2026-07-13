@@ -7,7 +7,12 @@ Proven on iOS Simulator 27.0 with bridge version `sim-0.1.25-record-file-saveToR
 The production serializer path is:
 
 ```text
-ShortcutsLanguage.pythonToShortcut
+ShortpyToShortcut
+  -> ShortcutsLanguage.PythonToIR
+  -> Shortpy native IR correction passes
+  -> ShortcutsLanguage native IR passes
+  -> ShortcutsLanguage.IRToShortcut
+  -> captured recurrence correction on native WFAction parameters (if required)
   -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync
   -> WFWorkflow.saveToRecord
   -> WFWorkflow.record
@@ -51,23 +56,30 @@ leave its append action when the appended value is another control-flow output.
 Direct `elif` lowering also omitted later conditions, while menu/conditional
 list accumulators remained disconnected named-variable actions.
 
-The production fix is an owned host AST normalization pass, not a hook or plist
-rewrite. It converts only proven complete output shapes before
-`ShortcutsLanguage.pythonToShortcut`, then keeps Apple's parser, diagnostics,
-variable inlining, action lowerer, and workflow serializer authoritative.
-Nine finite/foreach/menu/conditional collision and nesting fixtures pass
-`Python -> plist -> Python -> plist` with stable native action shapes.
+The production fix is `ShortpyToShortcut`, an owned compiler pipeline rather
+than a hook or source rewrite. It parses unchanged Python with
+`PythonToIR`, captures statement/scope bindings before destructive native
+passes, applies metadata-driven corrections, then runs Apple's control-flow
+inference, variable inlining, `IRToShortcut`, and workflow serializer.
+Finite/foreach/menu/conditional collision and nesting fixtures pass public
+`Python -> plist -> Python -> plist` cycles with stable native action shapes.
 The signed `Shortcut Debugger.shortcut` fixture additionally proved the more
 general nested shape where an outer Repeat Results append contains an action
-call that consumes an inner control-flow result. Making that action assignment
-the outer loop's native result removes the synthetic append helper. Native
-Comment actions import as explicit `com_apple_shortcuts_comment(...)` calls.
-For real variable mutations, direct casts and subscripts are selectively
-lowered through `com_apple_shortcuts_add_to_variable(...)`, preserving
+call that consumes an inner control-flow result. The owned pass transfers the
+native result binding without changing the Python. Loop-carried recurrence uses
+a native IR preparation to make the unchanged source lowerable, followed by a
+fail-closed native `WFAction` correction that changes only the recursive
+branch's captured action-output edge before `saveToRecord`. Conditional,
+`elif`, and Choose from Menu recurrences pass
+two independent compile cycles. Native Comment actions import as explicit
+`com_apple_shortcuts_comment(...)` calls. Real Add Variable actions with direct
+casts or subscripts import through
+`com_apple_shortcuts_add_to_variable(...)`, preserving
 `WFCoercionVariableAggrandizement` and
 `WFDictionaryValueVariableAggrandizement` on the append input. The supplied
 workflow compiles from 94 actions to the same 94 action identifiers in the same
-order, and the next compile remains stable.
+order. All 64 action-output dependency edges and their aggrandizements remain
+stable across the original and both independent compile cycles.
 
 Compiled plist bytes are still not byte-identical because Shortpy does not
 represent generated UUIDs, implicit defaults, or opaque per-action/root
@@ -89,7 +101,7 @@ The extension and bridge expose:
 
 - native Apple compiler diagnostics and fix-it parsing where available
 - ToolRenderer metadata retrieval
-- ToolKit-backed fallback metadata for live editor diagnostics
+- ToolRenderer-only cached metadata for live editor diagnostics
 - top-level action/trigger parameter checks only, leaving nested payload validation to Apple runtime diagnostics
 
 ## Host Shortcuts Record Sync

@@ -44,7 +44,7 @@ async function makeFakeBridge(root, initiallyRunning) {
     await fs.writeFile(state, "1", "utf8");
   }
   await fs.mkdir(path.join(root, "build-sim"), { recursive: true });
-  await fs.writeFile(path.join(root, "build-sim", "libShortcutsIDESimBridge-v019.dylib"), "", "utf8");
+  await fs.writeFile(path.join(root, "build-sim", "libShortcutsIDESimBridge-v020.dylib"), "", "utf8");
   await writeExecutable(path.join(root, "tools", "bridgectl.py"), `#!/usr/bin/env python3
 import json, os, sys
 state = ${JSON.stringify(state)}
@@ -275,12 +275,11 @@ print(json.dumps(list(conn.execute("SELECT id, bundleVersion FROM ContainerMetad
   assert.strictEqual(JSON.parse(secondRaw).toolrenderer_name_alignment.changed_count, 0);
 }
 
-async function testToolkitIntrinsicNameRepair(temp) {
+async function testToolkitIntrinsicNamesRemainNative(temp) {
   const repoRoot = path.resolve(__dirname, "..", "..");
   const toolkitCtl = path.join(repoRoot, "bridge", "tools", "toolkitctl.py");
   const source = path.join(temp, "toolkit-intrinsic-source.sqlite");
   const adjusted = path.join(temp, "toolkit-intrinsic-adjusted.sqlite");
-  const adjustedAgain = path.join(temp, "toolkit-intrinsic-adjusted-again.sqlite");
   await execFile("python3", ["-c", `
 import sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
@@ -300,11 +299,7 @@ conn.close()
 
   const raw = await execFile("python3", [toolkitCtl, "prepare", "--sqlite", source, "--out", adjusted]);
   const payload = JSON.parse(raw);
-  const repair = payload.shortcuts_language_intrinsic_name_repair;
-  assert.strictEqual(repair.matched_count, 5);
-  assert.strictEqual(repair.change_count, 5);
-  assert.strictEqual(repair.collision_rename_count, 1);
-  assert.deepStrictEqual(repair.missing_action_ids, []);
+  assert.strictEqual(payload.shortcuts_language_intrinsic_name_repair, undefined);
 
   const rowsRaw = await execFile("python3", ["-c", `
 import json, sqlite3, sys
@@ -312,12 +307,12 @@ conn = sqlite3.connect(sys.argv[1])
 print(json.dumps(list(conn.execute("SELECT id, pythonName FROM Tools ORDER BY rowId"))))
 `, adjusted]);
   assert.deepStrictEqual(JSON.parse(rowsRaw), [
-    ["is.workflow.actions.dictionary", "dictionary"],
-    ["is.workflow.actions.gettext", "text"],
-    ["is.workflow.actions.getvalueforkey", "get_dictionary_value"],
-    ["is.workflow.actions.list", "list"],
-    ["is.workflow.actions.nothing", "nothing"],
-    ["third.party.dictionary", "third_party_dictionary"],
+    ["is.workflow.actions.dictionary", "com_apple_shortcuts_dictionary"],
+    ["is.workflow.actions.gettext", "com_apple_shortcuts_text"],
+    ["is.workflow.actions.getvalueforkey", "com_apple_shortcuts_get_dictionary_value"],
+    ["is.workflow.actions.list", "com_apple_shortcuts_list"],
+    ["is.workflow.actions.nothing", "com_apple_shortcuts_nothing"],
+    ["third.party.dictionary", "dictionary"],
   ]);
 
   const sourceRowsRaw = await execFile("python3", ["-c", `
@@ -326,11 +321,6 @@ conn = sqlite3.connect(sys.argv[1])
 print(json.dumps(list(conn.execute("SELECT id, pythonName FROM Tools ORDER BY rowId"))))
 `, source]);
   assert.strictEqual(JSON.parse(sourceRowsRaw)[0][1], "com_apple_shortcuts_dictionary");
-
-  const secondRaw = await execFile("python3", [toolkitCtl, "prepare", "--sqlite", adjusted, "--out", adjustedAgain]);
-  const secondRepair = JSON.parse(secondRaw).shortcuts_language_intrinsic_name_repair;
-  assert.strictEqual(secondRepair.change_count, 0);
-  assert.strictEqual(secondRepair.collision_rename_count, 0);
 }
 
 async function testToolkitReferentialClosureRepair(temp) {
@@ -467,234 +457,6 @@ print(json.dumps(list(conn.execute("SELECT typeId, locale, id FROM EnumerationCa
   assert.strictEqual(secondRepair.case_count, 0);
   assert.strictEqual(secondRepair.inserted_row_count, 0);
   assert.strictEqual(secondRepair.pass_count, 1);
-}
-
-async function testImportNameCanonicalization() {
-  const repoRoot = path.resolve(__dirname, "..", "..");
-  const bridgeCtl = path.join(repoRoot, "bridge", "tools", "bridgectl.py");
-  const raw = await execFile("python3", ["-c", `
-import importlib.util, json, sys
-
-spec = importlib.util.spec_from_file_location("bridgectl", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-module.current_toolkit_metadata = lambda: {
-    "actions": [
-        {"id": "action.dictionary", "pythonName": "canonical_dictionary", "displayName": "Dictionary", "parameters": [{"key": "WFItems", "pythonName": "items"}]},
-        {"id": "action.run", "pythonName": "canonical_run_task", "displayName": "Run Task", "parameters": [{"key": "WFValue", "pythonName": "value"}]},
-        {"id": "action.open", "pythonName": "safari_open_urls", "displayName": "Open URLs", "parameters": [{"key": "WFInput", "pythonName": "url"}]},
-        {"id": "action.nested", "pythonName": "canonical_nested_action", "displayName": "Nested Action", "parameters": [{"key": "WFQuery", "pythonName": "query"}]},
-        {"id": "action.shared.a", "pythonName": "canonical_shared_a", "displayName": "Shared Action", "parameters": []},
-        {"id": "action.shared.b", "pythonName": "canonical_shared_b", "displayName": "Shared Action", "parameters": []},
-        {"id": "action.single", "pythonName": "canonical_single_action", "displayName": "Single Action", "parameters": []},
-        {"id": "action.value.a", "pythonName": "canonical_value_a", "displayName": "Ambiguous Value", "parameters": [{"key": "WFValue", "pythonName": "value"}]},
-        {"id": "action.value.b", "pythonName": "canonical_value_b", "displayName": "Ambiguous Value", "parameters": [{"key": "WFValue", "pythonName": "value"}]},
-    ]
-}
-module.toolkit_action_previous_python_names_by_identifier = lambda: {}
-module.toolrenderer_action_native_aliases_by_identifier = lambda: {
-    "action.run": {"native_run_task"},
-}
-
-plist = {
-    "WFWorkflowActions": [
-        {"WFWorkflowActionIdentifier": "action.dictionary", "WFWorkflowActionUUID": "literal-uuid", "WFWorkflowActionParameters": {"WFItems": {"key": "value"}, "CustomOutputName": "Payload"}},
-        {"WFWorkflowActionIdentifier": "action.run", "WFWorkflowActionUUID": "run-1"},
-        {"WFWorkflowActionIdentifier": "action.run", "WFWorkflowActionUUID": "run-2"},
-        {"WFWorkflowActionIdentifier": "action.open"},
-        {"WFWorkflowActionIdentifier": "action.nested"},
-        {"WFWorkflowActionIdentifier": "action.shared.a"},
-        {"WFWorkflowActionIdentifier": "action.shared.b"},
-        {"WFWorkflowActionIdentifier": "action.single"},
-    ]
-}
-origins = module.action_origins_from_plist_object(plist)
-source = '''def shortcut():
-    payload = {"key": "value"}
-    first = native_run_task(value=1)
-    match first:
-        case 1:
-            second = run_task(value=2)
-            open_urls(url="https://example.com")
-    converted = dictionary(_from=first)
-    results.append(nested_action(query="value"))
-    shared_action()
-    single_action()
-    single_action()
-'''
-rewritten, report = module.canonicalize_imported_action_names(source, origins)
-reified, value_report = module.reify_imported_value_actions(rewritten, origins)
-ambiguous_origins = module.action_origins_from_plist_object({
-    "WFWorkflowActions": [
-        {"WFWorkflowActionIdentifier": "action.value.a", "WFWorkflowActionParameters": {"WFValue": 1}},
-        {"WFWorkflowActionIdentifier": "action.value.b", "WFWorkflowActionParameters": {"WFValue": 1}},
-    ]
-})
-ambiguous_reified, ambiguous_report = module.reify_imported_value_actions(
-    '''def shortcut():
-    ambiguous_value = 1
-''',
-    ambiguous_origins,
-)
-bare_origins = module.action_origins_from_plist_object({
-    "WFWorkflowActions": [
-        {"WFWorkflowActionIdentifier": "action.dictionary", "WFWorkflowActionParameters": {"WFItems": {"key": "value"}}},
-        {"WFWorkflowActionIdentifier": "action.run", "WFWorkflowActionParameters": {"WFValue": 1}},
-        {"WFWorkflowActionIdentifier": "action.run", "WFWorkflowActionParameters": {"WFValue": 2}},
-    ]
-})
-bare_source = '''def shortcut():
-    {"key": "value"}
-    run_task(value=1)
-    run_task(value=2)
-'''
-bare_named, _ = module.canonicalize_imported_action_names(bare_source, bare_origins)
-bare_reified, bare_report = module.reify_imported_value_actions(bare_named, bare_origins)
-intrinsic_origins = module.action_origins_from_plist_object({
-    "WFWorkflowActions": [
-        {"WFWorkflowActionIdentifier": "action.dictionary", "WFWorkflowActionParameters": {"WFItems": {"key": "value"}}},
-    ]
-})
-module.current_toolkit_metadata = lambda: {
-    "actions": [
-        {"id": "action.dictionary", "pythonName": "dictionary", "displayName": "Dictionary", "parameters": [{"key": "WFItems", "pythonName": "items"}]},
-    ]
-}
-intrinsic_source = '''def shortcut():
-    dictionary = {"key": "value"}
-'''
-intrinsic_reified, intrinsic_report = module.reify_imported_value_actions(intrinsic_source, intrinsic_origins)
-loop_source = '''def shortcut():
-    seed = make_value()
-    for repeat_index in range(6):
-        if repeat_index == 1:
-            state = replace_value(text=f"{seed}")
-        else:
-            state = replace_value(text=f"{state}")
-'''
-initialized_loop, loop_report = module.initialize_imported_loop_carried_values(loop_source)
-already_initialized_loop, already_initialized_report = module.initialize_imported_loop_carried_values(
-    loop_source.replace("    for repeat_index", "    state = seed\\n    for repeat_index")
-)
-module.toolrenderer_action_native_aliases_by_identifier = lambda: {}
-module.current_toolkit_metadata = lambda: {
-    "actions": [
-        {"id": "calendar.find", "pythonName": "calendar_find_calendar_events", "parameters": [{"key": "WFQuery", "pythonName": "query"}, {"key": "WFOperator", "pythonName": "query_operator"}]},
-        {"id": "calendar.details", "pythonName": "calendar_get_details_of_calendar_events", "parameters": [{"key": "WFDetail", "pythonName": "detail"}, {"key": "WFEvent", "pythonName": "calendar_event"}]},
-        {"id": "calendar.edit", "pythonName": "calendar_edit_calendar_event", "parameters": [{"key": "WFDetail", "pythonName": "detail"}, {"key": "WFEdit", "pythonName": "edit"}, {"key": "WFEvent", "pythonName": "calendar_event"}, {"key": "WFURL", "pythonName": "calendar_event_content_item_url"}, {"key": "WFAllDay", "pythonName": "calendar_event_content_item_is_all_day"}]},
-        {"id": "calendar.remove", "pythonName": "calendar_remove_events", "parameters": [{"key": "WFFuture", "pythonName": "include_future_events"}, {"key": "WFEvents", "pythonName": "events"}]},
-        {"id": "calendar.new", "pythonName": "calendar_new_event", "parameters": [{"key": "WFTitle", "pythonName": "title"}, {"key": "WFStart", "pythonName": "start_date"}, {"key": "WFEnd", "pythonName": "end_date"}, {"key": "WFAlert", "pythonName": "alert"}, {"key": "WFShow", "pythonName": "show_compose_sheet"}]},
-        {"id": "files.filter", "pythonName": "files_filter", "parameters": [{"key": "WFQuery", "pythonName": "query"}, {"key": "WFOperator", "pythonName": "query_operator"}]},
-        {"id": "ambiguous.a", "pythonName": "ambiguous_a", "parameters": [{"key": "WFValue", "pythonName": "value"}]},
-        {"id": "ambiguous.b", "pythonName": "ambiguous_b", "parameters": [{"key": "WFValue", "pythonName": "value"}]},
-    ]
-}
-fallback_origins = module.action_origins_from_plist_object({
-    "WFWorkflowActions": [
-        {"WFWorkflowActionIdentifier": "calendar.find"},
-        {"WFWorkflowActionIdentifier": "calendar.details"},
-        {"WFWorkflowActionIdentifier": "calendar.edit"},
-        {"WFWorkflowActionIdentifier": "calendar.remove"},
-        {"WFWorkflowActionIdentifier": "calendar.new"},
-        {"WFWorkflowActionIdentifier": "calendar.edit"},
-        {"WFWorkflowActionIdentifier": "calendar.edit"},
-        {"WFWorkflowActionIdentifier": "files.filter"},
-    ]
-})
-fallback_source = '''def shortcut():
-    events = com_apple_ical_find_calendar_events(query=[], query_operator=None)
-    detail = com_apple_ical_get_details_of_calendar_events(detail="Attachments", calendar_event=events)
-    com_apple_ical_edit_calendar_event(detail="Calendar", edit="Set", calendar_event=detail)
-    com_apple_ical_remove_events(include_future_events=True, events=events)
-    com_apple_ical_new_event(title="Title", start_date=None, end_date=None, alert=None, show_compose_sheet=False)
-    com_apple_ical_edit_calendar_event(detail="URL", edit="Set", calendar_event=detail, calendar_event_content_item_url=None)
-    com_apple_ical_edit_calendar_event(detail="All Day", edit="Set", calendar_event=detail, calendar_event_content_item_is_all_day=True)
-    external_helper(value=1)
-'''
-fallback_rewritten, fallback_report = module.canonicalize_imported_action_names(fallback_source, fallback_origins)
-ambiguous_fallback, ambiguous_fallback_report = module.canonicalize_imported_action_names(
-    '''def shortcut():
-    com_vendor_unknown(value=1)
-''',
-    module.action_origins_from_plist_object({
-        "WFWorkflowActions": [
-            {"WFWorkflowActionIdentifier": "ambiguous.a"},
-            {"WFWorkflowActionIdentifier": "ambiguous.b"},
-        ]
-    }),
-)
-print(json.dumps({
-    "origins": origins,
-    "rewritten": rewritten,
-    "report": report,
-    "reified": reified,
-    "value_report": value_report,
-    "ambiguous_reified": ambiguous_reified,
-    "ambiguous_report": ambiguous_report,
-    "bare_reified": bare_reified,
-    "bare_report": bare_report,
-    "intrinsic_reified": intrinsic_reified,
-    "intrinsic_report": intrinsic_report,
-    "initialized_loop": initialized_loop,
-    "loop_report": loop_report,
-    "already_initialized_loop": already_initialized_loop,
-    "already_initialized_report": already_initialized_report,
-    "fallback_rewritten": fallback_rewritten,
-    "fallback_report": fallback_report,
-    "ambiguous_fallback": ambiguous_fallback,
-    "ambiguous_fallback_report": ambiguous_fallback_report,
-}))
-`, bridgeCtl]);
-  const result = JSON.parse(raw);
-  assert.strictEqual(result.origins[0].actionUUID, "literal-uuid");
-  assert(result.rewritten.includes("canonical_run_task(value=1)"));
-  assert(result.rewritten.includes("canonical_run_task(value=2)"));
-  assert(result.rewritten.includes("safari_open_urls(url=\"https://example.com\")"));
-  assert(result.rewritten.includes("canonical_nested_action(query=\"value\")"));
-  assert(result.rewritten.includes("dictionary(_from=first)"));
-  assert(result.rewritten.includes("shared_action()"));
-  assert.strictEqual((result.rewritten.match(/single_action\(\)/g) || []).length, 2);
-  assert(!result.rewritten.includes("canonical_dictionary("));
-  assert(result.reified.includes('payload = canonical_dictionary(items={"key": "value"})'));
-  assert.strictEqual(result.value_report.status, "applied");
-  assert.strictEqual(result.value_report.replacement_count, 1);
-  assert.strictEqual(result.value_report.unresolved_count, 0);
-  assert.deepStrictEqual(result.value_report.replacements[0].actionIndexes, [0]);
-  assert(result.ambiguous_reified.includes("ambiguous_value = 1"));
-  assert(!result.ambiguous_reified.includes("canonical_value_"));
-  assert.strictEqual(result.ambiguous_report.status, "partial");
-  assert.strictEqual(result.ambiguous_report.replacement_count, 0);
-  assert.strictEqual(result.ambiguous_report.unresolved_count, 1);
-  assert(result.bare_reified.includes('canonical_dictionary(items={"key": "value"})'));
-  assert.strictEqual(result.bare_report.status, "applied");
-  assert.strictEqual(result.bare_report.replacement_count, 1);
-  assert.strictEqual(result.bare_report.replacements[0].target, null);
-  assert(result.intrinsic_reified.includes('dictionary = {"key": "value"}'));
-  assert.strictEqual(result.intrinsic_report.replacement_count, 0);
-  assert(result.initialized_loop.includes("    state = seed\n    for repeat_index"));
-  assert.strictEqual(result.loop_report.initialization_count, 1);
-  assert.deepStrictEqual(result.loop_report.initializations[0], { target: "state", seed: "seed", beforeLine: 3 });
-  assert.strictEqual(result.already_initialized_report.initialization_count, 0);
-  assert.strictEqual(result.report.status, "partial");
-  assert.strictEqual(result.report.replacement_count, 4);
-  assert.strictEqual(result.report.matched_call_count, 4);
-  assert.strictEqual(result.report.ignored_call_count, 1);
-  assert.strictEqual(result.report.unresolved_call_count, 3);
-  assert(result.report.unresolved_calls.some((item) => item.reason.includes("disagree")));
-  assert.strictEqual(result.report.unresolved_calls.filter((item) => item.reason.includes("more compatible")).length, 2);
-  assert(result.fallback_rewritten.includes("calendar_find_calendar_events("));
-  assert(result.fallback_rewritten.includes("calendar_get_details_of_calendar_events("));
-  assert.strictEqual((result.fallback_rewritten.match(/calendar_edit_calendar_event\(/g) || []).length, 3);
-  assert(!result.fallback_rewritten.includes("com_apple_ical_"));
-  assert(result.fallback_rewritten.includes("external_helper(value=1)"));
-  assert.strictEqual(result.fallback_report.status, "applied");
-  assert.strictEqual(result.fallback_report.replacement_count, 7);
-  assert.strictEqual(result.fallback_report.unresolved_call_count, 0);
-  assert(result.fallback_report.replacements.every((item) => item.matchSource === "monotonic-parameter-provenance"));
-  assert(result.ambiguous_fallback.includes("com_vendor_unknown(value=1)"));
-  assert.strictEqual(result.ambiguous_fallback_report.status, "partial");
-  assert.strictEqual(result.ambiguous_fallback_report.replacement_count, 0);
-  assert.strictEqual(result.ambiguous_fallback_report.unresolved_call_count, 1);
 }
 
 async function testImportedSourceValidationGate() {
@@ -991,9 +753,8 @@ async function main() {
 
     await testToolkitDuplicateRewrite(temp);
     await testToolkitNativeNameAlignment(temp);
-    await testToolkitIntrinsicNameRepair(temp);
+    await testToolkitIntrinsicNamesRemainNative(temp);
     await testToolkitReferentialClosureRepair(temp);
-    await testImportNameCanonicalization();
     await testImportedSourceValidationGate();
     await testToolkitActivateReplacesActiveTarget(temp);
     await testVisibleToolRendererParameterClosure();
