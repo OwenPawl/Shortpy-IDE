@@ -40,6 +40,14 @@ assert(commands.includes("shortcutsRuntimeIDE.toggleLiveSync"), "Live Sync must 
 assert(extensionSource.includes('commandName === "openHostShortcutEditor"'), "custom editor must handle Open Shortcut Editor");
 assert(extensionSource.includes('commandName === "toggleLiveSync"'), "custom editor must handle Live Sync");
 assert(extensionSource.includes('aria-pressed=\\"false\\"'), "custom editor Live Sync must expose native toggle state");
+assert(
+  extensionSource.includes("programmaticHostPullDocuments.has(document.uri.toString())"),
+  "host pulls must suppress their own save-triggered Live Sync event"
+);
+assert(
+  extensionSource.includes("programmaticHostPullDocuments.has(key)"),
+  "host pulls must suppress validation triggered by their document edit"
+);
 assert.strictEqual(
   configurationProperties["shortcutsRuntimeIDE.liveSyncPollIntervalMs"].default,
   3000,

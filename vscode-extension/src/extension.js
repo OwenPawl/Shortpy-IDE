@@ -62,6 +62,8 @@ let extensionVersion = "dev";
 const workflowSessionsByWorkflowUri = new Map();
 const workflowSessionsByPythonUri = new Map();
 const hostSyncRunsByLinkKey = new Map();
+const programmaticHostPullDocuments = new Set();
+const validateTimers = new Map();
 let hostShortcutLinkStateUpdate = Promise.resolve();
 let liveSyncTimer;
 let liveSyncPollRunning = false;
@@ -1168,16 +1170,24 @@ async function removeHostShortcutLink(context, linkKey) {
 }
 
 async function replacePythonDocumentSource(document, source) {
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(
-    document.uri,
-    new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
-    source
-  );
-  if (!(await vscode.workspace.applyEdit(edit))) {
-    throw new Error("VS Code could not apply the host Shortcuts version to the Python editor.");
+  const documentKey = document.uri.toString();
+  programmaticHostPullDocuments.add(documentKey);
+  clearTimeout(validateTimers.get(documentKey));
+  validateTimers.delete(documentKey);
+  try {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      document.uri,
+      new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+      source
+    );
+    if (!(await vscode.workspace.applyEdit(edit))) {
+      throw new Error("VS Code could not apply the host Shortcuts version to the Python editor.");
+    }
+    await document.save();
+  } finally {
+    programmaticHostPullDocuments.delete(documentKey);
   }
-  await document.save();
   setShortpyDiagnostics(shortpyDiagnosticsCollection, document);
   updateCommandDecorations();
 }
@@ -1217,6 +1227,7 @@ async function hostPythonSource(hostExport) {
   return {
     compiledPlist: bplistBufferFromResponse(imported.validation),
     source: imported.source,
+    validation: imported.validation,
   };
 }
 
@@ -1348,6 +1359,7 @@ async function performPythonDocumentHostSync(context, document, collection, sync
       progress.report({ message: "Converting Shortcuts version to Shortpy" });
       const imported = await hostPythonSource(hostExport);
       await replacePythonDocumentSource(document, imported.source);
+      setSuccessDiagnostics(collection, document, imported.source, imported.validation);
       const result = {
         ok: true,
         operation: "pull",
@@ -1403,6 +1415,8 @@ async function performPythonDocumentHostSync(context, document, collection, sync
     const action = determineSyncAction(link, sourceHash, currentHost.hostHash);
     logRuntime("host sync decision", {
       action,
+      sourceChanged: sourceHash !== link.sourceHash,
+      hostChanged: currentHost.hostHash !== link.hostHash,
       workflowID: link.workflowID,
       name: currentHost.name || link.name,
     });
@@ -2712,7 +2726,6 @@ function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDE");
   shortpyDiagnosticsCollection = vscode.languages.createDiagnosticCollection("shortcutsRuntimeIDEToolRenderer");
   const handledPlists = new Set();
-  const validateTimers = new Map();
   const visibleCommandHandlers = {
     connectBridge: () => connectBridge(),
     saveRuntimePlistFromPython: () => saveRuntimePlistFromPython(diagnostics),
@@ -2808,6 +2821,9 @@ function activate(context) {
     if (document.languageId !== "python") {
       return;
     }
+    if (programmaticHostPullDocuments.has(document.uri.toString())) {
+      return;
+    }
     const { link } = hostShortcutLinkForDocument(context, document);
     if (link && link.liveSync && !link.liveSyncPausedReason) {
       runLiveSyncForDocument(context, document, diagnostics, "save").catch(() => {});
@@ -2819,10 +2835,15 @@ function activate(context) {
     const options = configOptions();
     setShortpyDiagnostics(shortpyDiagnosticsCollection, event.document);
     updateCommandDecorationsForEditor(vscode.window.visibleTextEditors.find((editor) => editor.document === event.document));
+    const key = event.document.uri.toString();
+    if (programmaticHostPullDocuments.has(key)) {
+      clearTimeout(validateTimers.get(key));
+      validateTimers.delete(key);
+      return;
+    }
     if (!options.validateOnType || event.document.languageId !== "python") {
       return;
     }
-    const key = event.document.uri.toString();
     clearTimeout(validateTimers.get(key));
     validateTimers.set(key, setTimeout(() => {
       compilePythonDocument(event.document, event.document.getText(), diagnostics).catch(() => {});
@@ -2848,6 +2869,11 @@ function deactivate() {
     clearInterval(liveSyncTimer);
     liveSyncTimer = undefined;
   }
+  for (const timer of validateTimers.values()) {
+    clearTimeout(timer);
+  }
+  validateTimers.clear();
+  programmaticHostPullDocuments.clear();
 }
 
 module.exports = {
