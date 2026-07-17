@@ -20,3 +20,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+Acknowledgment (not part of the MIT License)
+
+Special thanks to No_Pen_3825 for creating OPHSC
+(https://github.com/Kenna-Blackburn/OPHSC), which adapted Headless Shortcuts
+for macOS releases before 27.0 and helped establish the compatible WorkflowKit
+persistence path used by this project.

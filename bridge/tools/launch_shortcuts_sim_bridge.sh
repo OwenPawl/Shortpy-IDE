@@ -7,6 +7,7 @@ DYLIB="${SHORTPY_BRIDGE_DYLIB:-${ROOT}/build-sim/libShortcutsIDESimBridge-v020.d
 SOCKET="/tmp/shortcuts-ide-bridge-sim.sock"
 LOG_DIR="${ROOT}/logs"
 mkdir -p "${LOG_DIR}"
+session_marker="${LOG_DIR}/shortpy-simulator-session.json"
 
 if [[ ! -f "${DYLIB}" ]]; then
   echo "Missing simulator bridge dylib: ${DYLIB}" >&2
@@ -201,7 +202,7 @@ else
   echo "shortpy-bridge-stage: keeping Simulator app state unchanged"
 fi
 
-rm -f "${SOCKET}"
+rm -f "${SOCKET}" "${session_marker}"
 launch_log="${LOG_DIR}/sim-launch-dyldloader-${stamp}.out"
 status_log="${LOG_DIR}/sim-launch-dyldloader-status-${stamp}.json"
 
@@ -305,6 +306,60 @@ if [[ "${toolkit_should_activate}" == "1" ]]; then
     exit 2
   fi
 fi
+
+SHORTPY_SESSION_MARKER="${session_marker}" \
+SHORTPY_SESSION_STATUS_LOG="${status_log}" \
+SHORTPY_SESSION_SIMULATOR_UDID="${SIM_UDID}" \
+SHORTPY_SESSION_RUNTIME_BUILD="${runtime_build}" \
+SHORTPY_SESSION_RUNTIME_VERSION="${runtime_version}" \
+SHORTPY_SESSION_TOOLKIT_SOURCE="${toolkit_label}" \
+SHORTPY_SESSION_TOOLKIT_ACTIVATED="${toolkit_activated}" \
+  /usr/bin/python3 - <<'PY'
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+marker_path = Path(os.environ["SHORTPY_SESSION_MARKER"])
+status = json.loads(Path(os.environ["SHORTPY_SESSION_STATUS_LOG"]).read_text())
+source_text = os.environ.get("SHORTPY_SESSION_TOOLKIT_SOURCE", "")
+source_path = ""
+source_sha256 = ""
+if source_text:
+    source = Path(source_text).expanduser()
+    try:
+        source = source.resolve(strict=True)
+        source_path = str(source)
+        digest = hashlib.sha256()
+        with source.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        source_sha256 = digest.hexdigest()
+    except OSError:
+        source_path = str(source)
+
+now = datetime.now(timezone.utc).isoformat()
+payload = {
+    "version": 1,
+    "simulatorUDID": os.environ["SHORTPY_SESSION_SIMULATOR_UDID"],
+    "runtimeBuild": os.environ.get("SHORTPY_SESSION_RUNTIME_BUILD", ""),
+    "runtimeVersion": os.environ.get("SHORTPY_SESSION_RUNTIME_VERSION", ""),
+    "bridgePID": status.get("pid"),
+    "socketPath": status.get("socket_path", ""),
+    "launchedAt": now,
+    "toolkit": {
+        "activated": os.environ.get("SHORTPY_SESSION_TOOLKIT_ACTIVATED") == "1",
+        "activatedAt": now,
+        "sourcePath": source_path,
+        "sourceSha256": source_sha256,
+    },
+}
+marker_path.parent.mkdir(parents=True, exist_ok=True)
+temporary = marker_path.with_suffix(marker_path.suffix + ".tmp")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+os.replace(temporary, marker_path)
+PY
 
 cat "${status_log}"
 exit 0

@@ -190,8 +190,8 @@ standard macOS Visual Studio Code app bundle.
 
 ### Connect
 
-In VS Code, run **Shortcuts IDE: Connect To Bridge** or click the Shortcuts
-status-bar item. Connect:
+In VS Code, click the red **Connect** control in the workflow editor or run
+**Shortcuts IDE: Connect To Bridge**. Connect:
 
 1. Stages the bundled bridge in extension global storage.
 2. Builds the simulator dylib when needed.
@@ -200,6 +200,10 @@ status-bar item. Connect:
 5. Waits for first-boot ToolKit indexing only when needed.
 6. Activates the prepared ToolKit and refreshes metadata.
 7. Reports passive connection state in the status bar.
+
+The control becomes a green **Disconnect** button after connection. Disconnect
+validates the launcher session and shuts down only the simulator device selected
+by Shortpy.
 
 Connect is headless by default. It closes the visible Simulator app and shuts
 down other booted iOS simulators to reduce memory use. Set
@@ -215,7 +219,8 @@ The controller remains usable while disconnected and exposes Connect directly.
 Primary commands include:
 
 - **Validate With Apple Runtime**
-- **Export Python To Shortcut**
+- **Show Compiler Trace**
+- **Build Shortcut From Python**
 - **Write Sibling Shortcut**
 - **Open Workflow Plist From Python**
 - **Import Plist As Python**
@@ -224,8 +229,12 @@ Primary commands include:
 - **Toggle Live Sync**
 - **Retrieve Relevant Actions**
 - **Retrieve Relevant Triggers**
-- **Refresh ToolRenderer Metadata**
 - **Load ToolKit SQLite**
+
+Search Actions and Search Triggers are always available as native title-bar
+actions in Shortpy Python editors. Runtime Details stays collapsed in the
+controller unless an operation fails. Metadata refreshes automatically after a
+changed ToolKit is activated.
 
 Apple diagnostics appear in Problems with source ranges, hints, and supported
 fix-its as VS Code Quick Fixes. Bridge activity is also written to the
@@ -247,6 +256,8 @@ changes propagate after save, and Shortcuts changes are polled while the Python
 editor is open. Host operations are serialized per document. If both sides
 change, Live Sync pauses without overwriting either version; run the normal Sync
 command to compare or choose a side, after which Live Sync resumes.
+Disconnecting pauses enabled Live Sync without clearing it; reconnecting resumes
+the mode automatically.
 
 ![Shortpy IDE Live Sync demonstration](docs/assets/live-sync-demo.gif)
 
@@ -266,9 +277,10 @@ By default, Connect uses:
 ```
 
 Run **Shortcuts IDE: Load ToolKit SQLite** to select another database. The
-selection is persisted for the project, prepared with the same rules, activated
-after launch-time indexing, and followed by a complete ToolRenderer cache
-refresh.
+selection is persisted, prepared with the same rules, and recorded per simulator
+device/runtime with a source fingerprint. Loading the currently active content
+is a no-op; changed content is activated and followed by a complete ToolRenderer
+cache refresh.
 
 ## Command-Line Development
 

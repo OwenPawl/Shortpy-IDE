@@ -48,13 +48,17 @@ compile/import commands were removed.
 Editable Python
   -> inline parameterState preprocessing
   -> ShortcutsLanguage.PythonToIR
-  -> Shortpy control-flow binding capture
-  -> Shortpy loop-carried recurrence preparation
+  -> ShortpyControlFlowPlan (read-only)
+  -> ShortpyControlFlowInputPreparation
   -> Apple ControlFlowOutputInferencePass
+  -> ShortpyControlFlowOutputRepair
   -> Apple VariableInliningPass
-  -> Shortpy nested-control-result correction
+  -> Apple DropCommentsPass
+  -> capture canonical final IR and action provenance
+  -> ShortpyElseIfConditionWitnessPreparation
   -> ShortcutsLanguage.IRToShortcut
   -> CompiledShortcut.workflow
+  -> transactional Else If condition repair
   -> native recurrence action correction, when required
   -> WFWorkflow.saveToRecord
   -> WFWorkflowRecord.fileRepresentation
@@ -84,9 +88,37 @@ inside control flow is distinguished by native statement and lexical ownership.
 Direct ToolKit calls remain ordinary action calls; Python structural nodes
 remain structural IR.
 
-The adapter changes only proven control-result operations. Apple's native
-passes and `IRToShortcut` still lower ordinary actions, list syntax, variable
-syntax, conditions, loops, and menus.
+The adapter has two mutation hooks around Apple's control-flow inference. Input
+preparation handles only captured loop-carried recurrences. Output repair
+handles captured initializer-only Repeat results, direct or wrapped nested
+Repeat forwarding, and structurally owned empty If/Menu result anchors. Apple's
+native passes and `IRToShortcut` still lower ordinary actions, structural list
+and variable syntax, Repeat Index, Repeat Item, conditions, loops, and menus.
+
+### Terminal Else If adapter
+
+Apple's iOS 27 backend emits one mode-1 marker for every native
+`elseIfBranch`, but does not apply that branch's condition. Shortpy reuses the
+backend's complete mode-0 serializer rather than implementing condition
+families itself.
+
+After printing the canonical final IR and counting explicit ToolKit calls, the
+pipeline no longer reads the `IRProgram`. It inserts one empty native
+conditional witness immediately before each affected target. Each witness uses
+the corresponding Else If branch as its mode-0 branch and has no body, further
+branches, or Else body. The now-ephemeral program enters `IRToShortcut` once.
+
+The workflow adapter validates the resulting conditional group topology,
+transfers the witness's opaque non-control parameter payload to the matching
+target mode-1 action, preserves or creates the final unconditioned Else marker,
+and removes every witness marker pair. Replacements are accumulated first and
+the workflow receives one final `setActions:` call. A mismatch is an error; no
+partial repair or native fallback is attempted.
+
+The structured pipeline response reports `witnessInsertions`,
+`conditionRepairs`, `elseInsertions`, and `witnessMarkersRemoved` under
+`elseIfConditionLowering`. The explicitly selected native pipeline bypasses
+this stage completely.
 
 ### Recurrence correction
 
@@ -117,17 +149,19 @@ control result consumed by a real append can therefore make
 
 Shortpy keeps Apple's exporter but supplies it a temporary workflow clone:
 
-1. Structural control-flow actions are unchanged.
-2. Only ambiguous real action objects are cloned into dynamic adapter
-   subclasses.
-3. The adapter overrides `exportWithError:` for that cloned object only.
-4. Apple's ordinary action exporter builds an explicit ToolKit call node.
+1. The complete action array is reconstructed from native identifiers,
+   definitions, and serialized parameters so producer lookup remains isolated.
+2. Structural control-flow actions are unchanged.
+3. Every specialized non-control exporter is classified by the number of
+   source-owned action execution nodes in its native program tree.
+4. Exactly one owned node preserves the specialized exporter; zero selects a
+   per-object generic ToolKit adapter; ambiguous results fail clearly.
 5. Native `DescribeAShortcutAgent.editModeContext(for:)` renders the resulting
    program and all unaffected actions/decorators.
 
-There is no global swizzle or process-wide hook. Current explicit action forms
-cover native Add/Set/Get Variable and Comment actions. This produces forms such
-as:
+There is no global swizzle or process-wide hook. Real shorthand actions such as
+List, Variable, Text, Dictionary, Nothing, and Comment therefore become direct
+ToolKit calls. This produces forms such as:
 
 ```python
 com_apple_shortcuts_add_to_variable(
@@ -142,8 +176,9 @@ source workflow or hidden provenance to compile it.
 
 List literals and other structural Python remain structural. Actions such as
 Get Item from List retain the direct ToolKit definition emitted by the native
-renderer. If another native action is later proven ambiguous, it should be
-added at this same per-action export boundary, not with rendered-text rewriting.
+renderer. Typed Dictionary numbers use Apple's existing verbatim program-node
+representation after a structural parameter-state match; ambiguous matches fail
+instead of degrading to quoted strings.
 
 ## Inline Catalog Metadata
 
@@ -226,9 +261,11 @@ commands, and explicitly rejects a request for `shortpy`. Once Apple fixes the
 native bugs, removal is localized to:
 
 - the `shortpy` case in `RuntimePipeline`;
-- `ShortpyToShortcut` and its adapter source;
+- the contiguous control-flow plan/input/output stage block and its four C
+  lifecycle/mutation entry points;
 - the temporary edit-export action adapters;
 - recurrence action reconstruction.
+- terminal Else If witness preparation and workflow repair.
 
 The protocol, inline catalog preprocessing, ToolKit selection, workflow-record
 serializer, and VS Code integration can remain unchanged.
@@ -242,6 +279,7 @@ The live simulator regression suite performs two independent
 - `if`/`elif`/`else` recurrence;
 - Choose from Menu recurrence;
 - nested Repeat Results;
+- nested Repeat Index and Repeat Each item consumers;
 - explicit variable actions;
 - list and Get Item from List;
 - native Comment actions;

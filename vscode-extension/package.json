@@ -2,7 +2,7 @@
   "name": "shortpy-ide",
   "displayName": "Shortpy IDE",
   "description": "Drive Apple's Shortcuts runtime Python compiler and edit-mode plist-to-Python converter from VS Code.",
-  "version": "0.1.47",
+  "version": "0.1.50",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -16,20 +16,23 @@
     "Other"
   ],
   "scripts": {
-    "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js && node scripts/prepare-bundled-headless-shortcuts.js",
-    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check scripts/prepare-bundled-headless-shortcuts.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/hostShortcuts.js && node --check src/toolrenderer.js && node --check src/workflowRoundTrip.js && node --check src/extension.js",
+    "vscode:prepublish": "node scripts/sync-package-commands.js --write && node scripts/prepare-bundled-bridge.js",
+    "check": "node scripts/sync-package-commands.js --check && node --check scripts/diagnose-shortpy.js && node --check scripts/prepare-bundled-headless-shortcuts.js && node --check src/commandRegistry.js && node --check src/bridge.js && node --check src/connectionState.js && node --check src/editorInsertion.js && node --check src/hostShortcuts.js && node --check src/toolkitState.js && node --check src/toolrenderer.js && node --check src/workflowEditorView.js && node --check src/workflowRoundTrip.js && node --check src/extension.js",
     "diagnose-shortpy": "node scripts/diagnose-shortpy.js --pretty",
     "install:local": "node scripts/install-vsix.js",
-    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js && node test/hostShortcuts.test.js && node test/workflowRoundTrip.test.js"
+    "sync:headless-runtime": "node scripts/prepare-bundled-headless-shortcuts.js",
+    "test": "node test/diagnostics.test.js && node test/toolrenderer.test.js && node test/manifest.test.js && node test/bridge.test.js && node test/hostShortcuts.test.js && node test/uiState.test.js && node test/workflowEditorView.test.js && node test/workflowRoundTrip.test.js"
   },
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:python",
     "onCustomEditor:shortcutsRuntimeIDE.workflowEditor",
     "onCommand:shortcutsRuntimeIDE.connectBridge",
+    "onCommand:shortcutsRuntimeIDE.disconnectBridge",
     "onCommand:shortcutsRuntimeIDE.saveRuntimePlistFromPython",
     "onCommand:shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
     "onCommand:shortcutsRuntimeIDE.validatePython",
+    "onCommand:shortcutsRuntimeIDE.showCompilerTrace",
     "onCommand:shortcutsRuntimeIDE.syncToHostShortcuts",
     "onCommand:shortcutsRuntimeIDE.toggleLiveSync",
     "onCommand:shortcutsRuntimeIDE.openHostShortcutEditor",
@@ -39,9 +42,7 @@
     "onCommand:shortcutsRuntimeIDE.importICloudShortcutLink",
     "onCommand:shortcutsRuntimeIDE.searchActions",
     "onCommand:shortcutsRuntimeIDE.searchTriggers",
-    "onCommand:shortcutsRuntimeIDE.refreshToolMetadata",
-    "onCommand:shortcutsRuntimeIDE.loadToolkitSqlite",
-    "onCommand:shortcutsRuntimeIDE.refreshToolRendererInterface"
+    "onCommand:shortcutsRuntimeIDE.loadToolkitSqlite"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -66,8 +67,12 @@
         "title": "Shortcuts IDE: Connect To Bridge"
       },
       {
+        "command": "shortcutsRuntimeIDE.disconnectBridge",
+        "title": "Shortcuts IDE: Disconnect Bridge"
+      },
+      {
         "command": "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
-        "title": "Shortcuts IDE: Export Python To Shortcut"
+        "title": "Shortcuts IDE: Build Shortcut From Python"
       },
       {
         "command": "shortcutsRuntimeIDE.writeSiblingRuntimePlistFromPython",
@@ -76,6 +81,10 @@
       {
         "command": "shortcutsRuntimeIDE.validatePython",
         "title": "Shortcuts IDE: Validate With Apple Runtime"
+      },
+      {
+        "command": "shortcutsRuntimeIDE.showCompilerTrace",
+        "title": "Shortcuts IDE: Show Compiler Trace"
       },
       {
         "command": "shortcutsRuntimeIDE.syncToHostShortcuts",
@@ -114,19 +123,21 @@
         "title": "Shortcuts IDE: Retrieve Relevant Triggers"
       },
       {
-        "command": "shortcutsRuntimeIDE.refreshToolMetadata",
-        "title": "Shortcuts IDE: Refresh ToolRenderer Metadata"
-      },
-      {
         "command": "shortcutsRuntimeIDE.loadToolkitSqlite",
         "title": "Shortcuts IDE: Load ToolKit SQLite"
-      },
-      {
-        "command": "shortcutsRuntimeIDE.refreshToolRendererInterface",
-        "title": "Shortcuts IDE: Refresh Native ToolRenderer Interface"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "shortcutsRuntimeIDE.connectBridge",
+          "when": "shortcutsRuntimeIDE.bridgeCanConnect"
+        },
+        {
+          "command": "shortcutsRuntimeIDE.disconnectBridge",
+          "when": "shortcutsRuntimeIDE.bridgeCanDisconnect"
+        }
+      ],
       "editor/context": [
         {
           "command": "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
@@ -170,25 +181,6 @@
         {
           "command": "shortcutsRuntimeIDE.importICloudShortcutLink",
           "group": "navigation@58"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.searchActions",
-          "when": "editorLangId == python",
-          "group": "navigation@54"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.searchTriggers",
-          "when": "editorLangId == python",
-          "group": "navigation@55"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.refreshToolMetadata",
-          "when": "editorLangId == python",
-          "group": "navigation@56"
-        },
-        {
-          "command": "shortcutsRuntimeIDE.loadToolkitSqlite",
-          "group": "navigation@59"
         }
       ],
       "explorer/context": [
@@ -211,11 +203,6 @@
           "type": "string",
           "default": "",
           "description": "Optional path to cached native ToolRenderer interface metadata JSON. Leave empty to use extension storage."
-        },
-        "shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation": {
-          "type": "boolean",
-          "default": true,
-          "description": "Load cached ToolRenderer metadata at activation and refresh it from the simulator bridge in the background when available."
         },
         "shortcutsRuntimeIDE.highlightKnownCommands": {
           "type": "boolean",

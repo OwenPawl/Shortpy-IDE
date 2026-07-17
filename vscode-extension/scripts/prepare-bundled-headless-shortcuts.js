@@ -12,10 +12,6 @@ const source = configuredSource
 const entries = ["Makefile", "README.md", "LICENSE", "Sources"];
 
 if (!fs.existsSync(path.join(source, "Makefile"))) {
-  if (fs.existsSync(path.join(destination, "Makefile"))) {
-    process.stdout.write(`Using existing bundled Headless Shortcuts snapshot at ${destination}\n`);
-    process.exit(0);
-  }
   throw new Error(`Headless Shortcuts source was not found at ${source}`);
 }
 

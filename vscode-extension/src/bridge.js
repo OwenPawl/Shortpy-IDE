@@ -10,6 +10,7 @@ const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 const METADATA_MAX_BUFFER = 128 * 1024 * 1024;
 const BRIDGE_DYLIB_RELATIVE_PATH = path.join("build-sim", "libShortcutsIDESimBridge-v020.dylib");
 const BRIDGE_RUNTIME_MARKER = ".shortpy-bridge-runtime.json";
+const SIMULATOR_SESSION_MARKER = path.join("logs", "shortpy-simulator-session.json");
 
 function bridgeCtlPathForRoot(root) {
   return path.join(root, "tools", "bridgectl.py");
@@ -50,6 +51,54 @@ async function exists(file) {
   } catch (_) {
     return false;
   }
+}
+
+function simulatorSessionMarkerPath(bridgeRoot) {
+  return path.join(bridgeRoot, SIMULATOR_SESSION_MARKER);
+}
+
+async function readSimulatorSession(bridgeRoot) {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(simulatorSessionMarkerPath(bridgeRoot), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function simulatorDeviceState(payload, udid) {
+  const devices = payload && payload.devices;
+  if (!devices || !udid) {
+    return undefined;
+  }
+  for (const runtimeDevices of Object.values(devices)) {
+    for (const device of Array.isArray(runtimeDevices) ? runtimeDevices : []) {
+      if (device && device.udid === udid) {
+        return device.state;
+      }
+    }
+  }
+  return undefined;
+}
+
+function validateSimulatorSession(session, status) {
+  if (!session || !session.simulatorUDID) {
+    throw new Error(
+      "Cannot disconnect safely because the Shortpy simulator session marker is missing or incomplete. Reconnect first, or shut down the intended simulator manually."
+    );
+  }
+  if (!status || !Number.isInteger(Number(status.pid))) {
+    throw new Error("Cannot disconnect safely because the responding bridge did not report a process ID.");
+  }
+  if (Number(session.bridgePID) !== Number(status.pid)) {
+    throw new Error(
+      `Cannot disconnect safely because the session marker PID ${session.bridgePID || "unknown"} does not match bridge PID ${status.pid}.`
+    );
+  }
+  if (!session.socketPath || session.socketPath !== status.socket_path) {
+    throw new Error("Cannot disconnect safely because the session marker socket does not match the responding bridge.");
+  }
+  return session.simulatorUDID;
 }
 
 async function bridgeSourceSignature(root) {
@@ -355,6 +404,96 @@ async function runBridgeStatus(options = {}) {
   return JSON.parse(stdout);
 }
 
+async function currentSimulatorSession(options = {}) {
+  const bridgeCtlPath = resolveBridgeCtlPath(options);
+  return readSimulatorSession(bridgeRootForCtlPath(bridgeCtlPath));
+}
+
+async function cleanupSimulatorSession(bridgeRoot, session) {
+  await fsp.rm(simulatorSessionMarkerPath(bridgeRoot), { force: true });
+  if (session && session.socketPath) {
+    await fsp.rm(session.socketPath, { force: true });
+  }
+}
+
+async function disconnectBridge(options = {}, adapters = {}) {
+  const config = normalizeOptions(options);
+  const bridgeCtlPath = resolveBridgeCtlPath(options);
+  const bridgeRoot = bridgeRootForCtlPath(bridgeCtlPath);
+  const readSession = adapters.readSession || (() => readSimulatorSession(bridgeRoot));
+  const runStatus = adapters.runStatus || (() => runBridgeStatus({ ...config, bridgeCtlPath }));
+  const runExec = adapters.execFile || execFile;
+  const sleep = adapters.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const cleanup = adapters.cleanup || cleanupSimulatorSession;
+  const xcrunPath = adapters.xcrunPath || "/usr/bin/xcrun";
+  const timeoutMs = Number(adapters.timeoutMs) || 30000;
+  const pollMs = Number(adapters.pollMs) || 250;
+
+  const session = await readSession();
+  if (!session || !session.simulatorUDID) {
+    validateSimulatorSession(session, undefined);
+  }
+
+  const readDeviceState = async () => {
+    const raw = await runExec(xcrunPath, ["simctl", "list", "devices", "-j"], {
+      timeoutMs: config.bridgeStatusTimeoutMs,
+    });
+    return simulatorDeviceState(JSON.parse(raw), session.simulatorUDID);
+  };
+
+  let status;
+  try {
+    status = await runStatus();
+  } catch (_) {
+    const state = await readDeviceState();
+    if (state !== "Booted") {
+      await cleanup(bridgeRoot, session);
+      return {
+        ok: true,
+        alreadyStopped: true,
+        simulatorUDID: session.simulatorUDID,
+        previousState: state || "unavailable",
+      };
+    }
+    throw new Error(
+      `Cannot disconnect safely because simulator ${session.simulatorUDID} is booted but the bridge no longer responds. The session marker was left intact.`
+    );
+  }
+
+  const simulatorUDID = validateSimulatorSession(session, status);
+  const beforeState = await readDeviceState();
+  if (beforeState !== "Booted") {
+    throw new Error(
+      `Cannot disconnect safely because bridge PID ${status.pid} responds but simulator ${simulatorUDID} reports state ${beforeState || "unknown"}.`
+    );
+  }
+
+  await runExec(xcrunPath, ["simctl", "shutdown", simulatorUDID], {
+    timeoutMs,
+  });
+  const deadline = Date.now() + timeoutMs;
+  let finalState = beforeState;
+  while (Date.now() < deadline) {
+    finalState = await readDeviceState();
+    if (finalState !== "Booted") {
+      break;
+    }
+    await sleep(pollMs);
+  }
+  if (finalState === "Booted") {
+    throw new Error(`Timed out waiting for simulator ${simulatorUDID} to shut down.`);
+  }
+  await cleanup(bridgeRoot, session);
+  return {
+    ok: true,
+    alreadyStopped: false,
+    simulatorUDID,
+    bridgePID: status.pid,
+    previousState: beforeState,
+    finalState: finalState || "Shutdown",
+  };
+}
+
 async function copyBridgeRuntime(sourceRoot, destRoot) {
   const entries = ["Makefile", "README.md", "src", "tools"];
   const sourceSignature = await bridgeSourceSignature(sourceRoot);
@@ -491,7 +630,7 @@ async function launchBridgeRuntime(runtime, options = {}, onProgress) {
       }
     }
   });
-  return output;
+  return { ...output, session: await readSimulatorSession(runtime.bridgeRoot) };
 }
 
 async function ensureBridgeLaunched(options = {}, onProgress) {
@@ -503,6 +642,7 @@ async function ensureBridgeLaunched(options = {}, onProgress) {
       const status = await runBridgeStatus(statusOptions);
       return {
         status,
+        session: await readSimulatorSession(runtime.bridgeRoot),
         alreadyRunning: true,
         bridgeRoot: runtime.bridgeRoot,
         bridgeCtlPath: runtime.bridgeCtlPath,
@@ -513,10 +653,11 @@ async function ensureBridgeLaunched(options = {}, onProgress) {
     }
   }
   const build = await buildBridgeIfNeeded(runtime, config, onProgress);
-  await launchBridgeRuntime(runtime, config, onProgress);
+  const launch = await launchBridgeRuntime(runtime, config, onProgress);
   const status = await runBridgeStatus(statusOptions);
   return {
     status,
+    session: launch.session || await readSimulatorSession(runtime.bridgeRoot),
     alreadyRunning: false,
     build,
     bridgeRoot: runtime.bridgeRoot,
@@ -545,7 +686,9 @@ module.exports = {
   binaryPlistToXml,
   bplistBufferFromResponse,
   bridgeCtlPathForRoot,
+  currentSimulatorSession,
   defaultBridgeCtlPath,
+  disconnectBridge,
   ensureBridgeLaunched,
   normalizeOptions,
   resolveBridgeCtlPath,
@@ -555,5 +698,6 @@ module.exports = {
   runBridgeStatus,
   shortcutBufferFromResponse,
   validateImportedPythonSource,
+  validateSimulatorSession,
   versionedStorageBridgeRoot,
 };

@@ -145,75 +145,6 @@ _bridge_fresh_tool_database:
     ldp x20, x30, [sp], #16
     ret
 
-.globl _bridge_tool_embedding_database_query
-_bridge_tool_embedding_database_query:
-    stp x29, x30, [sp, #-32]!
-    str x20, [sp, #16]
-    mov x29, sp
-    mov x20, x3
-    bl _$s14ShortcutsAgent21ToolEmbeddingDatabaseC5query_6limitsSDyAA0cD6RecordV0C4TypeVSaySd5score_SS10identifiertGGSS_SDyAISiGtKF
-    ldr x20, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-
-.globl _bridge_agent_toolbox_result_string_representation
-_bridge_agent_toolbox_result_string_representation:
-    stp x29, x30, [sp, #-32]!
-    str x20, [sp, #16]
-    mov x29, sp
-    mov x20, x0
-    bl _$s14ShortcutsAgent0B7ToolboxV6ResultV20stringRepresentationSSvg
-    ldr x20, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-
-.globl _bridge_make_describe_agent_event_stream
-_bridge_make_describe_agent_event_stream:
-    stp x29, x30, [sp, #-32]!
-    str x20, [sp, #16]
-    mov x29, sp
-    adrp x0, L_describe_agent_event_subject_type@PAGE
-    add x0, x0, L_describe_agent_event_subject_type@PAGEOFF
-    mov x1, #83
-    mov x2, #0
-    mov x3, #0
-    bl _swift_getTypeByMangledNameInContext2
-    cbz x0, 1f
-    mov x20, x0
-    bl _$s7Combine18PassthroughSubjectCACyxq_GycfC
-    b 2f
-1:
-    mov x0, #0
-2:
-    ldr x20, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-
-.globl _bridge_find_entities_tool_call
-_bridge_find_entities_tool_call:
-    mov x4, x0
-    mov x5, x1
-    mov x6, x2
-    mov x20, x3
-    mov x0, x4
-    mov x1, x5
-    mov x2, x6
-    b _$s14ShortcutsAgent16FindEntitiesToolV4call9arguments16agentEventStreamAC6OutputVAC9ArgumentsV_7Combine18PassthroughSubjectCyAA017DescribeAShortcutbI0Os5NeverOGtYaAC5ErrorOYKF
-
-.globl _bridge_find_entities_tool_callTu
-.set _bridge_find_entities_tool_callTu, _$s14ShortcutsAgent16FindEntitiesToolV4call9arguments16agentEventStreamAC6OutputVAC9ArgumentsV_7Combine18PassthroughSubjectCyAA017DescribeAShortcutbI0Os5NeverOGtYaAC5ErrorOYKFTu
-
-.globl _bridge_find_entities_output_content
-_bridge_find_entities_output_content:
-    stp x29, x30, [sp, #-32]!
-    str x20, [sp, #16]
-    mov x29, sp
-    mov x20, x0
-    bl _$s14ShortcutsAgent16FindEntitiesToolV6OutputV7contentSSvg
-    ldr x20, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-
 .globl _bridge_make_flags
 _bridge_make_flags:
     stp x29, x30, [sp, #-16]!
@@ -322,12 +253,12 @@ _bridge_shortpy_source_referenced_get_value:
 
 .globl _bridge_ir_program_print
 _bridge_ir_program_print:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
+    stp x20, x30, [sp, #-16]!
+    mov x20, x0
     adrp x1, _$s17ShortcutsLanguage9IRProgramVAA11IRPrintableAAWP@GOTPAGE
     ldr x1, [x1, _$s17ShortcutsLanguage9IRProgramVAA11IRPrintableAAWP@GOTPAGEOFF]
     bl _$s17ShortcutsLanguage11IRPrintablePAAE13printToStringSSyF
-    ldp x29, x30, [sp], #16
+    ldp x20, x30, [sp], #16
     ret
 
 .globl _bridge_ir_program_equal
@@ -495,7 +426,3 @@ _bridge_describe_edit_mode_context_nil:
     mov x0, x21
     ldp x29, x30, [sp], #16
     ret
-
-.section __TEXT,__cstring,cstring_literals
-L_describe_agent_event_subject_type:
-    .asciz "7Combine18PassthroughSubjectCy14ShortcutsAgent017DescribeAShortcutE5EventOs5NeverOG"

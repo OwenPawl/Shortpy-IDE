@@ -2,7 +2,7 @@
 *.xcuserstate
 
 # Build outputs
-bridge/build-sim/
+bridge/build-sim*/
 bridge/logs/
 bridge/**/*.o
 bridge/**/*.dylib
@@ -18,6 +18,7 @@ npm-debug.log*
 vscode-extension/bundled/*
 !vscode-extension/bundled/headless-shortcuts/
 !vscode-extension/bundled/headless-shortcuts/**
+vscode-extension/bundled/headless-shortcuts/build/
 
 # Local editor/cache state
 .vscode/

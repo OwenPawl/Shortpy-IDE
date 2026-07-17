@@ -52,11 +52,13 @@ const toolRenderer = indexToolRendererMetadata({
       parameters: [
         {
           pythonName: "query",
-          type: "query_com_apple_mobile_sms_conversation_entity",
-          inline: true,
-          positional: true,
+          type: "List[query_com_apple_mobile_sms_conversation_entity]",
         },
-        { pythonName: "sort_by" },
+        { pythonName: "query_operator", type: "QUERY_OPERATOR", defaultValue: "QUERY_OPERATOR.ALL" },
+        { pythonName: "sort_by", type: "Optional[str]", defaultValue: "None" },
+        { pythonName: "query_sort_order", type: "QUERY_SORT_ORDER", defaultValue: "QUERY_SORT_ORDER.ASCENDING" },
+        { pythonName: "limit", type: "Optional[int]", defaultValue: "None" },
+        { pythonName: "scope", type: "Optional[str]", defaultValue: "None" },
       ],
     },
     {
@@ -66,17 +68,17 @@ const toolRenderer = indexToolRendererMetadata({
       parameters: [
         {
           pythonName: "query",
-          type: "query_com_apple_shortcuts_wfreminder_content_item",
-          inline: true,
-          positional: true,
+          type: "List[query_com_apple_shortcuts_wfreminder_content_item]",
         },
-        { pythonName: "sort_by", type: "filter_reminders_wfcontent_item_sort_property" },
-        { pythonName: "limit", type: "Optional[bool]", defaultValue: "False" },
-        { pythonName: "get", type: "Optional[float]", defaultValue: "5" },
+        { pythonName: "query_operator", type: "QUERY_OPERATOR", defaultValue: "QUERY_OPERATOR.ALL" },
+        { pythonName: "sort_by", type: "Optional[filter_reminders_wfcontent_item_sort_property]", defaultValue: "None" },
+        { pythonName: "query_sort_order", type: "QUERY_SORT_ORDER", defaultValue: "QUERY_SORT_ORDER.ASCENDING" },
+        { pythonName: "limit", type: "Optional[int]", defaultValue: "None", acceptedNames: ["limit", "get"] },
         {
-          pythonName: "reminders",
+          pythonName: "scope",
           type: "Optional[filter_reminders_wfcontent_item_input_parameter]",
-          defaultValue: "filter_reminders_wfcontent_item_input_parameter.REMINDERS",
+          defaultValue: "None",
+          acceptedNames: ["scope", "reminders"],
         },
       ],
     },

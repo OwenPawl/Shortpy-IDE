@@ -13,11 +13,11 @@ database.
 ## Quick Start
 
 1. Install the VSIX.
-2. Run **Shortcuts IDE: Connect To Bridge** or click the Shortcuts status-bar
-   item.
+2. Click the red **Connect** control in the workflow editor, or run **Shortcuts
+   IDE: Connect To Bridge**.
 3. Open a `.shortcut` or workflow `.plist`.
 4. Edit the generated Python in the native VS Code editor.
-5. Validate, export, or sync from the editor toolbar or Command Palette.
+5. Validate, build, or sync from the editor toolbar or Command Palette.
 
 Connect is self-contained for a public VSIX install. It stages and builds the
 bundled bridge in extension global storage, chooses the newest compatible iOS
@@ -36,6 +36,11 @@ Python** custom editor as a controller and opens the generated Shortpy in a
 native Python editor. If the bridge is disconnected, the controller still opens
 and provides Connect instead of failing.
 
+The controller provides Open Python Editor, Open in Shortcuts, Validate, Build
+Shortcut, host sync, and Live Sync. Runtime Details remains collapsed unless an
+operation fails. Search Actions and Search Triggers are persistent title-bar
+actions in the associated Python editor.
+
 The custom editor and Python editor share the same metadata and diagnostics:
 
 - Python syntax highlighting and native editor behavior;
@@ -46,16 +51,20 @@ The custom editor and Python editor share the same metadata and diagnostics:
 - output in Problems, the **Shortcuts Runtime IDE** channel, and the Debug
   Console where VS Code exposes one.
 
-The controller retains original imported bytes. Exporting an unchanged document
+The controller retains original imported bytes. Building an unchanged document
 returns the exact input file. Once Python changes, export uses the native
 Shortpy runtime pipeline and Apple's workflow-record serializer.
 
 ## Commands
 
 - **Connect To Bridge**: verify or bootstrap the bundled simulator bridge.
+- **Disconnect Bridge**: shut down the exact simulator device selected by
+  Shortpy and stop its injected bridge.
 - **Validate With Apple Runtime**: compile the active Shortpy and surface Apple
   diagnostics in Problems.
-- **Export Python To Shortcut**: write a signed `.shortcut`, or raw workflow
+- **Show Compiler Trace**: open the raw ShortcutsLanguage `.debug` stage output
+  captured from successful and failed native validations.
+- **Build Shortcut From Python**: write a signed `.shortcut`, or raw workflow
   bytes when saving as `.plist`.
 - **Write Sibling Shortcut**: write `<python-name>.shortcut` beside the active
   Python file.
@@ -72,13 +81,12 @@ Shortpy runtime pipeline and Apple's workflow-record serializer.
   editors for Shortcuts-side changes.
 - **Retrieve Relevant Actions**: search native ToolRenderer action definitions.
 - **Retrieve Relevant Triggers**: search native trigger decorators.
-- **Refresh ToolRenderer Metadata**: rerender and cache the native Python
-  interface.
 - **Load ToolKit SQLite**: select, prepare, activate, and persist a different
   ToolKit database.
 - **Python To Plist Debug JSON**: open an internal diagnostic summary.
 
-Status is passive in the status bar. `resolve_entity` and agent final-answer
+Status is passive in the status bar. Metadata refreshes automatically after a
+changed ToolKit is activated. `resolve_entity` and agent final-answer
 submission are not exposed as editor commands.
 
 ## Runtime Pipeline
@@ -131,7 +139,9 @@ first-boot indexing:
 - the complete ToolRenderer cache is regenerated.
 
 The default source is `~/Library/Shortcuts/ToolKit/Tools-active`. A selection
-made through **Load ToolKit SQLite** is persisted.
+made through **Load ToolKit SQLite** is persisted per simulator device and
+runtime. The controller only shows **Load ToolKit** when the current device has
+not activated that database or its source fingerprint changed.
 
 ## Signed and iCloud Import
 
@@ -174,6 +184,8 @@ Editor changes propagate after save, and host changes are polled while the
 linked Python editor is open. Operations are serialized per document. Live Sync
 pauses on a two-sided conflict instead of choosing a winner; resolve it with the
 normal Sync command and automatic propagation resumes.
+Disconnecting preserves the enabled mode, pauses it with a bridge-disconnected
+state, and reconnecting resumes it automatically.
 
 The VSIX bundles a small Headless Shortcuts source runtime. It is built in
 extension global storage on first sync and saves complete native
@@ -198,8 +210,6 @@ Common settings:
   `true`.
 - `shortcutsRuntimeIDE.validateOnType`: validate after an edit debounce;
   default `false`.
-- `shortcutsRuntimeIDE.refreshToolRendererInterfaceOnActivation`: load cached
-  metadata at activation and refresh in the background when connected.
 - `shortcutsRuntimeIDE.highlightKnownCommands`: highlight ToolRenderer-known
   actions and triggers.
 - `shortcutsRuntimeIDE.writeToDebugConsole`: mirror bridge events to the Debug

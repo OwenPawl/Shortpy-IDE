@@ -10,6 +10,9 @@ make
 ```
 
 The binary is written to `build/headless-shortcuts`.
+The default deployment target is macOS 26 so the same binary can run on macOS
+26 and 27. Override `MACOSX_DEPLOYMENT_TARGET` when building only if the target
+machine provides the required private WorkflowKit APIs.
 
 ## Commands
 
@@ -46,3 +49,15 @@ triggers, input/output classes, fallback behavior, icon data, and other record
 metadata are handled by WorkflowKit rather than reconstructed as SQL. The only
 derived value filled by the CLI is `actionCount`, which is not carried by the
 workflow plist itself.
+
+## Runtime Compatibility
+
+The CLI uses the native WorkflowKit API family shared by macOS 26 and 27:
+`WFWorkflowCreationOptions`, `WFDatabaseWorkflowStorage`, and identifier-based
+deletion. It parses and persists a complete `WFWorkflowRecord` and never
+reconstructs shortcut rows with SQL.
+
+Special thanks to **No_Pen_3825** for creating
+[OPHSC](https://github.com/Kenna-Blackburn/OPHSC), which adapted Headless
+Shortcuts for macOS releases before 27.0 and helped establish the compatible
+WorkflowKit persistence path used here.

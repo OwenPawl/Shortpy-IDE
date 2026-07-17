@@ -51,23 +51,11 @@ extern char *bridge_swift_pipeline_python_to_bplist(const char *source,
 extern char *bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
     const char *source, const char *catalog_metadata, uint64_t flags,
     uint64_t pipeline);
-extern char *bridge_swift_python_record_file_probe(const char *source,
-                                                   uint64_t flags);
-extern char *bridge_swift_python_record_file_probe_with_catalog_metadata(
-    const char *source, const char *catalog_metadata, uint64_t flags);
 extern char *bridge_swift_pipeline_plist_to_python(const char *plist_json,
                                                     uint64_t pipeline);
 extern char *bridge_swift_pipeline_bplist_to_python(const uint8_t *bytes,
                                                      size_t len,
                                                      uint64_t pipeline);
-extern char *bridge_swift_agent_toolbox_query(const char *query,
-                                              const char *kind,
-                                              uint64_t limit);
-extern char *bridge_swift_agent_toolbox_query_mainactor(const char *query,
-                                                        const char *kind,
-                                                        uint64_t limit);
-extern char *bridge_swift_agent_toolbox_init_dump(void);
-extern char *bridge_swift_resolve_entity(const char *request_json);
 extern char *bridge_swift_catalog_dump_latest(void);
 extern char *bridge_swift_catalog_encode_latest_debug(void);
 extern char *bridge_swift_expand_inline_catalog_metadata(
@@ -418,11 +406,6 @@ static void status_json(char *response, size_t cap) {
            "\"pipeline-python-to-bplist-catalog-b64-flags\","
            "\"pipeline-plist-to-python-b64\","
            "\"pipeline-plist-data-to-python-b64\","
-           "\"record-file-probe-b64-flags\","
-           "\"record-file-probe-catalog-b64-flags\","
-           "\"agent-toolbox-init-dump\",\"agent-toolbox-query-b64\","
-           "\"agent-toolbox-query-mainactor-b64\","
-           "\"resolve-entity-b64\","
            "\"catalog-dump-latest\","
            "\"catalog-encode-latest-debug\","
            "\"expand-inline-catalog-b64\","
@@ -453,65 +436,6 @@ static void last_json(char *response, size_t cap) {
            "\"last_response\":\"%s\",\"last_diagnostic\":\"%s\"}",
            event_escaped, source_escaped, response_escaped, diagnostic_escaped);
   pthread_mutex_unlock(&g_state.lock);
-}
-
-static bool parse_flags_payload(const char *cmd, const char *prefix,
-                                uint64_t *flags_out,
-                                const char **payload_out) {
-  size_t prefix_len = strlen(prefix);
-  if (strncmp(cmd, prefix, prefix_len) != 0) {
-    return false;
-  }
-  const char *cursor = cmd + prefix_len;
-  char *end = NULL;
-  errno = 0;
-  uint64_t flags = strtoull(cursor, &end, 0);
-  if (errno != 0 || !end || *end != ' ') {
-    *payload_out = NULL;
-    return true;
-  }
-  *flags_out = flags;
-  *payload_out = end + 1;
-  return true;
-}
-
-static void handle_source_command_uncached(const char *event, const char *cmd,
-                                           const char *payload, uint64_t flags,
-                                           char *response, size_t cap,
-                                           char *(*runner)(const char *, uint64_t)) {
-  uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
-  if (!decoded) {
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"failed to allocate source buffer\"}");
-    return;
-  }
-  ssize_t n = decode_base64(payload, decoded, MAX_SOURCE);
-  if (n < 0) {
-    free(decoded);
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"invalid base64 or source too large\"}");
-    return;
-  }
-  decoded[n] = 0;
-
-  char *result = runner((const char *)decoded, flags);
-  if (!result) {
-    free(decoded);
-    snprintf(response, cap,
-             "{\"ok\":false,\"error\":\"%s runner returned null\"}", event);
-    return;
-  }
-
-  pthread_mutex_lock(&g_state.lock);
-  g_state.command_count++;
-  set_last_event_locked(event, "uncached large native serializer probe result");
-  pthread_mutex_unlock(&g_state.lock);
-  append_log("%s uncached flags=%llu length=%zd result_length=%zu", event,
-             (unsigned long long)flags, n, strlen(result));
-  strlcpy(response, result, cap);
-  free(result);
-  free(decoded);
-  (void)cmd;
 }
 
 static void handle_pipeline_source_command(
@@ -641,7 +565,6 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
   }
 
   uint64_t flags = 0;
-  const char *payload = NULL;
   const char *pipeline_compile_prefix =
       "pipeline-python-to-bplist-b64-flags ";
   if (strncmp(cmd, pipeline_compile_prefix,
@@ -665,18 +588,6 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
     handle_pipeline_source_command(
         "pipeline_python_to_bplist", flags_end + 1, flags, pipeline, response,
         cap, bridge_swift_pipeline_python_to_bplist);
-    return;
-  }
-  if (parse_flags_payload(cmd, "record-file-probe-b64-flags ", &flags,
-                          &payload)) {
-    if (!payload) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid record-file-probe flags syntax\"}");
-      return;
-    }
-    handle_source_command_uncached("record_file_probe", cmd, payload, flags,
-                                   response, cap,
-                                   bridge_swift_python_record_file_probe);
     return;
   }
   const char *pipeline_catalog_compile_prefix =
@@ -709,70 +620,6 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
     *catalogPayload++ = 0;
     handle_pipeline_catalog_command(sourcePayload, catalogPayload, flags,
                                     pipeline, response, cap);
-    return;
-  }
-  const char *record_probe_catalog_prefix =
-      "record-file-probe-catalog-b64-flags ";
-  if (strncmp(cmd, record_probe_catalog_prefix,
-              strlen(record_probe_catalog_prefix)) == 0) {
-    const char *cursor = cmd + strlen(record_probe_catalog_prefix);
-    char *end = NULL;
-    flags = strtoull(cursor, &end, 10);
-    if (end == cursor || *end != ' ') {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid record-file-probe catalog flags syntax\"}");
-      return;
-    }
-    char *source_payload = end + 1;
-    char *catalog_payload = strchr(source_payload, ' ');
-    if (!catalog_payload) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"missing record-file-probe catalog payload\"}");
-      return;
-    }
-    *catalog_payload++ = 0;
-    uint8_t *decoded_source = calloc(1, MAX_SOURCE + 1);
-    uint8_t *decoded_catalog = calloc(1, MAX_PLIST_BYTES + 1);
-    if (!decoded_source || !decoded_catalog) {
-      free(decoded_source);
-      free(decoded_catalog);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"failed to allocate record-file-probe catalog buffers\"}");
-      return;
-    }
-    ssize_t source_len = decode_base64(source_payload, decoded_source, MAX_SOURCE);
-    ssize_t catalog_len =
-        decode_base64(catalog_payload, decoded_catalog, MAX_PLIST_BYTES);
-    if (source_len < 0 || catalog_len < 0) {
-      free(decoded_source);
-      free(decoded_catalog);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid base64 or source/catalog too large\"}");
-      return;
-    }
-    decoded_source[source_len] = 0;
-    decoded_catalog[catalog_len] = 0;
-    char *result = bridge_swift_python_record_file_probe_with_catalog_metadata(
-        (const char *)decoded_source, (const char *)decoded_catalog, flags);
-    if (!result) {
-      free(decoded_source);
-      free(decoded_catalog);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"record_file_probe_catalog runner returned null\"}");
-      return;
-    }
-    pthread_mutex_lock(&g_state.lock);
-    g_state.command_count++;
-    set_last_event_locked("record_file_probe_catalog",
-                          "uncached large native serializer catalog probe result");
-    pthread_mutex_unlock(&g_state.lock);
-    append_log("record_file_probe_catalog uncached flags=%llu source_length=%zd catalog_length=%zd result_length=%zu",
-               (unsigned long long)flags, source_len, catalog_len,
-               strlen(result));
-    strlcpy(response, result, cap);
-    free(result);
-    free(decoded_source);
-    free(decoded_catalog);
     return;
   }
   if (strncmp(cmd, "toolrenderer-python-interface", 29) == 0) {
@@ -856,162 +703,6 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
     remember_result("expand_inline_catalog", "expand_inline_catalog",
                     (const char *)decoded, (size_t)n, result);
     append_log("expand_inline_catalog length=%zd", n);
-    strlcpy(response, result, cap);
-    free(result);
-    free(decoded);
-    return;
-  }
-  if (strncmp(cmd, "resolve-entity-b64 ", 19) == 0) {
-    const char *request_payload = cmd + 19;
-    uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
-    if (!decoded) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"failed to allocate resolve entity buffer\"}");
-      return;
-    }
-    ssize_t n = decode_base64(request_payload, decoded, MAX_SOURCE);
-    if (n < 0) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid base64 or resolve entity JSON too large\"}");
-      return;
-    }
-    decoded[n] = 0;
-    char *result = bridge_swift_resolve_entity((const char *)decoded);
-    if (!result) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"resolve entity runner returned null\"}");
-      return;
-    }
-    remember_result("resolve_entity", "resolve_entity", (const char *)decoded,
-                    (size_t)n, result);
-    append_log("resolve_entity length=%zd", n);
-    strlcpy(response, result, cap);
-    free(result);
-    free(decoded);
-    return;
-  }
-  if (strncmp(cmd, "agent-toolbox-init-dump", 23) == 0) {
-    char *result = bridge_swift_agent_toolbox_init_dump();
-    if (!result) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"agent toolbox init dump returned null\"}");
-      return;
-    }
-    remember_result("agent_toolbox_init_dump", "agent_toolbox_init_dump", "", 0,
-                    result);
-    append_log("agent_toolbox_init_dump");
-    strlcpy(response, result, cap);
-    free(result);
-    return;
-  }
-  if (strncmp(cmd, "agent-toolbox-query-b64 ", 24) == 0) {
-    const char *cursor = cmd + 24;
-    const char *kind_end = strchr(cursor, ' ');
-    if (!kind_end || kind_end == cursor || (kind_end - cursor) >= 32) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid agent toolbox query kind\"}");
-      return;
-    }
-    char kind[32];
-    memcpy(kind, cursor, (size_t)(kind_end - cursor));
-    kind[kind_end - cursor] = 0;
-    cursor = kind_end + 1;
-    char *limit_end = NULL;
-    errno = 0;
-    uint64_t limit = strtoull(cursor, &limit_end, 0);
-    if (errno != 0 || !limit_end || *limit_end != ' ') {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid agent toolbox query limit\"}");
-      return;
-    }
-    const char *query_payload = limit_end + 1;
-    uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
-    if (!decoded) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"failed to allocate query buffer\"}");
-      return;
-    }
-    ssize_t n = decode_base64(query_payload, decoded, MAX_SOURCE);
-    if (n < 0) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid base64 or query too large\"}");
-      return;
-    }
-    decoded[n] = 0;
-    char *result =
-        bridge_swift_agent_toolbox_query((const char *)decoded, kind, limit);
-    if (!result) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"agent toolbox runner returned null\"}");
-      return;
-    }
-    char source_prefix[128];
-    snprintf(source_prefix, sizeof(source_prefix), "agent_toolbox_query %s %llu",
-             kind, (unsigned long long)limit);
-    remember_result("agent_toolbox_query", source_prefix,
-                    (const char *)decoded, (size_t)n, result);
-    append_log("agent_toolbox_query kind=%s limit=%llu length=%zd", kind,
-               (unsigned long long)limit, n);
-    strlcpy(response, result, cap);
-    free(result);
-    free(decoded);
-    return;
-  }
-  if (strncmp(cmd, "agent-toolbox-query-mainactor-b64 ", 34) == 0) {
-    const char *cursor = cmd + 34;
-    const char *kind_end = strchr(cursor, ' ');
-    if (!kind_end || kind_end == cursor || (kind_end - cursor) >= 32) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid agent toolbox query kind\"}");
-      return;
-    }
-    char kind[32];
-    memcpy(kind, cursor, (size_t)(kind_end - cursor));
-    kind[kind_end - cursor] = 0;
-    cursor = kind_end + 1;
-    char *limit_end = NULL;
-    errno = 0;
-    uint64_t limit = strtoull(cursor, &limit_end, 0);
-    if (errno != 0 || !limit_end || *limit_end != ' ') {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid agent toolbox query limit\"}");
-      return;
-    }
-    const char *query_payload = limit_end + 1;
-    uint8_t *decoded = calloc(1, MAX_SOURCE + 1);
-    if (!decoded) {
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"failed to allocate query buffer\"}");
-      return;
-    }
-    ssize_t n = decode_base64(query_payload, decoded, MAX_SOURCE);
-    if (n < 0) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"invalid base64 or query too large\"}");
-      return;
-    }
-    decoded[n] = 0;
-    char *result = bridge_swift_agent_toolbox_query_mainactor(
-        (const char *)decoded, kind, limit);
-    if (!result) {
-      free(decoded);
-      snprintf(response, cap,
-               "{\"ok\":false,\"error\":\"agent toolbox main-actor runner returned null\"}");
-      return;
-    }
-    char source_prefix[128];
-    snprintf(source_prefix, sizeof(source_prefix),
-             "agent_toolbox_query_mainactor %s %llu", kind,
-             (unsigned long long)limit);
-    remember_result("agent_toolbox_query_mainactor", source_prefix,
-                    (const char *)decoded, (size_t)n, result);
-    append_log("agent_toolbox_query_mainactor kind=%s limit=%llu length=%zd",
-               kind, (unsigned long long)limit, n);
     strlcpy(response, result, cap);
     free(result);
     free(decoded);
@@ -1111,10 +802,6 @@ static void handle_command(const char *cmd, char *response, size_t cap) {
            "\"pipeline-python-to-bplist-catalog-b64-flags\","
            "\"pipeline-plist-to-python-b64\","
            "\"pipeline-plist-data-to-python-b64\","
-           "\"record-file-probe-b64-flags\","
-           "\"record-file-probe-catalog-b64-flags\","
-           "\"agent-toolbox-query-b64\","
-           "\"resolve-entity-b64\","
            "\"catalog-dump-latest\","
            "\"catalog-encode-latest-debug\","
            "\"expand-inline-catalog-b64\","

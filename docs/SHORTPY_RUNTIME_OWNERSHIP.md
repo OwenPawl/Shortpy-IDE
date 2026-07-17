@@ -47,8 +47,8 @@ Shortpy therefore owns the two boundaries where that identity is still present:
 | Concern | Shortpy owns | Apple still owns |
 | --- | --- | --- |
 | Python parsing | Pass ordering and targeted native IR corrections | `PythonToIR`, syntax, types, diagnostics |
-| Control flow | Lexical binding capture, nested-result correction, recurrence preparation/restoration | Normal Repeat, If/Else, Choose from Menu, and variable lowering |
-| Action compilation | Selection of one Tool database and backend invocation | `IRToShortcut`, ToolKit definitions, parameters, action construction |
+| Control flow | Lexical binding capture, nested-result correction, recurrence preparation/restoration, terminal Else If compatibility | Normal Repeat, If/Else, Choose from Menu, and variable lowering |
+| Action compilation | Selection of one Tool database, backend invocation, and opaque transfer of Apple-produced Else If condition payloads | `IRToShortcut`, condition serialization, ToolKit definitions, parameters, action construction |
 | Workflow export | Per-object adapters for proven ambiguous real actions | `DescribeAShortcutAgent.editModeContext(for:)`, structural rendering, decorators |
 | Workflow persistence | Corrected native actions before persistence | `WFWorkflow.saveToRecord`, `WFWorkflowRecord`, `WFWorkflowFile` |
 | Catalog values | Inline metadata preprocessing and ref reification | Native parameter-state catalog and compiler consumption |
@@ -93,14 +93,17 @@ Editable Shortpy
   -> inline catalog preprocessing on a compiler-only source copy
   -> ShortcutsLanguage.PythonToIR
   -> native IRProgram
-  -> ShortpyControlFlowBindingCapture
-  -> ShortpyLoopCarriedRecurrencePreparationPass
+  -> ShortpyControlFlowPlan (read-only)
+  -> ShortpyControlFlowInputPreparation
   -> Apple ControlFlowOutputInferencePass to a fixpoint
+  -> ShortpyControlFlowOutputRepair
   -> Apple VariableInliningPass to a fixpoint
   -> Apple DropCommentsPass
-  -> ShortpyNestedControlFlowResultPass
+  -> capture canonical final IR and read-only action provenance
+  -> ShortpyElseIfConditionWitnessPreparation on the terminal IR value
   -> ShortcutsLanguage.IRToShortcut backend
   -> CompiledShortcut.workflow
+  -> validated Else If condition transfer and witness-marker removal
   -> targeted native recurrence action reconstruction, if required
   -> WFWorkflow.saveToRecord on databaseAccessQueue
   -> WFWorkflowRecord.fileRepresentation
@@ -129,10 +132,43 @@ shim. Resolution is by loaded image metadata and names, not a fixed address.
 If the expected conformance, context shape, or native metadata is unavailable,
 the compile fails with an explicit diagnostic.
 
-### Control-Flow Binding Capture
+### Else If Backend Compatibility
 
-`ShortpyControlFlowBindingCapture` walks the native `IRProgram` before any pass
-mutates it. It records:
+The iOS 27 `IRToShortcut` backend reads the number of
+`IRConditional.elseIfBranches` but does not lower their conditions. It emits
+one unconditioned mode-1 marker per branch. This is an Apple backend defect,
+not a parsing or IR-loss issue: the final native IR still contains every branch
+condition.
+
+After canonical final-IR text and explicit-action provenance have been
+captured, Shortpy treats the `IRProgram` as terminal and ephemeral. For each
+Else If branch it inserts an empty conditional witness whose mode-0 branch is
+a native value-witness copy of that branch. Apple's backend then serializes the
+condition through its normal mode-0 path in the same compilation.
+
+The resulting workflow is repaired transactionally:
+
+1. Match witness and target conditional groups by validated native traversal
+   ordinal and grouping identifier.
+2. Copy every opaque condition field except control mode, grouping identifier,
+   and UUID from witness mode 0 to the corresponding target mode 1.
+3. Preserve or add the final unconditioned mode-1 Else boundary.
+4. Remove both marker actions for every empty witness.
+5. Commit the complete action array with one `setActions:` call.
+
+Real branch bodies are never copied or moved. Multiple and nested Else If
+branches map in source order. Condition families, operators, inputs, and
+action-output references remain Apple-owned; Shortpy does not serialize any of
+them. A changed group count, mode sequence, preconditioned native mode-1 marker,
+or unresolved ordinal aborts before the workflow is modified.
+
+There is no backend IR copy. Once witnesses are inserted, Shortpy never reads
+the mutated IR again; it is passed only to `IRToShortcut` and then destroyed.
+
+### Control-Flow Compatibility Plan
+
+`ShortpyControlFlowPlan` walks the native `IRProgram` before any pass mutates
+it. The plan is read-only and records:
 
 - native statement IDs;
 - lexical control owner IDs;
@@ -142,7 +178,7 @@ mutates it. It records:
 - seed and recursive branches for loop-carried values;
 - conflicting writes that make a structural interpretation unsafe.
 
-The capture is a side table keyed by native identity. It is not encoded in the
+The plan is keyed by native identity. It is not encoded in the
 Python and is not needed after compilation. Variable names are compared only as
 one local property of a binding; they are never treated as globally unique
 identity.
@@ -159,9 +195,10 @@ Swift resilient values. It discovers native type metadata, enum cases, fields,
 and generic element types by name and reflection. It uses Swift value witnesses
 to copy, take, and destroy values correctly.
 
-It does not mirror complete private Swift structs in C. The adapter resolves only
-the fields and enum cases needed for the two corrections, validates them before
-mutation, and fails closed if a runtime no longer has the expected shape.
+It does not mirror complete private Swift structs in C. The adapter resolves
+only the fields and enum cases needed by one input-preparation hook and one
+output-repair hook, validates them before mutation, and fails closed if a
+runtime no longer has the expected shape.
 
 The assembly shims in `bridge/src/runtime_direct_shims_sim.S` handle the narrow
 Swift calling-convention boundaries for:
@@ -169,6 +206,7 @@ Swift calling-convention boundaries for:
 - `PythonToIR` initialization and visitation;
 - native pass initialization/application;
 - `IRToShortcut` backend invocation;
+- mode-0 serialization of every conditional predicate;
 - native statement IDs and Swift string operations;
 - `DescribeAShortcutAgent.editModeContext(for:)`.
 
@@ -180,7 +218,7 @@ recursive edge on the affected iOS 27 runtimes.
 
 Shortpy handles this in two phases:
 
-1. `ShortpyLoopCarriedRecurrencePreparationPass` changes only the captured seed
+1. `ShortpyControlFlowInputPreparation` changes only the captured seed
    and recursive native IR bindings into an acyclic form that Apple's backend can
    lower.
 2. After `IRToShortcut` returns a native `WFWorkflow`, Shortpy restores the
@@ -202,24 +240,37 @@ If there is no unique edge, the bridge returns
 `unsupportedLoopCarriedRecurrence`. It never guesses from action order or
 variable names.
 
-### Nested Control Results
+### Post-Inference Output Repair
 
-`ShortpyNestedControlFlowResultPass` corrects result transfers such as an inner
-Repeat result becoming the value appended to an outer Repeat result. The pass
-uses the previously captured statement and owner identities to decide whether a
-tail append/assignment is structural.
+`ShortpyControlFlowOutputRepair` runs once, immediately after Apple's
+`ControlFlowOutputInferencePass` and before Apple's `VariableInliningPass`. One
+lexical traversal performs the structurally captured repairs:
 
-The pass can convert the relevant append into a native expression transfer or
-remove a redundant structural append where the nested control already provides
-the value edge. It leaves a real variable mutation untouched when the binding
-has a conflicting write or does not belong to that lexical control.
+- For an initializer-only Repeat, replace only the captured adjacent empty-list
+  assignment expression with the Repeat's native `stmt_N` result reference.
+- For nested Repeat result forwarding, remove a direct tail `append(stmt_N)`,
+  or replace a wrapped forwarding append with its real action expression.
+- Remove terminal `None` expressions that exist only as complete If/Menu output
+  anchors; they are not native Nothing actions.
+- For Apple's canonical one-sided empty If form, relocate the native statement
+  anchor to the parent scope so `VariableInliningPass` can resolve and remove it.
 
-This preserves Apple's normal Python representation while preventing an
-ordinary Add to Variable action from being mistaken for Repeat Results.
+Initializer repair occurs before descending into a Repeat body. Forwarding
+cleanup occurs after descendants are repaired, so nested controls are handled
+inner-first. Any constructor, identity, shape, or captured-repair-count mismatch
+is an error.
+
+Repeat Index and Repeat Item are not output-repair categories. Apple continues
+to infer and lower them as named native variable attachments such as
+`Repeat Index 2` and `Repeat Item 2`.
+
+This preserves Apple's normal Python representation while preventing an empty
+control-flow initializer from becoming a List action and a redundant nested
+forwarding append from becoming Add to Variable.
 
 ### What Remains Native
 
-After the two owned corrections, Apple still performs the broad compilation
+Outside the two owned mutation hooks, Apple still performs the broad compilation
 work:
 
 - parsing and type checking;
@@ -293,30 +344,32 @@ workflow, action-order provenance, comments, or a sidecar file.
 
 ### Temporary Workflow Clone
 
-`bridge_shortpy_make_edit_export_workflow` begins with `[workflow copy]` and
-copies only actions that require adaptation. The source workflow is never
-mutated.
+`bridge_shortpy_make_edit_export_workflow` begins with `[workflow copy]`, then
+reconstructs the complete action array from each action's native identifier,
+definition, and serialized parameters. Installing that isolated array before
+export preserves Apple's UUID producer lookup while ensuring later `isa`
+changes cannot leak through `WFWorkflow.copy`'s shallow action array.
 
-For every action it:
+For every non-control action it then:
 
-1. Skips all `WFControlFlowAction` instances.
-2. Considers only the explicit, proven classes:
-   `WFAppendVariableAction`, `WFSetVariableAction`, `WFGetVariableAction`, and
-   `WFCommentAction`.
-3. Verifies that the concrete class has a specialized `exportWithError:`
-   implementation rather than the generic `WFAction` implementation.
-4. Copies that one action object.
-5. Changes only the copy's class to a dynamically allocated adapter subclass.
-6. Places the adapted object into the temporary workflow's action array.
+1. Leaves actions using the base `WFAction` exporter unchanged.
+2. Invokes a specialized exporter on the isolated workflow graph.
+3. Preserves the specialized result when its program tree contains exactly one
+   execution node owned by the source action.
+4. Uses the generic explicit ToolKit exporter when the specialized result owns
+   no execution node or cannot represent the action.
+5. Requires that generic result to contain exactly one owned execution node.
+6. Fails clearly on ambiguous counts, unknown actions, or unsupported parameter
+   state instead of returning native shorthand.
 
-No original action class or method table is changed.
+No original action object, class, or method table is changed.
 
 ### Per-Object Export Adapter
 
 Each dynamic subclass overrides `exportWithError:`. Its implementation invokes
-the base `WFAction` exporter directly, bypassing the concrete action's ambiguous
-specialized exporter. The returned ordinary action execution node retains the
-native action object, ToolKit function name, and native parameters.
+the base `WFAction` exporter directly, bypassing only the isolated object's
+shorthand specialized exporter. The returned ordinary action execution node
+retains the native action object, ToolKit function name, and native parameters.
 
 Add and Set Variable require a `variable=` argument that the generic exporter
 does not include. The adapter reads `WFVariableName` from native
@@ -328,8 +381,11 @@ temporary object's parameter list where necessary. This avoids supplying the
 same variable field through both the action's specialized UI parameter and the
 explicit ToolKit call.
 
-Get Variable and Comment use the same generic-action export boundary but do not
-need the inserted `variable=` argument logic used by Add and Set.
+Get Variable, List, Text, Dictionary, Nothing, Comment, and other shorthand
+exporters use the same classification boundary. Dictionary parameters retain
+Apple's native program tree; numeric `WFItemType == 3` leaves are changed from
+quoted to verbatim with `WFProgramNode.replaceContentWithVerbatim:` after an
+unambiguous serialized-key/array-position match. No new Python syntax is used.
 
 ### Isolation Properties
 
@@ -392,7 +448,8 @@ All owned corrections are fail-closed. Examples include:
 
 - missing Swift metadata, enum cases, field layouts, or value witnesses;
 - unavailable `IRToShortcut: Backend` conformance;
-- control-flow bindings that cannot be tied to one lexical owner;
+- control-flow plan entries that cannot be tied to one lexical owner;
+- initializer-only repairs that do not match every captured candidate;
 - recurrence plans without a unique native action-output path;
 - edit-export action objects that cannot be safely copied or adapted;
 - inline catalog parameters without a native tool/trigger ID and raw key.
@@ -432,7 +489,12 @@ Shortpy request. It does not compile or link
 If Apple fixes the native compiler and exporter, removal is localized to:
 
 - the `.shortpy` case in `RuntimePipeline`;
-- `ShortpyToShortcut` and its C/assembly ABI surface;
+- the contiguous `ShortpyControlFlowPlan`,
+  `ShortpyControlFlowInputPreparation`, and
+  `ShortpyControlFlowOutputRepair` stage block;
+- terminal Else If witness preparation and workflow repair;
+- the four C lifecycle/mutation entry points that capture/destroy the plan and
+  prepare/repair the native IR;
 - `bridge_shortpy_make_edit_export_workflow` and dynamic action adapters;
 - recurrence restoration on native `WFAction` parameters;
 - Shortpy-only tests and reporting fields.
@@ -451,6 +513,9 @@ The live simulator suite in
 - stable action identifier/control-mode shape;
 - stable action-output dependency edges;
 - correct loop-carried recurrence edges;
+- exact Shortpy pass ordering and a read-only control-flow plan;
+- exact initializer-repair and nested-forwarding counts;
+- nested Repeat Index and Repeat Item variable attachments;
 - no visible inline catalog refs.
 
 Its fixtures cover:
@@ -459,6 +524,7 @@ Its fixtures cover:
 - `if`/`elif`/`else` recurrence;
 - Choose from Menu recurrence;
 - nested Repeat Results;
+- nested Repeat Index and Repeat Each item consumers;
 - explicit variable actions;
 - list and Get Item from List behavior;
 - explicit Comment actions;

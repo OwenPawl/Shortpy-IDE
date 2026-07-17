@@ -22,7 +22,8 @@ private struct WorkflowRuntime {
   let fileClass: AnyClass
   let workflowClass: AnyClass
   let databaseClass: AnyClass
-  let proxyClass: AnyClass
+  let creationOptionsClass: AnyClass
+  let databaseStorageClass: AnyClass
 }
 
 private let errorDomain = "HeadlessShortcuts"
@@ -36,17 +37,17 @@ private typealias ErrorPointer = AutoreleasingUnsafeMutablePointer<NSError?>
 private typealias Object0 = @convention(c) (AnyObject, Selector) -> AnyObject?
 private typealias Object1 = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
 private typealias ObjectError = @convention(c) (AnyObject, Selector, ErrorPointer) -> AnyObject?
+private typealias Object1Error =
+  @convention(c) (AnyObject, Selector, AnyObject, ErrorPointer) -> AnyObject?
 private typealias InitDatabase =
   @convention(c) (AnyObject, Selector, UInt, AnyObject, ErrorPointer) -> AnyObject?
 private typealias InitFile =
   @convention(c) (AnyObject, Selector, AnyObject, AnyObject, ErrorPointer) -> AnyObject?
 private typealias WorkflowForReference =
   @convention(c) (AnyObject, Selector, AnyObject, AnyObject, ErrorPointer) -> AnyObject?
-private typealias CreateWorkflow =
-  @convention(c) (AnyObject, Selector, AnyObject, UInt, ErrorPointer) -> AnyObject?
 private typealias SaveRecordWithReference =
   @convention(c) (AnyObject, Selector, AnyObject, AnyObject, ErrorPointer) -> Bool
-private typealias DeleteReference =
+private typealias DeleteWorkflowIdentifier =
   @convention(c) (AnyObject, Selector, AnyObject, ErrorPointer) -> Bool
 private typealias SetObject = @convention(c) (AnyObject, Selector, AnyObject) -> Void
 private typealias SetInt = @convention(c) (AnyObject, Selector, Int) -> Void
@@ -271,7 +272,8 @@ private func loadRuntime() throws -> WorkflowRuntime {
   guard let fileClass = NSClassFromString("WFWorkflowFile"),
     let workflowClass = NSClassFromString("WFWorkflow"),
     let databaseClass = NSClassFromString("WFDatabase"),
-    let proxyClass = NSClassFromString("WFDatabaseProxy")
+    let creationOptionsClass = NSClassFromString("WFWorkflowCreationOptions"),
+    let databaseStorageClass = NSClassFromString("WFDatabaseWorkflowStorage")
   else {
     throw toolError("WorkflowKit did not expose the required classes")
   }
@@ -279,13 +281,12 @@ private func loadRuntime() throws -> WorkflowRuntime {
     fileClass: fileClass,
     workflowClass: workflowClass,
     databaseClass: databaseClass,
-    proxyClass: proxyClass
+    creationOptionsClass: creationOptionsClass,
+    databaseStorageClass: databaseStorageClass
   )
 }
 
-private func openDatabase(_ runtime: WorkflowRuntime) throws -> (
-  database: AnyObject, proxy: AnyObject
-) {
+private func openDatabase(_ runtime: WorkflowRuntime) throws -> AnyObject {
   let path = databasePath()
   guard FileManager.default.fileExists(atPath: path) else {
     throw toolError("Shortcuts database not found at \(path)")
@@ -310,16 +311,7 @@ private func openDatabase(_ runtime: WorkflowRuntime) throws -> (
     throw error ?? toolError("WFDatabase initialization failed")
   }
 
-  let proxyObject = try allocate(runtime.proxyClass)
-  let proxySelector = selector("initWithDatabase:")
-  let initializeProxy = unsafeBitCast(
-    try methodImplementation(proxyObject, proxySelector),
-    to: Object1.self
-  )
-  guard let proxy = initializeProxy(proxyObject, proxySelector, database) else {
-    throw toolError("WFDatabaseProxy initWithDatabase: returned nil")
-  }
-  return (database, proxy)
+  return database
 }
 
 private func workflowRecord(
@@ -367,21 +359,22 @@ private func workflowRecord(
   return record
 }
 
-private func identifier(for reference: AnyObject) throws -> String {
-  guard let identifier = callObject0(reference, selector("identifier")) else {
-    throw toolError("workflow reference did not expose an identifier")
+private func identifier(for object: AnyObject) throws -> String {
+  for property in ["identifier", "workflowID"] {
+    if let identifier = callObject0(object, selector(property)) {
+      let workflowID = identifier as? String ?? String(describing: identifier)
+      if !workflowID.isEmpty {
+        return workflowID
+      }
+    }
   }
-  let workflowID = identifier as? String ?? String(describing: identifier)
-  guard !workflowID.isEmpty else {
-    throw toolError("workflow reference did not expose an identifier")
-  }
-  return workflowID
+  throw toolError("workflow object did not expose an identifier")
 }
 
 private func createShortcut(
   options: Options,
   runtime: WorkflowRuntime,
-  proxy: AnyObject
+  database: AnyObject
 ) throws -> (workflowID: String, name: String) {
   let requestedName = options.name!
   let record = try workflowRecord(
@@ -389,36 +382,44 @@ private func createShortcut(
     plistPath: options.workflowPath!,
     name: requestedName
   )
-
-  var error: NSError?
-  let createSelector = selector("createWorkflowWithWorkflowRecord:nameCollisionBehavior:error:")
-  let createWorkflow = unsafeBitCast(
-    try methodImplementation(proxy, createSelector),
-    to: CreateWorkflow.self
-  )
-  guard let reference = createWorkflow(proxy, createSelector, record, 0, &error) else {
-    throw error ?? toolError("workflow creation failed")
-  }
-  let createdName = callObject0(reference, selector("name")) as? String ?? requestedName
-  return (try identifier(for: reference), createdName)
-}
-
-private func reference(for workflowID: String, proxy: AnyObject) throws -> AnyObject? {
-  let referenceSelector = selector("referenceForWorkflowID:")
-  let lookup = unsafeBitCast(
-    try methodImplementation(proxy, referenceSelector),
+  let optionsObject = try allocate(runtime.creationOptionsClass)
+  let optionsSelector = selector("initWithRecord:")
+  let initializeOptions = unsafeBitCast(
+    try methodImplementation(optionsObject, optionsSelector),
     to: Object1.self
   )
-  return lookup(proxy, referenceSelector, workflowID as NSString)
+  guard let options = initializeOptions(optionsObject, optionsSelector, record) else {
+    throw toolError("WFWorkflowCreationOptions initWithRecord: returned nil")
+  }
+
+  var error: NSError?
+  let createSelector = selector("createWorkflowWithOptions:error:")
+  let createWorkflow = unsafeBitCast(
+    try methodImplementation(database, createSelector),
+    to: Object1Error.self
+  )
+  guard let workflow = createWorkflow(database, createSelector, options, &error) else {
+    throw error ?? toolError("workflow creation failed")
+  }
+  let createdName = callObject0(workflow, selector("name")) as? String ?? requestedName
+  return (try identifier(for: workflow), createdName)
+}
+
+private func reference(for workflowID: String, database: AnyObject) throws -> AnyObject? {
+  let referenceSelector = selector("referenceForWorkflowID:")
+  let lookup = unsafeBitCast(
+    try methodImplementation(database, referenceSelector),
+    to: Object1.self
+  )
+  return lookup(database, referenceSelector, workflowID as NSString)
 }
 
 private func loadedWorkflow(
   workflowID: String,
   runtime: WorkflowRuntime,
-  database: AnyObject,
-  proxy: AnyObject
+  database: AnyObject
 ) throws -> (reference: AnyObject, workflow: AnyObject, name: String) {
-  guard let reference = try reference(for: workflowID, proxy: proxy) else {
+  guard let reference = try reference(for: workflowID, database: database) else {
     throw toolError("shortcut \(workflowID) was not found", code: .notFound)
   }
 
@@ -449,23 +450,16 @@ private func loadedWorkflow(
 private func editShortcut(
   options: Options,
   runtime: WorkflowRuntime,
-  database: AnyObject,
-  proxy: AnyObject
+  database: AnyObject
 ) throws -> (workflowID: String, name: String) {
   let workflowID = options.workflowID!
   let existing = try loadedWorkflow(
     workflowID: workflowID,
     runtime: runtime,
-    database: database,
-    proxy: proxy
+    database: database
   )
   let reference = existing.reference
-  let existingWorkflow = existing.workflow
   let existingName = existing.name
-  guard let storageProvider = callObject0(existingWorkflow, selector("storageProvider")) else {
-    throw toolError("existing shortcut did not provide a storage provider")
-  }
-
   let replacementRecord = try workflowRecord(
     runtime: runtime,
     plistPath: options.workflowPath!,
@@ -473,12 +467,22 @@ private func editShortcut(
   )
 
   let saveSelector = selector("saveRecord:withReference:error:")
+  let storageObject = try allocate(runtime.databaseStorageClass)
+  let storageSelector = selector("initWithDatabase:")
+  let initializeStorage = unsafeBitCast(
+    try methodImplementation(storageObject, storageSelector),
+    to: Object1.self
+  )
+  let storage = initializeStorage(storageObject, storageSelector, database)
+  guard let storage else {
+    throw toolError("WFDatabaseWorkflowStorage initWithDatabase: returned nil")
+  }
   let saveRecord = unsafeBitCast(
-    try methodImplementation(storageProvider, saveSelector),
+    try methodImplementation(storage, saveSelector),
     to: SaveRecordWithReference.self
   )
   var error: NSError?
-  if !saveRecord(storageProvider, saveSelector, replacementRecord, reference, &error) {
+  if !saveRecord(storage, saveSelector, replacementRecord, reference, &error) {
     throw error ?? toolError("workflow record save failed")
   }
   return (workflowID, existingName)
@@ -487,15 +491,13 @@ private func editShortcut(
 private func exportShortcut(
   options: Options,
   runtime: WorkflowRuntime,
-  database: AnyObject,
-  proxy: AnyObject
+  database: AnyObject
 ) throws -> (workflowID: String, name: String, outputPath: String, byteCount: Int) {
   let workflowID = options.workflowID!
   let existing = try loadedWorkflow(
     workflowID: workflowID,
     runtime: runtime,
-    database: database,
-    proxy: proxy
+    database: database
   )
   guard let record = callObject0(existing.workflow, selector("record")) else {
     throw toolError("existing shortcut did not provide a workflow record")
@@ -520,21 +522,15 @@ private func exportShortcut(
   return (workflowID, existing.name, outputPath, data.count)
 }
 
-private func deleteShortcut(options: Options, database: AnyObject, proxy: AnyObject) throws
-  -> String
-{
+private func deleteShortcut(options: Options, database: AnyObject) throws -> String {
   let workflowID = options.workflowID!
-  guard let reference = try reference(for: workflowID, proxy: proxy) else {
-    throw toolError("shortcut \(workflowID) was not found", code: .notFound)
-  }
-
+  let identifierSelector = selector("deleteWorkflowRecordWithIdentifier:error:")
   var error: NSError?
-  let deleteSelector = selector("deleteReference:error:")
-  let deleteReference = unsafeBitCast(
-    try methodImplementation(database, deleteSelector),
-    to: DeleteReference.self
+  let deleteIdentifier = unsafeBitCast(
+    try methodImplementation(database, identifierSelector),
+    to: DeleteWorkflowIdentifier.self
   )
-  guard deleteReference(database, deleteSelector, reference, &error) else {
+  guard deleteIdentifier(database, identifierSelector, workflowID as NSString, &error) else {
     throw error ?? toolError("workflow deletion failed")
   }
   return workflowID
@@ -556,25 +552,23 @@ private func run(arguments: [String]) -> Int32 {
 
   do {
     let runtime = try loadRuntime()
-    let (database, proxy) = try openDatabase(runtime)
+    let database = try openDatabase(runtime)
     switch options.command {
     case .create:
-      let result = try createShortcut(options: options, runtime: runtime, proxy: proxy)
+      let result = try createShortcut(options: options, runtime: runtime, database: database)
       printSuccess(command: .create, workflowID: result.workflowID, name: result.name)
     case .edit:
       let result = try editShortcut(
         options: options,
         runtime: runtime,
-        database: database,
-        proxy: proxy
+        database: database
       )
       printSuccess(command: .edit, workflowID: result.workflowID, name: result.name)
     case .export:
       let result = try exportShortcut(
         options: options,
         runtime: runtime,
-        database: database,
-        proxy: proxy
+        database: database
       )
       printExportSuccess(
         workflowID: result.workflowID,
@@ -583,7 +577,7 @@ private func run(arguments: [String]) -> Int32 {
         byteCount: result.byteCount
       )
     case .delete:
-      let workflowID = try deleteShortcut(options: options, database: database, proxy: proxy)
+      let workflowID = try deleteShortcut(options: options, database: database)
       printSuccess(command: .delete, workflowID: workflowID, name: nil)
     case .unknown:
       throw toolError("missing command")

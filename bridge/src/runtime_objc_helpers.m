@@ -1,13 +1,114 @@
-#import <Foundation/Foundation.h>
+#import "runtime_objc_helpers.h"
+
 #import <dispatch/dispatch.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <pthread.h>
 #import <stdbool.h>
+#import <stdint.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <stdarg.h>
+#import <stdio.h>
 #import <stdlib.h>
+#import <unistd.h>
+
+#define BRIDGE_COMPILER_TRACE_MAX_BYTES (4U * 1024U * 1024U)
+
+typedef struct {
+  int savedStdout;
+  FILE *stream;
+} BridgeCompilerTraceCapture;
+
+static pthread_mutex_t gBridgeCompilerTraceLock = PTHREAD_MUTEX_INITIALIZER;
+
+void *bridge_compiler_trace_begin(void) {
+  pthread_mutex_lock(&gBridgeCompilerTraceLock);
+
+  BridgeCompilerTraceCapture *capture =
+      calloc(1, sizeof(BridgeCompilerTraceCapture));
+  if (!capture) {
+    pthread_mutex_unlock(&gBridgeCompilerTraceLock);
+    return NULL;
+  }
+  capture->savedStdout = -1;
+  capture->stream = tmpfile();
+  if (!capture->stream) {
+    free(capture);
+    pthread_mutex_unlock(&gBridgeCompilerTraceLock);
+    return NULL;
+  }
+
+  fflush(stdout);
+  capture->savedStdout = dup(STDOUT_FILENO);
+  if (capture->savedStdout < 0 ||
+      dup2(fileno(capture->stream), STDOUT_FILENO) < 0) {
+    if (capture->savedStdout >= 0) {
+      close(capture->savedStdout);
+    }
+    fclose(capture->stream);
+    free(capture);
+    pthread_mutex_unlock(&gBridgeCompilerTraceLock);
+    return NULL;
+  }
+  return capture;
+}
+
+char *bridge_compiler_trace_end(void *opaqueCapture, uint64_t *totalBytes,
+                                uint64_t *returnedBytes, bool *truncated) {
+  if (totalBytes) {
+    *totalBytes = 0;
+  }
+  if (returnedBytes) {
+    *returnedBytes = 0;
+  }
+  if (truncated) {
+    *truncated = false;
+  }
+  if (!opaqueCapture) {
+    return NULL;
+  }
+
+  BridgeCompilerTraceCapture *capture = opaqueCapture;
+  fflush(stdout);
+  if (capture->savedStdout >= 0) {
+    (void)dup2(capture->savedStdout, STDOUT_FILENO);
+    close(capture->savedStdout);
+    capture->savedStdout = -1;
+  }
+
+  uint64_t total = 0;
+  if (fseeko(capture->stream, 0, SEEK_END) == 0) {
+    off_t end = ftello(capture->stream);
+    if (end > 0) {
+      total = (uint64_t)end;
+    }
+  }
+  size_t count = (size_t)(total > BRIDGE_COMPILER_TRACE_MAX_BYTES
+                              ? BRIDGE_COMPILER_TRACE_MAX_BYTES
+                              : total);
+  char *bytes = calloc(1, count + 1);
+  if (bytes && count > 0 && fseeko(capture->stream, 0, SEEK_SET) == 0) {
+    count = fread(bytes, 1, count, capture->stream);
+    bytes[count] = 0;
+  }
+
+  fclose(capture->stream);
+  free(capture);
+  pthread_mutex_unlock(&gBridgeCompilerTraceLock);
+
+  if (totalBytes) {
+    *totalBytes = total;
+  }
+  if (returnedBytes) {
+    *returnedBytes = (uint64_t)count;
+  }
+  if (truncated) {
+    *truncated = total > (uint64_t)count;
+  }
+  return bytes;
+}
 
 static NSString *const kBridgeLogicalGeneratorAssetRoot =
     @"/System/Library/AssetsV2/"
@@ -219,6 +320,196 @@ void *bridge_dlsym_default(const char *symbol_name) {
   return dlsym(RTLD_DEFAULT, symbol_name);
 }
 
+static char kBridgeShortpyFallbackParametersKey;
+static _Thread_local char gBridgeShortpyEditExportError[1024];
+static _Thread_local char gBridgeShortpyElseIfRepairError[1024];
+
+static void BridgeShortpySetEditExportError(NSString *description) {
+  const char *text = description.UTF8String;
+  snprintf(gBridgeShortpyEditExportError,
+           sizeof(gBridgeShortpyEditExportError), "%s",
+           text ?: "unknown Shortpy reverse-export error");
+}
+
+const char *bridge_shortpy_edit_export_last_error(void) {
+  return gBridgeShortpyEditExportError;
+}
+
+static void BridgeShortpySetElseIfRepairError(NSString *description) {
+  const char *text = description.UTF8String;
+  snprintf(gBridgeShortpyElseIfRepairError,
+           sizeof(gBridgeShortpyElseIfRepairError), "%s",
+           text ?: "unknown Shortpy Else If repair error");
+}
+
+const char *bridge_shortpy_else_if_repair_last_error(void) {
+  return gBridgeShortpyElseIfRepairError;
+}
+
+static id BridgeShortpyAppendFallbackParameters(id action, id exported,
+                                                  NSError **error);
+
+static bool BridgeShortpyIsVariableMutationAction(id action) {
+  Class appendClass = NSClassFromString(@"WFAppendVariableAction");
+  Class setClass = NSClassFromString(@"WFSetVariableAction");
+  return (appendClass && [action isKindOfClass:appendClass]) ||
+         (setClass && [action isKindOfClass:setClass]);
+}
+
+static id BridgeShortpyRewriteVariableMutationReferences(
+    id value, NSDictionary<NSString *, NSString *> *variableByUUID,
+    bool *changed) {
+  if ([value isKindOfClass:[NSDictionary class]]) {
+    NSDictionary *dictionary = value;
+    NSString *type = dictionary[@"Type"];
+    NSString *outputUUID = dictionary[@"OutputUUID"];
+    NSString *variable = outputUUID ? variableByUUID[outputUUID] : nil;
+    if ([type isEqualToString:@"ActionOutput"] && variable) {
+      NSMutableDictionary *replacement = [dictionary mutableCopy];
+      [replacement removeObjectForKey:@"OutputUUID"];
+      [replacement removeObjectForKey:@"OutputName"];
+      replacement[@"Type"] = @"Variable";
+      replacement[@"VariableName"] = variable;
+      *changed = true;
+      return replacement;
+    }
+
+    NSMutableDictionary *replacement = nil;
+    for (id key in dictionary) {
+      id child = dictionary[key];
+      id rewritten = BridgeShortpyRewriteVariableMutationReferences(
+          child, variableByUUID, changed);
+      if (rewritten != child) {
+        if (!replacement) {
+          replacement = [dictionary mutableCopy];
+        }
+        replacement[key] = rewritten;
+      }
+    }
+    return replacement ?: value;
+  }
+
+  if ([value isKindOfClass:[NSArray class]]) {
+    NSArray *array = value;
+    NSMutableArray *replacement = nil;
+    for (NSUInteger index = 0; index < array.count; index++) {
+      id child = array[index];
+      id rewritten = BridgeShortpyRewriteVariableMutationReferences(
+          child, variableByUUID, changed);
+      if (rewritten != child) {
+        if (!replacement) {
+          replacement = [array mutableCopy];
+        }
+        replacement[index] = rewritten;
+      }
+    }
+    return replacement ?: value;
+  }
+  return value;
+}
+
+static id BridgeShortpyActionWithSerializedParameters(
+    id action, NSDictionary *serializedParameters) {
+  if (!action || ![serializedParameters isKindOfClass:[NSDictionary class]] ||
+      ![action respondsToSelector:@selector(identifier)] ||
+      ![action respondsToSelector:@selector(definition)]) {
+    return nil;
+  }
+  id identifier =
+      ((id(*)(id, SEL))objc_msgSend)(action, @selector(identifier));
+  id definition =
+      ((id(*)(id, SEL))objc_msgSend)(action, @selector(definition));
+  id allocated = ((id(*)(id, SEL))objc_msgSend)(object_getClass(action),
+                                                 @selector(alloc));
+  return ((id(*)(id, SEL, id, id, id))objc_msgSend)(
+      allocated, @selector(initWithIdentifier:definition:serializedParameters:),
+      identifier, definition, serializedParameters);
+}
+
+static NSArray *BridgeShortpyNormalizeVariableActionDataflow(
+    NSArray *sourceActions) {
+  NSMutableDictionary<NSString *, NSString *> *variableByUUID =
+      [NSMutableDictionary dictionary];
+  for (id action in sourceActions) {
+    if (!BridgeShortpyIsVariableMutationAction(action)) {
+      continue;
+    }
+    NSDictionary *serialized =
+        ((id(*)(id, SEL))objc_msgSend)(action, @selector(serializedParameters));
+    NSString *variable = serialized[@"WFVariableName"];
+    NSString *uuid = serialized[@"UUID"];
+    if ([variable isKindOfClass:[NSString class]] && variable.length > 0 &&
+        [uuid isKindOfClass:[NSString class]] && uuid.length > 0) {
+      variableByUUID[uuid] = variable;
+    }
+  }
+  if (variableByUUID.count == 0) {
+    return sourceActions;
+  }
+
+  NSMutableArray<NSDictionary *> *normalizedParameters =
+      [NSMutableArray arrayWithCapacity:sourceActions.count];
+  for (id action in sourceActions) {
+    NSDictionary *serialized =
+        ((id(*)(id, SEL))objc_msgSend)(action, @selector(serializedParameters));
+    bool changed = false;
+    NSDictionary *normalized = BridgeShortpyRewriteVariableMutationReferences(
+        serialized, variableByUUID, &changed);
+    [normalizedParameters addObject:normalized];
+  }
+
+  NSMutableArray *actions = [sourceActions mutableCopy];
+  for (NSUInteger index = 0; index < sourceActions.count; index++) {
+    id action = sourceActions[index];
+    NSDictionary *original =
+        ((id(*)(id, SEL))objc_msgSend)(action, @selector(serializedParameters));
+    NSDictionary *normalized = normalizedParameters[index];
+    NSMutableDictionary *replacement = nil;
+    if (![normalized isEqual:original]) {
+      replacement = [normalized mutableCopy];
+    }
+    if (BridgeShortpyIsVariableMutationAction(action)) {
+      if (original[@"UUID"] || normalized[@"UUID"]) {
+        if (!replacement) {
+          replacement = [normalized mutableCopy];
+        }
+        [replacement removeObjectForKey:@"UUID"];
+      }
+    }
+    if (replacement) {
+      id rewritten =
+          BridgeShortpyActionWithSerializedParameters(action, replacement);
+      if (!rewritten) {
+        return nil;
+      }
+      actions[index] = rewritten;
+    }
+  }
+  return actions;
+}
+
+static id BridgeShortpyVariableDeclaration(NSString *name, id value) {
+  Class variableClass = NSClassFromString(@"WFProgramUserDefinedVariable");
+  Class assignmentClass = NSClassFromString(@"WFProgramAssignmentNode");
+  Class nodeClass = NSClassFromString(@"WFProgramNode");
+  if (![name isKindOfClass:[NSString class]] || name.length == 0 || !value ||
+      !variableClass || !assignmentClass || !nodeClass) {
+    return nil;
+  }
+  id variableAllocated =
+      ((id(*)(id, SEL))objc_msgSend)(variableClass, @selector(alloc));
+  id variable = ((id(*)(id, SEL, id))objc_msgSend)(
+      variableAllocated, @selector(initWithName:), name);
+  id assignmentAllocated =
+      ((id(*)(id, SEL))objc_msgSend)(assignmentClass, @selector(alloc));
+  id assignment = ((id(*)(id, SEL, id, id))objc_msgSend)(
+      assignmentAllocated, @selector(initWithVariable:value:), variable,
+      value);
+  return assignment ? ((id(*)(id, SEL, id))objc_msgSend)(
+                          nodeClass, @selector(group:), assignment)
+                    : nil;
+}
+
 static id BridgeShortpyGenericActionExport(id action, SEL selector,
                                             NSError **error) {
   Class baseClass = NSClassFromString(@"WFAction");
@@ -236,12 +527,26 @@ static id BridgeShortpyGenericActionExport(id action, SEL selector,
   }
   id (*implementation)(id, SEL, NSError **) =
       (id(*)(id, SEL, NSError **))method_getImplementation(baseMethod);
-  id exported = implementation(action, selector, error);
-  Class appendClass = NSClassFromString(@"WFAppendVariableAction");
-  Class setClass = NSClassFromString(@"WFSetVariableAction");
-  bool needsVariableParameter =
-      (appendClass && [action isKindOfClass:appendClass]) ||
-      (setClass && [action isKindOfClass:setClass]);
+  id exported = nil;
+  @try {
+    exported = implementation(action, selector, error);
+    if (exported) {
+      exported = BridgeShortpyAppendFallbackParameters(action, exported, error);
+    }
+  } @catch (NSException *exception) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"ShortpyEditModeContext"
+                                   code:2
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey : exception.reason
+                                     ?: @"generic action export raised an exception",
+                                 @"exceptionName" : exception.name
+                                     ?: @"NSException",
+                               }];
+    }
+    return nil;
+  }
+  bool needsVariableParameter = BridgeShortpyIsVariableMutationAction(action);
   if (!exported || !needsVariableParameter) {
     return exported;
   }
@@ -288,12 +593,14 @@ static id BridgeShortpyGenericActionExport(id action, SEL selector,
   id execution = ((id(*)(id, SEL, id, id, id))objc_msgSend)(
       executionAllocated, @selector(initWithAction:functionName:parameters:),
       action, functionName, completeParameters);
-  return execution ? ((id(*)(id, SEL, id))objc_msgSend)(
-                         nodeClass, @selector(group:), execution)
-                   : exported;
+  id executionNode = execution ? ((id(*)(id, SEL, id))objc_msgSend)(
+                                     nodeClass, @selector(group:), execution)
+                               : nil;
+  id declaration = BridgeShortpyVariableDeclaration(variable, executionNode);
+  return declaration ?: executionNode ?: exported;
 }
 
-static id BridgeShortpyFilteredActionParameters(id action, SEL selector) {
+static id BridgeShortpyAdaptedActionParameters(id action, SEL selector) {
   Class adapterClass = object_getClass(action);
   Class originalClass = class_getSuperclass(adapterClass);
   Method originalMethod = class_getInstanceMethod(originalClass, selector);
@@ -303,17 +610,470 @@ static id BridgeShortpyFilteredActionParameters(id action, SEL selector) {
   id (*implementation)(id, SEL) =
       (id(*)(id, SEL))method_getImplementation(originalMethod);
   NSArray *parameters = implementation(action, selector);
-  Class unsupportedClass = NSClassFromString(@"WFVariableFieldParameter");
-  if (!unsupportedClass || ![parameters isKindOfClass:[NSArray class]]) {
+  if (![parameters isKindOfClass:[NSArray class]]) {
     return parameters;
   }
-  NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:parameters.count];
+
+  Class parameterClass = NSClassFromString(@"WFParameter");
+  Class variableFieldClass = NSClassFromString(@"WFVariableFieldParameter");
+  Class dictionaryClass = NSClassFromString(@"WFDictionaryParameter");
+  SEL exportSelectors[] = {
+      @selector(exportParameterState:hostHandle:delegate:error:),
+      @selector(exportExpressionForSingleState:hostHandle:error:),
+      @selector(exportExpressionForMultipleState:hostHandle:error:),
+  };
+  NSMutableArray *supported =
+      [NSMutableArray arrayWithCapacity:parameters.count];
+  NSMutableArray *fallback = [NSMutableArray array];
   for (id parameter in parameters) {
-    if (![parameter isKindOfClass:unsupportedClass]) {
-      [filtered addObject:parameter];
+    // Variable target fields retain the established Set/Add reconstruction
+    // below. They are not interchangeable with ordinary parameter states.
+    if (variableFieldClass &&
+        [parameter isKindOfClass:variableFieldClass]) {
+      continue;
+    }
+    if (dictionaryClass && [parameter isKindOfClass:dictionaryClass]) {
+      [fallback addObject:parameter];
+      continue;
+    }
+
+    Class concreteClass = object_getClass(parameter);
+    bool hasConcreteExporter = false;
+    for (size_t index = 0;
+         index < sizeof(exportSelectors) / sizeof(exportSelectors[0]); index++) {
+      SEL exportSelector = exportSelectors[index];
+      IMP concreteImplementation =
+          class_getMethodImplementation(concreteClass, exportSelector);
+      IMP abstractImplementation = parameterClass
+          ? class_getMethodImplementation(parameterClass, exportSelector)
+          : NULL;
+      if (concreteImplementation &&
+          (!abstractImplementation ||
+           concreteImplementation != abstractImplementation)) {
+        hasConcreteExporter = true;
+        break;
+      }
+    }
+    if (hasConcreteExporter) {
+      [supported addObject:parameter];
+    } else {
+      [fallback addObject:parameter];
     }
   }
-  return filtered;
+  objc_setAssociatedObject(action, &kBridgeShortpyFallbackParametersKey,
+                           fallback, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  return supported;
+}
+
+static NSError *BridgeShortpyFallbackError(NSString *description,
+                                            id parameter, id state) {
+  NSMutableDictionary *userInfo =
+      [NSMutableDictionary dictionaryWithObject:description
+                                         forKey:NSLocalizedDescriptionKey];
+  if (parameter) {
+    userInfo[@"parameterClass"] = NSStringFromClass(object_getClass(parameter));
+    if ([parameter respondsToSelector:@selector(key)]) {
+      id key = ((id(*)(id, SEL))objc_msgSend)(parameter, @selector(key));
+      if (key) {
+        userInfo[@"parameterKey"] = key;
+      }
+    }
+  }
+  if (state) {
+    userInfo[@"stateClass"] = NSStringFromClass(object_getClass(state));
+  }
+  return [NSError errorWithDomain:@"ShortpyReverseExporter"
+                             code:3
+                         userInfo:userInfo];
+}
+
+static id BridgeShortpyFirstSerializedValue(id object, NSString *key) {
+  if ([object isKindOfClass:[NSDictionary class]]) {
+    id direct = object[key];
+    if (direct) {
+      return direct;
+    }
+    for (id child in [object allValues]) {
+      id found = BridgeShortpyFirstSerializedValue(child, key);
+      if (found) {
+        return found;
+      }
+    }
+  } else if ([object isKindOfClass:[NSArray class]]) {
+    for (id child in object) {
+      id found = BridgeShortpyFirstSerializedValue(child, key);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return nil;
+}
+
+static bool BridgeShortpyContainsTypedDictionaryNumber(id object) {
+  if ([object isKindOfClass:[NSDictionary class]]) {
+    id itemType = object[@"WFItemType"];
+    if ([itemType respondsToSelector:@selector(integerValue)] &&
+        [itemType integerValue] == 3) {
+      return true;
+    }
+    for (id child in [object allValues]) {
+      if (BridgeShortpyContainsTypedDictionaryNumber(child)) {
+        return true;
+      }
+    }
+  } else if ([object isKindOfClass:[NSArray class]]) {
+    for (id child in object) {
+      if (BridgeShortpyContainsTypedDictionaryNumber(child)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static NSString *BridgeShortpyStaticQuotedProgramString(id node) {
+  Class quotedClass = NSClassFromString(@"WFProgramQuotedNode");
+  id group = [node respondsToSelector:@selector(group)]
+                 ? ((id(*)(id, SEL))objc_msgSend)(node, @selector(group))
+                 : nil;
+  if (!quotedClass || ![group isKindOfClass:quotedClass] ||
+      ![group respondsToSelector:@selector(contents)]) {
+    return nil;
+  }
+  NSArray *contents =
+      ((id(*)(id, SEL))objc_msgSend)(group, @selector(contents));
+  if (![contents isKindOfClass:[NSArray class]] || contents.count != 1) {
+    return nil;
+  }
+  id atom = contents[0];
+  NSInteger nodeType = [atom respondsToSelector:@selector(nodeType)]
+                           ? ((NSInteger(*)(id, SEL))objc_msgSend)(
+                                 atom, @selector(nodeType))
+                           : -1;
+  id string = [atom respondsToSelector:@selector(string)]
+                  ? ((id(*)(id, SEL))objc_msgSend)(atom, @selector(string))
+                  : nil;
+  return nodeType == 0 && [string isKindOfClass:[NSString class]] ? string
+                                                                  : nil;
+}
+
+static bool BridgeShortpyRepairTypedDictionaryItem(id programNode,
+                                                    NSDictionary *item,
+                                                    NSError **error);
+
+static void BridgeShortpyFindDictionaryItemArray(id object,
+                                                  NSArray **candidate,
+                                                  bool *ambiguous) {
+  if (*ambiguous || !object) {
+    return;
+  }
+  if ([object isKindOfClass:[NSDictionary class]]) {
+    NSDictionary *dictionary = object;
+    id value = dictionary[@"Value"];
+    if ([dictionary[@"WFSerializationType"]
+            isEqual:@"WFArrayParameterState"] &&
+        [value isKindOfClass:[NSArray class]]) {
+      if (*candidate && *candidate != value) {
+        *ambiguous = true;
+      } else {
+        *candidate = value;
+      }
+      return;
+    }
+    for (id child in [dictionary allValues]) {
+      BridgeShortpyFindDictionaryItemArray(child, candidate, ambiguous);
+    }
+    return;
+  }
+  if ([object isKindOfClass:[NSArray class]]) {
+    for (id child in object) {
+      BridgeShortpyFindDictionaryItemArray(child, candidate, ambiguous);
+    }
+  }
+}
+
+static bool BridgeShortpyRepairTypedDictionaryArray(id programNode,
+                                                     id serialized,
+                                                     NSError **error) {
+  Class arrayClass = NSClassFromString(@"WFProgramArrayNode");
+  id group = [programNode respondsToSelector:@selector(group)]
+                 ? ((id(*)(id, SEL))objc_msgSend)(programNode,
+                                                  @selector(group))
+                 : nil;
+  NSArray *elements = arrayClass && [group isKindOfClass:arrayClass] &&
+                              [group respondsToSelector:@selector(elements)]
+                          ? ((id(*)(id, SEL))objc_msgSend)(group,
+                                                           @selector(elements))
+                          : nil;
+  NSArray *serializedElements = nil;
+  bool ambiguousSerializedArray = false;
+  BridgeShortpyFindDictionaryItemArray(serialized, &serializedElements,
+                                       &ambiguousSerializedArray);
+  if (![elements isKindOfClass:[NSArray class]] ||
+      ![serializedElements isKindOfClass:[NSArray class]] ||
+      ambiguousSerializedArray ||
+      elements.count != serializedElements.count) {
+    if (BridgeShortpyContainsTypedDictionaryNumber(serialized) && error) {
+      *error = BridgeShortpyFallbackError(
+          @"typed Dictionary list could not be matched to its native program "
+           "array",
+          nil, nil);
+    }
+    return !BridgeShortpyContainsTypedDictionaryNumber(serialized);
+  }
+  for (NSUInteger index = 0; index < elements.count; index++) {
+    id serializedElement = serializedElements[index];
+    if ([serializedElement isKindOfClass:[NSDictionary class]] &&
+        serializedElement[@"WFItemType"] &&
+        !BridgeShortpyRepairTypedDictionaryItem(
+            elements[index], serializedElement, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool BridgeShortpyRepairTypedDictionaryProgram(id programNode,
+                                                       id serialized,
+                                                       NSError **error) {
+  if (!BridgeShortpyContainsTypedDictionaryNumber(serialized)) {
+    return true;
+  }
+  Class dictionaryClass = NSClassFromString(@"WFProgramDictionaryNode");
+  id group = [programNode respondsToSelector:@selector(group)]
+                 ? ((id(*)(id, SEL))objc_msgSend)(programNode,
+                                                  @selector(group))
+                 : nil;
+  NSArray *pairs = dictionaryClass && [group isKindOfClass:dictionaryClass] &&
+                           [group respondsToSelector:@selector(keyValuePairs)]
+                       ? ((id(*)(id, SEL))objc_msgSend)(group,
+                                                        @selector(keyValuePairs))
+                       : nil;
+  NSArray *items = BridgeShortpyFirstSerializedValue(
+      serialized, @"WFDictionaryFieldValueItems");
+  if (![pairs isKindOfClass:[NSArray class]] ||
+      ![items isKindOfClass:[NSArray class]] || pairs.count != items.count) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"typed Dictionary could not be matched to its native program node",
+          nil, nil);
+    }
+    return false;
+  }
+
+  NSMutableDictionary<NSString *, NSDictionary *> *itemsByKey =
+      [NSMutableDictionary dictionaryWithCapacity:items.count];
+  for (id item in items) {
+    id key = BridgeShortpyFirstSerializedValue(item[@"WFKey"], @"string");
+    if (![key isKindOfClass:[NSString class]] || itemsByKey[key]) {
+      if (error) {
+        *error = BridgeShortpyFallbackError(
+            @"typed Dictionary requires unique static keys for lossless "
+             "program export",
+            nil, nil);
+      }
+      return false;
+    }
+    itemsByKey[key] = item;
+  }
+
+  Class pairClass = NSClassFromString(@"WFProgramKeyValuePairNode");
+  for (id pairNode in pairs) {
+    id pair = pairClass && [pairNode isKindOfClass:pairClass]
+                  ? pairNode
+                  : [pairNode respondsToSelector:@selector(group)]
+                        ? ((id(*)(id, SEL))objc_msgSend)(pairNode,
+                                                         @selector(group))
+                        : nil;
+    id keyNode = [pair respondsToSelector:@selector(key)]
+                     ? ((id(*)(id, SEL))objc_msgSend)(pair, @selector(key))
+                     : nil;
+    id valueNode = [pair respondsToSelector:@selector(value)]
+                       ? ((id(*)(id, SEL))objc_msgSend)(pair, @selector(value))
+                       : nil;
+    NSString *key = BridgeShortpyStaticQuotedProgramString(keyNode);
+    NSDictionary *item = key ? itemsByKey[key] : nil;
+    if (!item || !valueNode ||
+        !BridgeShortpyRepairTypedDictionaryItem(valueNode, item, error)) {
+      if (error && !*error) {
+        *error = BridgeShortpyFallbackError(
+            @"typed Dictionary program key could not be matched", nil, nil);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool BridgeShortpyRepairTypedDictionaryItem(id programNode,
+                                                    NSDictionary *item,
+                                                    NSError **error) {
+  NSInteger itemType = [item[@"WFItemType"] integerValue];
+  if (itemType == 1) {
+    return BridgeShortpyRepairTypedDictionaryProgram(programNode,
+                                                      item[@"WFValue"], error);
+  }
+  if (itemType == 2) {
+    return BridgeShortpyRepairTypedDictionaryArray(programNode,
+                                                    item[@"WFValue"], error);
+  }
+  if (itemType != 3) {
+    return true;
+  }
+
+  NSString *literal = BridgeShortpyStaticQuotedProgramString(programNode);
+  NSCharacterSet *invalid = [[NSCharacterSet
+      characterSetWithCharactersInString:@"0123456789+-.eE"] invertedSet];
+  NSDecimalNumber *number = literal
+      ? [NSDecimalNumber decimalNumberWithString:literal
+                                          locale:@{
+                                            NSLocaleDecimalSeparator : @"."
+                                          }]
+      : nil;
+  if (!literal || [literal rangeOfCharacterFromSet:invalid].location !=
+                      NSNotFound ||
+      ![literal rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]]
+           .length ||
+      [number isEqualToNumber:[NSDecimalNumber notANumber]] ||
+      ![programNode respondsToSelector:@selector(replaceContentWithVerbatim:)]) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"typed Dictionary number is not a static numeric program literal",
+          nil, nil);
+    }
+    return false;
+  }
+  ((void (*)(id, SEL, id))objc_msgSend)(
+      programNode, @selector(replaceContentWithVerbatim:), literal);
+  return true;
+}
+
+static id BridgeShortpyAppendFallbackParameters(id action, id exported,
+                                                  NSError **error) {
+  NSArray *fallback = objc_getAssociatedObject(
+      action, &kBridgeShortpyFallbackParametersKey);
+  if (![fallback isKindOfClass:[NSArray class]] || fallback.count == 0) {
+    return exported;
+  }
+
+  id group = [exported respondsToSelector:@selector(group)]
+                 ? ((id(*)(id, SEL))objc_msgSend)(exported, @selector(group))
+                 : nil;
+  if (![group respondsToSelector:@selector(functionName)] ||
+      ![group respondsToSelector:@selector(parameters)]) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"generic action export did not return an action execution group",
+          nil, nil);
+    }
+    return nil;
+  }
+
+  NSString *functionName =
+      ((id(*)(id, SEL))objc_msgSend)(group, @selector(functionName));
+  NSArray *exportedParameters =
+      ((id(*)(id, SEL))objc_msgSend)(group, @selector(parameters));
+  Class hostClass = NSClassFromString(@"WFParameterHostHandle");
+  Class passedClass = NSClassFromString(@"WFProgramPassedParameterNode");
+  Class executionClass = NSClassFromString(@"WFProgramActionExecutionNode");
+  Class nodeClass = NSClassFromString(@"WFProgramNode");
+  if (!functionName || ![exportedParameters isKindOfClass:[NSArray class]] ||
+      !hostClass || !passedClass || !executionClass || !nodeClass) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"native program classes required for parameter fallback are missing",
+          nil, nil);
+    }
+    return nil;
+  }
+
+  id hostAllocated =
+      ((id(*)(id, SEL))objc_msgSend)(hostClass, @selector(alloc));
+  id hostHandle = ((id(*)(id, SEL, id))objc_msgSend)(
+      hostAllocated, @selector(initWithAction:), action);
+  if (!hostHandle) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"WFParameterHostHandle could not represent the action", nil, nil);
+    }
+    return nil;
+  }
+
+  NSMutableArray *completeParameters = [exportedParameters mutableCopy];
+  for (id parameter in fallback) {
+    id key = [parameter respondsToSelector:@selector(key)]
+                 ? ((id(*)(id, SEL))objc_msgSend)(parameter, @selector(key))
+                 : nil;
+    id state = key &&
+                       [action respondsToSelector:@selector(parameterStateForKey:)]
+                   ? ((id(*)(id, SEL, id))objc_msgSend)(
+                         action, @selector(parameterStateForKey:), key)
+                   : nil;
+    if (!state) {
+      continue;
+    }
+    if (![state respondsToSelector:@selector(exportWithError:)]) {
+      if (error) {
+        *error = BridgeShortpyFallbackError(
+            @"parameter state does not provide a native program exporter",
+            parameter, state);
+      }
+      return nil;
+    }
+
+    NSError *fallbackError = nil;
+    id value = ((id(*)(id, SEL, NSError **))objc_msgSend)(
+        state, @selector(exportWithError:), &fallbackError);
+    Class dictionaryClass = NSClassFromString(@"WFDictionaryParameter");
+    NSDictionary *serialized =
+        ((id(*)(id, SEL))objc_msgSend)(action, @selector(serializedParameters));
+    if (value && !fallbackError && dictionaryClass &&
+        [parameter isKindOfClass:dictionaryClass] &&
+        !BridgeShortpyRepairTypedDictionaryProgram(value, serialized[key],
+                                                    &fallbackError)) {
+      value = nil;
+    }
+    id label = ((id(*)(id, SEL, id, NSError **))objc_msgSend)(
+        parameter, @selector(exportedArgumentLabelWithHostHandle:error:),
+        hostHandle, &fallbackError);
+    if ([key isKindOfClass:[NSString class]] &&
+        [label isKindOfClass:[NSString class]] && ![label isEqual:key] &&
+        [label caseInsensitiveCompare:key] == NSOrderedSame) {
+      label = key;
+    }
+    if (!value || !label || fallbackError) {
+      if (error) {
+        *error = fallbackError ?: BridgeShortpyFallbackError(
+            @"parameter state could not be exported as a ToolKit argument",
+            parameter, state);
+      }
+      return nil;
+    }
+
+    id passedAllocated = ((id(*)(id, SEL))objc_msgSend)(
+        passedClass, @selector(alloc));
+    id passed = ((id(*)(id, SEL, id, id))objc_msgSend)(
+        passedAllocated, @selector(initWithName:value:), label, value);
+    if (!passed) {
+      if (error) {
+        *error = BridgeShortpyFallbackError(
+            @"WFProgramPassedParameterNode initialization failed", parameter,
+            state);
+      }
+      return nil;
+    }
+    [completeParameters addObject:passed];
+  }
+
+  id executionAllocated = ((id(*)(id, SEL))objc_msgSend)(
+      executionClass, @selector(alloc));
+  id execution = ((id(*)(id, SEL, id, id, id))objc_msgSend)(
+      executionAllocated, @selector(initWithAction:functionName:parameters:),
+      action, functionName, completeParameters);
+  return execution ? ((id(*)(id, SEL, id))objc_msgSend)(
+                         nodeClass, @selector(group:), execution)
+                   : nil;
 }
 
 static Class BridgeShortpyExportSubclass(Class originalClass) {
@@ -347,7 +1107,7 @@ static Class BridgeShortpyExportSubclass(Class originalClass) {
                                                        @selector(parameters));
     if (parametersMethod) {
       class_addMethod(subclass, @selector(parameters),
-                      (IMP)BridgeShortpyFilteredActionParameters,
+                      (IMP)BridgeShortpyAdaptedActionParameters,
                       method_getTypeEncoding(parametersMethod));
     }
     objc_registerClassPair(subclass);
@@ -355,12 +1115,75 @@ static Class BridgeShortpyExportSubclass(Class originalClass) {
   }
 }
 
+static NSInteger BridgeShortpyActionExecutionCount(id rootNode, id action,
+                                                    NSError **error) {
+  Class executionClass = NSClassFromString(@"WFProgramActionExecutionNode");
+  if (!rootNode || !action || !executionClass) {
+    if (error) {
+      *error = BridgeShortpyFallbackError(
+          @"native program node classification is unavailable", nil, nil);
+    }
+    return -1;
+  }
+
+  NSMutableArray *queue = [NSMutableArray arrayWithObject:rootNode];
+  NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+  NSInteger matches = 0;
+  for (NSUInteger index = 0; index < queue.count; index++) {
+    if (index >= 100000) {
+      if (error) {
+        *error = BridgeShortpyFallbackError(
+            @"native program node tree exceeded the classification limit",
+            nil, nil);
+      }
+      return -1;
+    }
+    id node = queue[index];
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)node];
+    if ([visited containsObject:identity]) {
+      continue;
+    }
+    [visited addObject:identity];
+
+    id group = [node respondsToSelector:@selector(group)]
+                   ? ((id(*)(id, SEL))objc_msgSend)(node, @selector(group))
+                   : nil;
+    if ([group isKindOfClass:executionClass] &&
+        [group respondsToSelector:@selector(action)]) {
+      id groupAction =
+          ((id(*)(id, SEL))objc_msgSend)(group, @selector(action));
+      if (groupAction == action) {
+        matches++;
+      }
+    }
+    if (![group respondsToSelector:@selector(children)]) {
+      continue;
+    }
+    id children =
+        ((id(*)(id, SEL))objc_msgSend)(group, @selector(children));
+    if (!children) {
+      continue;
+    }
+    if (![children isKindOfClass:[NSArray class]]) {
+      if (error) {
+        *error = BridgeShortpyFallbackError(
+            @"native program node children are not an array", nil, nil);
+      }
+      return -1;
+    }
+    [queue addObjectsFromArray:children];
+  }
+  return matches;
+}
+
 id bridge_shortpy_make_edit_export_workflow(id workflow,
                                              uint64_t *adaptedActionCount) {
+  gBridgeShortpyEditExportError[0] = '\0';
   if (adaptedActionCount) {
     *adaptedActionCount = 0;
   }
   if (!workflow) {
+    BridgeShortpySetEditExportError(@"native WFWorkflow is unavailable");
     return nil;
   }
   id copy = [workflow copy];
@@ -369,20 +1192,56 @@ id bridge_shortpy_make_edit_export_workflow(id workflow,
                                                                 @selector(actions))
                                : nil;
   if (![sourceActions isKindOfClass:[NSArray class]]) {
+    BridgeShortpySetEditExportError(
+        @"WFWorkflow copy did not provide an action array");
     return nil;
   }
+  if (![copy respondsToSelector:@selector(setActions:)]) {
+    BridgeShortpySetEditExportError(
+        @"WFWorkflow copy does not support replacing its action array");
+    return nil;
+  }
+
+  NSMutableArray *isolatedActions =
+      [NSMutableArray arrayWithCapacity:sourceActions.count];
+  for (NSUInteger index = 0; index < sourceActions.count; index++) {
+    id sourceAction = sourceActions[index];
+    NSDictionary *serialized = [sourceAction
+        respondsToSelector:@selector(serializedParameters)]
+        ? ((id(*)(id, SEL))objc_msgSend)(sourceAction,
+                                         @selector(serializedParameters))
+        : nil;
+    id isolatedAction = BridgeShortpyActionWithSerializedParameters(
+        sourceAction, serialized);
+    if (!isolatedAction || isolatedAction == sourceAction) {
+      BridgeShortpySetEditExportError([NSString stringWithFormat:
+          @"action %lu (%@) could not be isolated for reverse export",
+          (unsigned long)index,
+          NSStringFromClass(object_getClass(sourceAction))]);
+      return nil;
+    }
+    [isolatedActions addObject:isolatedAction];
+  }
+  ((void (*)(id, SEL, id))objc_msgSend)(copy, @selector(setActions:),
+                                        isolatedActions);
+  sourceActions = isolatedActions;
+
+  sourceActions = BridgeShortpyNormalizeVariableActionDataflow(sourceActions);
+  if (!sourceActions) {
+    BridgeShortpySetEditExportError(
+        @"native variable action dataflow could not be normalized");
+    return nil;
+  }
+  ((void (*)(id, SEL, id))objc_msgSend)(copy, @selector(setActions:),
+                                        sourceActions);
 
   Class baseClass = NSClassFromString(@"WFAction");
   Class controlFlowClass = NSClassFromString(@"WFControlFlowAction");
   Method baseMethod = class_getInstanceMethod(baseClass, @selector(exportWithError:));
   IMP baseImplementation = baseMethod ? method_getImplementation(baseMethod) : NULL;
-  NSArray<Class> *explicitActionClasses = @[
-    NSClassFromString(@"WFAppendVariableAction") ?: NSObject.class,
-    NSClassFromString(@"WFSetVariableAction") ?: NSObject.class,
-    NSClassFromString(@"WFGetVariableAction") ?: NSObject.class,
-    NSClassFromString(@"WFCommentAction") ?: NSObject.class,
-  ];
   if (!baseClass || !baseImplementation) {
+    BridgeShortpySetEditExportError(
+        @"WFAction generic exportWithError: implementation is unavailable");
     return nil;
   }
 
@@ -393,32 +1252,99 @@ id bridge_shortpy_make_edit_export_workflow(id workflow,
     if (controlFlowClass && [action isKindOfClass:controlFlowClass]) {
       continue;
     }
-    bool explicitlyRendered = false;
-    for (Class candidate in explicitActionClasses) {
-      if (candidate != NSObject.class && [action isKindOfClass:candidate]) {
-        explicitlyRendered = true;
-        break;
-      }
-    }
-    if (!explicitlyRendered) {
-      continue;
-    }
     IMP actionImplementation = class_getMethodImplementation(
         object_getClass(action), @selector(exportWithError:));
-    if (!actionImplementation || actionImplementation == baseImplementation) {
-      continue;
-    }
-    id actionCopy = [action copy];
-    Class adapterClass = BridgeShortpyExportSubclass(object_getClass(actionCopy));
-    if (!actionCopy || !adapterClass) {
+    if (!actionImplementation) {
+      BridgeShortpySetEditExportError([NSString stringWithFormat:
+          @"action %lu (%@) has no exportWithError: implementation",
+          (unsigned long)index, NSStringFromClass(object_getClass(action))]);
       return nil;
     }
-    object_setClass(actionCopy, adapterClass);
-    actions[index] = actionCopy;
+    if (actionImplementation == baseImplementation) {
+      continue;
+    }
+
+    NSError *specializedError = nil;
+    id specializedNode = nil;
+    NSException *specializedException = nil;
+    @try {
+      specializedNode = ((id(*)(id, SEL, NSError **))objc_msgSend)(
+          action, @selector(exportWithError:), &specializedError);
+    } @catch (NSException *exception) {
+      specializedException = exception;
+    }
+    NSInteger executionCount = 0;
+    if (specializedNode && !specializedError && !specializedException) {
+      NSError *classificationError = nil;
+      executionCount = BridgeShortpyActionExecutionCount(
+          specializedNode, action, &classificationError);
+      if (executionCount < 0) {
+        BridgeShortpySetEditExportError([NSString stringWithFormat:
+            @"action %lu (%@) could not be classified: %@",
+            (unsigned long)index, NSStringFromClass(object_getClass(action)),
+            classificationError.localizedDescription ?: @"unknown node shape"]);
+        return nil;
+      }
+      if (executionCount == 1) {
+        continue;
+      }
+      if (executionCount != 0) {
+        BridgeShortpySetEditExportError([NSString stringWithFormat:
+            @"action %lu (%@) specialized export contains %ld matching "
+             "action execution nodes",
+            (unsigned long)index, NSStringFromClass(object_getClass(action)),
+            (long)executionCount]);
+        return nil;
+      }
+    }
+
+    Class adapterClass = BridgeShortpyExportSubclass(object_getClass(action));
+    if (!adapterClass) {
+      BridgeShortpySetEditExportError([NSString stringWithFormat:
+          @"action %lu (%@) explicit export adapter could not be created",
+          (unsigned long)index, NSStringFromClass(object_getClass(action))]);
+      return nil;
+    }
+    object_setClass(action, adapterClass);
+    NSError *genericError = nil;
+    id genericNode = nil;
+    @try {
+      genericNode = ((id(*)(id, SEL, NSError **))objc_msgSend)(
+          action, @selector(exportWithError:), &genericError);
+    } @catch (NSException *exception) {
+      BridgeShortpySetEditExportError([NSString stringWithFormat:
+          @"action %lu (%@) explicit export raised %@: %@",
+          (unsigned long)index, NSStringFromClass(object_getClass(action)),
+          exception.name ?: @"NSException", exception.reason ?: @"unknown"]);
+      return nil;
+    }
+    NSError *genericClassificationError = nil;
+    NSInteger genericExecutionCount =
+        genericNode && !genericError
+            ? BridgeShortpyActionExecutionCount(
+                  genericNode, action, &genericClassificationError)
+            : -1;
+    if (genericExecutionCount != 1) {
+      NSString *specializedDiagnostic = specializedException
+          ? [NSString stringWithFormat:@"%@: %@",
+                                       specializedException.name ?: @"NSException",
+                                       specializedException.reason ?: @"unknown"]
+          : specializedError.localizedDescription
+              ?: (specializedNode ? @"no matching action execution node"
+                                  : @"no program node");
+      NSString *genericDiagnostic = genericError.localizedDescription
+          ?: genericClassificationError.localizedDescription
+          ?: [NSString stringWithFormat:
+                  @"%ld matching action execution nodes",
+                  (long)genericExecutionCount];
+      BridgeShortpySetEditExportError([NSString stringWithFormat:
+          @"action %lu (%@) cannot be exported explicitly; specialized: %@; "
+           "generic: %@",
+          (unsigned long)index, NSStringFromClass(object_getClass(action)),
+          specializedDiagnostic, genericDiagnostic]);
+      return nil;
+    }
     adapted++;
-  }
-  if (![copy respondsToSelector:@selector(setActions:)]) {
-    return nil;
   }
   ((void (*)(id, SEL, id))objc_msgSend)(copy, @selector(setActions:), actions);
   if (adaptedActionCount) {
@@ -463,6 +1389,382 @@ bool bridge_shortpy_replace_workflow_action_serialized_parameters(
   actions[(NSUInteger)index] = replacement;
   ((void (*)(id, SEL, id))objc_msgSend)(workflow, @selector(setActions:),
                                         actions);
+  return true;
+}
+
+extern uint32_t bridge_shortpy_else_if_witness_entry_count(
+    const void *plan);
+extern uint32_t bridge_shortpy_else_if_target_ordinal(
+    const void *plan, uint32_t entryIndex);
+extern uint32_t bridge_shortpy_else_if_witness_count(
+    const void *plan, uint32_t entryIndex);
+extern uint32_t bridge_shortpy_else_if_witness_ordinal(
+    const void *plan, uint32_t entryIndex, uint32_t witnessIndex);
+
+static NSString *BridgeShortpyActionIdentifier(id action) {
+  if (!action || ![action respondsToSelector:@selector(identifier)]) {
+    return nil;
+  }
+  id identifier =
+      ((id(*)(id, SEL))objc_msgSend)(action, @selector(identifier));
+  return [identifier isKindOfClass:[NSString class]] ? identifier : nil;
+}
+
+static NSDictionary *BridgeShortpyActionSerializedParameters(id action) {
+  if (!action ||
+      ![action respondsToSelector:@selector(serializedParameters)]) {
+    return nil;
+  }
+  id parameters = ((id(*)(id, SEL))objc_msgSend)(
+      action, @selector(serializedParameters));
+  return [parameters isKindOfClass:[NSDictionary class]] ? parameters : nil;
+}
+
+static NSDictionary *BridgeShortpyConditionPayload(
+    NSDictionary *parameters) {
+  if (![parameters isKindOfClass:[NSDictionary class]]) {
+    return nil;
+  }
+  NSMutableDictionary *payload = [parameters mutableCopy];
+  [payload removeObjectForKey:@"WFControlFlowMode"];
+  [payload removeObjectForKey:@"GroupingIdentifier"];
+  [payload removeObjectForKey:@"UUID"];
+  return payload;
+}
+
+static bool BridgeShortpyConditionalGroupShape(
+    NSDictionary *group, NSUInteger witnessCount,
+    bool witness, NSString **diagnostic) {
+  NSArray<NSNumber *> *modes = group[@"modes"];
+  if (![modes isKindOfClass:[NSArray class]]) {
+    if (diagnostic) {
+      *diagnostic = @"conditional group has no mode sequence";
+    }
+    return false;
+  }
+  if (witness) {
+    if (modes.count != 2 || modes[0].integerValue != 0 ||
+        modes[1].integerValue != 2) {
+      if (diagnostic) {
+        *diagnostic = [NSString stringWithFormat:
+            @"witness group modes are %@, expected [0, 2]", modes];
+      }
+      return false;
+    }
+    return true;
+  }
+  if (modes.count < witnessCount + 2 || modes[0].integerValue != 0 ||
+      modes.lastObject.integerValue != 2) {
+    if (diagnostic) {
+      *diagnostic = [NSString stringWithFormat:
+          @"target group modes are %@", modes];
+    }
+    return false;
+  }
+  NSUInteger modeOneCount = modes.count - 2;
+  if (modeOneCount != witnessCount &&
+      modeOneCount != witnessCount + 1) {
+    if (diagnostic) {
+      *diagnostic = [NSString stringWithFormat:
+          @"target has %lu mode-1 markers for %lu Else If branches",
+          (unsigned long)modeOneCount, (unsigned long)witnessCount];
+    }
+    return false;
+  }
+  for (NSUInteger index = 1; index + 1 < modes.count; index++) {
+    if (modes[index].integerValue != 1) {
+      if (diagnostic) {
+        *diagnostic = [NSString stringWithFormat:
+            @"target group modes are %@", modes];
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool bridge_shortpy_repair_else_if_witnesses(
+    id workflow, const void *opaquePlan,
+    uint32_t *conditionRepairs, uint32_t *elseInsertions,
+    uint32_t *witnessMarkersRemoved) {
+  if (conditionRepairs) {
+    *conditionRepairs = 0;
+  }
+  if (elseInsertions) {
+    *elseInsertions = 0;
+  }
+  if (witnessMarkersRemoved) {
+    *witnessMarkersRemoved = 0;
+  }
+  gBridgeShortpyElseIfRepairError[0] = 0;
+  uint32_t entryCount =
+      bridge_shortpy_else_if_witness_entry_count(opaquePlan);
+  if (!opaquePlan || entryCount == UINT32_MAX) {
+    BridgeShortpySetElseIfRepairError(
+        @"Else If witness plan is unavailable or malformed");
+    return false;
+  }
+  if (entryCount == 0) {
+    return true;
+  }
+  if (!workflow || ![workflow respondsToSelector:@selector(actions)] ||
+      ![workflow respondsToSelector:@selector(setActions:)]) {
+    BridgeShortpySetElseIfRepairError(
+        @"native WFWorkflow does not expose mutable actions");
+    return false;
+  }
+  NSArray *sourceActions =
+      ((id(*)(id, SEL))objc_msgSend)(workflow, @selector(actions));
+  if (![sourceActions isKindOfClass:[NSArray class]]) {
+    BridgeShortpySetElseIfRepairError(
+        @"native WFWorkflow actions are unavailable");
+    return false;
+  }
+
+  NSMutableArray<NSMutableDictionary *> *groups = [NSMutableArray array];
+  NSMutableDictionary<NSString *, NSMutableDictionary *> *groupByIdentifier =
+      [NSMutableDictionary dictionary];
+  for (NSUInteger actionIndex = 0;
+       actionIndex < sourceActions.count; actionIndex++) {
+    id action = sourceActions[actionIndex];
+    if (![BridgeShortpyActionIdentifier(action)
+            isEqualToString:@"is.workflow.actions.conditional"]) {
+      continue;
+    }
+    NSDictionary *parameters =
+        BridgeShortpyActionSerializedParameters(action);
+    NSNumber *mode = parameters[@"WFControlFlowMode"];
+    NSString *groupingIdentifier = parameters[@"GroupingIdentifier"];
+    if (![mode isKindOfClass:[NSNumber class]] ||
+        mode.integerValue < 0 || mode.integerValue > 2 ||
+        ![groupingIdentifier isKindOfClass:[NSString class]] ||
+        groupingIdentifier.length == 0) {
+      BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+          @"conditional action %lu has invalid control parameters",
+          (unsigned long)actionIndex]);
+      return false;
+    }
+    NSMutableDictionary *group = groupByIdentifier[groupingIdentifier];
+    if (mode.integerValue == 0) {
+      if (group) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"conditional group %@ has multiple mode-0 markers",
+            groupingIdentifier]);
+        return false;
+      }
+      group = [@{
+        @"identifier": groupingIdentifier,
+        @"indices": [NSMutableArray array],
+        @"modes": [NSMutableArray array],
+      } mutableCopy];
+      groupByIdentifier[groupingIdentifier] = group;
+      [groups addObject:group];
+    } else if (!group) {
+      BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+          @"conditional group %@ begins with mode %@",
+          groupingIdentifier, mode]);
+      return false;
+    }
+    NSMutableArray *indices = group[@"indices"];
+    NSMutableArray *modes = group[@"modes"];
+    if ([modes.lastObject integerValue] == 2) {
+      BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+          @"conditional group %@ has actions after mode 2",
+          groupingIdentifier]);
+      return false;
+    }
+    [indices addObject:@(actionIndex)];
+    [modes addObject:mode];
+  }
+
+  NSMutableDictionary<NSNumber *, id> *replacements =
+      [NSMutableDictionary dictionary];
+  NSMutableDictionary<NSNumber *, NSMutableArray *> *insertions =
+      [NSMutableDictionary dictionary];
+  NSMutableIndexSet *removals = [NSMutableIndexSet indexSet];
+  NSMutableIndexSet *claimedGroupOrdinals = [NSMutableIndexSet indexSet];
+  uint64_t repairedCount = 0;
+  uint64_t insertedElseCount = 0;
+
+  // Validate and stage every edit before committing one replacement array.
+  for (uint32_t entryIndex = 0;
+       entryIndex < entryCount; entryIndex++) {
+    uint32_t targetOrdinal = bridge_shortpy_else_if_target_ordinal(
+        opaquePlan, entryIndex);
+    uint32_t witnessCount = bridge_shortpy_else_if_witness_count(
+        opaquePlan, entryIndex);
+    if (targetOrdinal == UINT32_MAX || witnessCount == UINT32_MAX ||
+        witnessCount == 0 || targetOrdinal >= groups.count ||
+        targetOrdinal < witnessCount) {
+      BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+          @"Else If plan entry %u has invalid group ordinals", entryIndex]);
+      return false;
+    }
+    if ([claimedGroupOrdinals containsIndex:targetOrdinal]) {
+      BridgeShortpySetElseIfRepairError(
+          @"Else If plan reuses a target conditional group");
+      return false;
+    }
+    [claimedGroupOrdinals addIndex:targetOrdinal];
+    NSMutableDictionary *targetGroup = groups[targetOrdinal];
+    NSString *shapeDiagnostic = nil;
+    if (!BridgeShortpyConditionalGroupShape(
+            targetGroup, witnessCount, false, &shapeDiagnostic)) {
+      BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+          @"target group %u is incompatible: %@", targetOrdinal,
+          shapeDiagnostic ?: @"unknown shape"]);
+      return false;
+    }
+    NSArray<NSNumber *> *targetIndices = targetGroup[@"indices"];
+    NSString *targetGroupingIdentifier = targetGroup[@"identifier"];
+
+    for (uint32_t witnessIndex = 0;
+         witnessIndex < witnessCount; witnessIndex++) {
+      uint32_t witnessOrdinal = bridge_shortpy_else_if_witness_ordinal(
+          opaquePlan, entryIndex, witnessIndex);
+      uint32_t expectedOrdinal =
+          targetOrdinal - witnessCount + witnessIndex;
+      if (witnessOrdinal != expectedOrdinal ||
+          witnessOrdinal >= groups.count ||
+          [claimedGroupOrdinals containsIndex:witnessOrdinal]) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"witness %u for target %u is not contiguous or unique",
+            witnessIndex, targetOrdinal]);
+        return false;
+      }
+      [claimedGroupOrdinals addIndex:witnessOrdinal];
+      NSMutableDictionary *witnessGroup = groups[witnessOrdinal];
+      if (!BridgeShortpyConditionalGroupShape(
+              witnessGroup, 0, true, &shapeDiagnostic)) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"witness group %u is incompatible: %@", witnessOrdinal,
+            shapeDiagnostic ?: @"unknown shape"]);
+        return false;
+      }
+      NSArray<NSNumber *> *witnessIndices = witnessGroup[@"indices"];
+      NSUInteger witnessModeZeroIndex = witnessIndices[0].unsignedIntegerValue;
+      NSDictionary *witnessParameters = BridgeShortpyActionSerializedParameters(
+          sourceActions[witnessModeZeroIndex]);
+      NSDictionary *conditionPayload =
+          BridgeShortpyConditionPayload(witnessParameters);
+      if (conditionPayload.count == 0) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"witness group %u has no serialized condition payload",
+            witnessOrdinal]);
+        return false;
+      }
+
+      NSUInteger targetModeOneIndex =
+          targetIndices[1 + witnessIndex].unsignedIntegerValue;
+      id targetModeOneAction = sourceActions[targetModeOneIndex];
+      NSDictionary *targetParameters =
+          BridgeShortpyActionSerializedParameters(targetModeOneAction);
+      if (BridgeShortpyConditionPayload(targetParameters).count != 0) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"target mode-1 marker %lu already has condition payload; "
+             "native backend behavior changed",
+            (unsigned long)targetModeOneIndex]);
+        return false;
+      }
+      NSMutableDictionary *replacementParameters =
+          [@{
+            @"WFControlFlowMode": @1,
+            @"GroupingIdentifier": targetGroupingIdentifier,
+          } mutableCopy];
+      [replacementParameters addEntriesFromDictionary:conditionPayload];
+      id replacement = BridgeShortpyActionWithSerializedParameters(
+          targetModeOneAction, replacementParameters);
+      if (!replacement) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"could not construct replacement for mode-1 marker %lu",
+            (unsigned long)targetModeOneIndex]);
+        return false;
+      }
+      replacements[@(targetModeOneIndex)] = replacement;
+      [removals addIndex:witnessIndices[0].unsignedIntegerValue];
+      [removals addIndex:witnessIndices[1].unsignedIntegerValue];
+      repairedCount++;
+    }
+
+    NSUInteger modeOneCount = targetIndices.count - 2;
+    if (modeOneCount == witnessCount) {
+      NSUInteger targetModeTwoIndex =
+          targetIndices.lastObject.unsignedIntegerValue;
+      id templateAction =
+          sourceActions[targetIndices[witnessCount].unsignedIntegerValue];
+      NSDictionary *elseParameters = @{
+        @"WFControlFlowMode": @1,
+        @"GroupingIdentifier": targetGroupingIdentifier,
+      };
+      id elseAction = BridgeShortpyActionWithSerializedParameters(
+          templateAction, elseParameters);
+      if (!elseAction) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"could not construct final Else marker for target group %u",
+            targetOrdinal]);
+        return false;
+      }
+      NSNumber *insertionIndex = @(targetModeTwoIndex);
+      NSMutableArray *actionsBefore = insertions[insertionIndex];
+      if (!actionsBefore) {
+        actionsBefore = [NSMutableArray array];
+        insertions[insertionIndex] = actionsBefore;
+      }
+      [actionsBefore addObject:elseAction];
+      insertedElseCount++;
+    } else {
+      NSUInteger finalElseIndex =
+          targetIndices[1 + witnessCount].unsignedIntegerValue;
+      NSDictionary *finalElseParameters =
+          BridgeShortpyActionSerializedParameters(
+              sourceActions[finalElseIndex]);
+      if (BridgeShortpyConditionPayload(finalElseParameters).count != 0) {
+        BridgeShortpySetElseIfRepairError([NSString stringWithFormat:
+            @"final Else marker %lu unexpectedly has condition payload",
+            (unsigned long)finalElseIndex]);
+        return false;
+      }
+    }
+  }
+
+  if (repairedCount > UINT32_MAX || insertedElseCount > UINT32_MAX ||
+      removals.count > UINT32_MAX) {
+    BridgeShortpySetElseIfRepairError(
+        @"Else If workflow repair count exceeded UInt32");
+    return false;
+  }
+  NSMutableArray *repairedActions = [NSMutableArray arrayWithCapacity:
+      sourceActions.count - removals.count + insertedElseCount];
+  for (NSUInteger actionIndex = 0;
+       actionIndex < sourceActions.count; actionIndex++) {
+    NSArray *actionsBefore = insertions[@(actionIndex)];
+    if (actionsBefore) {
+      [repairedActions addObjectsFromArray:actionsBefore];
+    }
+    if ([removals containsIndex:actionIndex]) {
+      continue;
+    }
+    id replacement = replacements[@(actionIndex)];
+    [repairedActions addObject:replacement ?: sourceActions[actionIndex]];
+  }
+  NSUInteger expectedCount =
+      sourceActions.count - removals.count + (NSUInteger)insertedElseCount;
+  if (repairedActions.count != expectedCount) {
+    BridgeShortpySetElseIfRepairError(
+        @"Else If workflow transaction produced the wrong action count");
+    return false;
+  }
+  ((void (*)(id, SEL, id))objc_msgSend)(
+      workflow, @selector(setActions:), repairedActions);
+  if (conditionRepairs) {
+    *conditionRepairs = (uint32_t)repairedCount;
+  }
+  if (elseInsertions) {
+    *elseInsertions = (uint32_t)insertedElseCount;
+  }
+  if (witnessMarkersRemoved) {
+    *witnessMarkersRemoved = (uint32_t)removals.count;
+  }
   return true;
 }
 

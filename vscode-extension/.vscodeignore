@@ -7,3 +7,4 @@ test
 *.log
 *.vsix
 scripts/diagnose-shortpy 2.js
+bundled/headless-shortcuts/build

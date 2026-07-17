@@ -16,10 +16,6 @@ function packagedSourceRoot() {
   return path.resolve(__dirname, "..", "bundled", "headless-shortcuts");
 }
 
-function workspaceSourceRoot() {
-  return path.resolve(__dirname, "..", "..", "..", "Headless-Shortcuts");
-}
-
 function mergeScriptPath() {
   return path.resolve(__dirname, "..", "scripts", "merge-workflow-plists.py");
 }
@@ -127,10 +123,9 @@ function execFile(command, args, options = {}) {
 }
 
 async function resolveSourceRoot() {
-  for (const root of [packagedSourceRoot(), workspaceSourceRoot()]) {
-    if (await exists(path.join(root, "Makefile")) && await exists(path.join(root, "Sources"))) {
-      return root;
-    }
+  const root = packagedSourceRoot();
+  if (await exists(path.join(root, "Makefile")) && await exists(path.join(root, "Sources"))) {
+    return root;
   }
   throw new Error("Headless Shortcuts source is missing from this extension package.");
 }
@@ -339,5 +334,4 @@ module.exports = {
   shortcutEditorDeepLink,
   syncHostShortcut,
   versionedStorageRoot,
-  workspaceSourceRoot,
 };

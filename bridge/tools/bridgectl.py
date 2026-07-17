@@ -596,37 +596,44 @@ VISIBLE_TOOLKIT_PARAMETER_KEYS = {
     "sortOrder",
 }
 
-FILTER_ENUM_TYPES = [
-    {
-        "kind": "enum",
-        "pythonName": "QUERY_OPERATOR",
-        "displayName": "QUERY_OPERATOR",
-        "signature": "class QUERY_OPERATOR(Enum):",
-        "bases": ["Enum"],
-        "cases": [
-            {"name": "ANY", "pythonName": "QUERY_OPERATOR.ANY", "value": '"ANY"'},
-            {"name": "ALL", "pythonName": "QUERY_OPERATOR.ALL", "value": '"ALL"'},
-        ],
-        "definitionBlock": 'class QUERY_OPERATOR(Enum):\n    ANY = "ANY"\n    ALL = "ALL"',
-        "documentation": "Controls whether any or all query filters must match.",
-        "source": "Shortpy.NativeToolRendererPrelude",
-    },
-    {
-        "kind": "enum",
-        "pythonName": "QUERY_SORT_ORDER",
-        "displayName": "QUERY_SORT_ORDER",
-        "signature": "class QUERY_SORT_ORDER(Enum):",
-        "bases": ["Enum"],
-        "cases": [
-            {"name": "ASCENDING", "pythonName": "QUERY_SORT_ORDER.ASCENDING", "value": '"ASCENDING"'},
-            {"name": "DESCENDING", "pythonName": "QUERY_SORT_ORDER.DESCENDING", "value": '"DESCENDING"'},
-        ],
-        "definitionBlock": 'class QUERY_SORT_ORDER(Enum):\n    ASCENDING = "ASCENDING"\n    DESCENDING = "DESCENDING"',
-        "documentation": "Controls the sort direction for query filter actions.",
-        "source": "Shortpy.NativeToolRendererPrelude",
-    },
-]
+RENDERED_TOOLKIT_PARAMETER_KEYS = {
+    "query": {"WFContentItemFilter"},
+    "sort_by": {"WFContentItemSortProperty"},
+    "query_sort_order": {"WFContentItemSortOrder"},
+    "limit": {"WFContentItemLimitEnabled", "WFContentItemLimitNumber"},
+    "scope": {"WFContentItemInputParameter"},
+}
 
+TOOLRENDERER_TYPE_WRAPPERS = {
+    "Any",
+    "Callable",
+    "Dict",
+    "Enum",
+    "Generic",
+    "List",
+    "Literal",
+    "None",
+    "Optional",
+    "Picked",
+    "Resolved",
+    "Set",
+    "Tuple",
+    "TypeVar",
+    "Union",
+    "bool",
+    "bytes",
+    "dict",
+    "float",
+    "int",
+    "list",
+    "set",
+    "str",
+    "tuple",
+}
+
+
+class ToolRendererMetadataError(ValueError):
+    pass
 
 def unique_strings(values: list[object]) -> list[str]:
     output: list[str] = []
@@ -641,173 +648,6 @@ def unique_strings(values: list[object]) -> list[str]:
                 seen.add(item)
                 output.append(item)
     return output
-
-
-def parameter_names(parameter: object) -> list[str]:
-    if not isinstance(parameter, dict):
-        return []
-    return unique_strings([
-        parameter.get("pythonName"),
-        parameter.get("name"),
-        parameter.get("key"),
-        parameter.get("rawKey"),
-        parameter.get("aliases"),
-        parameter.get("acceptedNames"),
-    ])
-
-
-def optional_type(type_name: object) -> str:
-    clean = str(type_name or "").strip()
-    if not clean:
-        return ""
-    if clean.startswith("Optional["):
-        return clean
-    return f"Optional[{clean}]"
-
-
-def query_filter_parameter(parameters: list[dict], name: str) -> dict | None:
-    for parameter in parameters:
-        if name in parameter_names(parameter):
-            return parameter
-        if name == "query" and (
-            parameter.get("key") == "WFContentItemFilter"
-            or parameter.get("rawKey") == "WFContentItemFilter"
-            or "wfcontentitemfilter" in parameter_names(parameter)
-        ):
-            return parameter
-    return None
-
-
-def query_filter_scope_parameter(parameters: list[dict]) -> dict | None:
-    for parameter in parameters:
-        name = parameter.get("pythonName")
-        type_name = str(parameter.get("type") or "")
-        if name in {"query", "sort_by", "limit", "get"}:
-            continue
-        if "_wfcontent_item_input_parameter" in type_name or "WFContentItemInputParameter" in parameter_names(parameter):
-            return parameter
-    compound_index = next((
-        index
-        for index, parameter in enumerate(parameters)
-        if parameter.get("key") == "WFCompoundType"
-        or parameter.get("rawKey") == "WFCompoundType"
-        or "wfcompoundtype" in parameter_names(parameter)
-    ), -1)
-    return parameters[compound_index + 1] if 0 <= compound_index < len(parameters) - 1 else None
-
-
-def is_query_filter_item(item: object) -> bool:
-    if not isinstance(item, dict):
-        return False
-    if item.get("filterActionSurface") == "expanded-query":
-        return False
-    for parameter in item.get("parameters") or []:
-        if not isinstance(parameter, dict):
-            continue
-        if (parameter.get("pythonName") == "query" or parameter.get("name") == "query" or parameter.get("inline")) and str(parameter.get("type") or "").startswith("query_"):
-            return True
-        if (
-            parameter.get("key") == "WFContentItemFilter"
-            or parameter.get("rawKey") == "WFContentItemFilter"
-            or "wfcontentitemfilter" in parameter_names(parameter)
-        ):
-            return True
-    return False
-
-
-def normalize_query_filter_item(item: object) -> object:
-    if not is_query_filter_item(item):
-        return item
-    assert isinstance(item, dict)
-    parameters = [parameter for parameter in item.get("parameters") or [] if isinstance(parameter, dict)]
-    query = query_filter_parameter(parameters, "query")
-    if not query:
-        query = next((parameter for parameter in parameters if str(parameter.get("type") or "").startswith("query_")), None)
-    if not query:
-        return item
-    sort_by = query_filter_parameter(parameters, "sort_by")
-    native_limit = query_filter_parameter(parameters, "limit")
-    native_get = query_filter_parameter(parameters, "get")
-    native_scope = query_filter_scope_parameter(parameters)
-    query_type = str(query.get("type") or "Any").strip()
-    output_parameters: list[dict] = [
-        {
-            **query,
-            "pythonName": "query",
-            "name": "query",
-            "type": f"List[{query_type}]",
-            "defaultValue": None,
-            "inline": False,
-            "positional": False,
-            "doc": "The filter conditions.",
-            "summary": "The filter conditions.",
-            "aliases": unique_strings(["query", visible_compiler_parameter_names(query)]),
-            "acceptedNames": unique_strings(["query", visible_compiler_parameter_names(query)]),
-        },
-        {
-            "pythonName": "query_operator",
-            "name": "query_operator",
-            "type": "QUERY_OPERATOR",
-            "defaultValue": "QUERY_OPERATOR.ALL",
-            "doc": "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
-            "summary": "If QUERY_OPERATOR.ALL, all filters must be satisfied. If QUERY_OPERATOR.ANY, any filter is sufficient.",
-            "aliases": ["query_operator"],
-            "acceptedNames": ["query_operator"],
-        },
-    ]
-    if sort_by:
-        output_parameters.append({
-            **sort_by,
-            "pythonName": "sort_by",
-            "name": "sort_by",
-            "type": optional_type(sort_by.get("type")),
-            "defaultValue": "None",
-            "inline": False,
-            "positional": False,
-            "aliases": unique_strings(["sort_by", visible_compiler_parameter_names(sort_by)]),
-            "acceptedNames": unique_strings(["sort_by", visible_compiler_parameter_names(sort_by)]),
-        })
-        output_parameters.append({
-            "pythonName": "query_sort_order",
-            "name": "query_sort_order",
-            "type": "QUERY_SORT_ORDER",
-            "defaultValue": "QUERY_SORT_ORDER.ASCENDING",
-            "doc": "The sort order of the query.",
-            "summary": "The sort order of the query.",
-            "aliases": ["query_sort_order"],
-            "acceptedNames": ["query_sort_order"],
-        })
-    limit_doc = (native_get or {}).get("doc") or (native_get or {}).get("summary") or "The maximum number of results."
-    output_parameters.append({
-        "pythonName": "limit",
-        "name": "limit",
-        "type": "Optional[int]",
-        "defaultValue": "None",
-        "doc": limit_doc,
-        "summary": limit_doc,
-        "aliases": unique_strings(["limit", "get", visible_compiler_parameter_names(native_limit or {}), visible_compiler_parameter_names(native_get or {})]),
-        "acceptedNames": unique_strings(["limit", "get", visible_compiler_parameter_names(native_limit or {}), visible_compiler_parameter_names(native_get or {})]),
-    })
-    if native_scope:
-        scope_doc = native_scope.get("doc") or native_scope.get("summary") or "The scope of the query."
-        output_parameters.append({
-            **native_scope,
-            "pythonName": "scope",
-            "name": "scope",
-            "type": optional_type(native_scope.get("type")),
-            "defaultValue": "None",
-            "inline": False,
-            "positional": False,
-            "doc": scope_doc,
-            "summary": scope_doc,
-            "aliases": unique_strings(["scope", visible_compiler_parameter_names(native_scope)]),
-            "acceptedNames": unique_strings(["scope", visible_compiler_parameter_names(native_scope)]),
-        })
-    return {
-        **item,
-        "parameters": output_parameters,
-        "filterActionSurface": "expanded-query",
-    }
 
 
 def python_name_from_label(value: object) -> str:
@@ -860,7 +700,6 @@ def visible_toolrenderer_parameter(parameter: object) -> object:
 def visible_toolrenderer_item(item: object) -> object:
     if not isinstance(item, dict):
         return item
-    item = normalize_query_filter_item(item)
     output = {
         key: value
         for key, value in item.items()
@@ -894,25 +733,37 @@ def merge_toolkit_parameter_aliases(item: dict, toolkit_item: dict) -> dict:
             return item
         parameter = dict(rendered_parameter)
         if positionally_aligned:
-            toolkit_parameter = toolkit[index]
+            candidates = [toolkit[index]]
         else:
-            candidates: dict[int, dict] = {}
+            candidates_by_identity: dict[int, dict] = {}
             for name in visible_compiler_parameter_names(rendered_parameter):
                 for candidate in toolkit_by_name.get(name, []):
-                    candidates[id(candidate)] = candidate
-            toolkit_parameter = next(iter(candidates.values())) if len(candidates) == 1 else None
-        if not toolkit_parameter:
+                    candidates_by_identity[id(candidate)] = candidate
+            rendered_name = rendered_parameter.get("pythonName")
+            semantic_keys = RENDERED_TOOLKIT_PARAMETER_KEYS.get(rendered_name, set())
+            for candidate in toolkit:
+                if not isinstance(candidate, dict):
+                    continue
+                raw_key = candidate.get("key") or candidate.get("rawKey")
+                if raw_key in semantic_keys:
+                    candidates_by_identity[id(candidate)] = candidate
+            candidates = list(candidates_by_identity.values())
+        if not candidates:
             parameters.append(parameter)
             continue
 
         accepted_names = unique_strings([
             visible_compiler_parameter_names(rendered_parameter),
-            visible_compiler_parameter_names(toolkit_parameter),
+            *(visible_compiler_parameter_names(candidate) for candidate in candidates),
         ])
         if accepted_names:
             parameter["acceptedNames"] = accepted_names
-        raw_key = toolkit_parameter.get("key") or toolkit_parameter.get("rawKey")
-        if isinstance(raw_key, str) and raw_key:
+        raw_keys = unique_strings([
+            candidate.get("key") or candidate.get("rawKey")
+            for candidate in candidates
+        ])
+        if len(raw_keys) == 1:
+            raw_key = raw_keys[0]
             parameter["rawKey"] = raw_key
         parameters.append(parameter)
     return {**item, "parameters": parameters}
@@ -946,27 +797,25 @@ def toolkit_items_by_id(kind: str) -> dict[str, dict]:
 
 def align_toolrenderer_items_by_exact_name(items: list[dict], kind: str) -> tuple[list[dict], dict]:
     toolkit_by_id = toolkit_items_by_id(kind)
-    toolrenderer_by_name: dict[str, dict | None] = {}
-    for item in items:
-        name = item.get("pythonName")
+    toolkit_by_name: dict[str, list[tuple[str, dict]]] = {}
+    for identifier, toolkit_item in toolkit_by_id.items():
+        name = toolkit_item.get("pythonName")
         if isinstance(name, str) and name:
-            if name in toolrenderer_by_name:
-                toolrenderer_by_name[name] = None
-            else:
-                toolrenderer_by_name[name] = item
+            toolkit_by_name.setdefault(name, []).append((identifier, toolkit_item))
 
     output: list[dict] = []
     matched = 0
-    missing_definitions = 0
+    ambiguous = 0
+    rendered_names: set[str] = set()
 
-    for identifier in sorted(toolkit_by_id):
-        toolkit_item = toolkit_by_id[identifier]
-        name = toolkit_item.get("pythonName")
-        if not isinstance(name, str) or not name:
-            continue
-        template = toolrenderer_by_name.get(name)
-        if template:
-            clone = dict(template)
+    for rendered_item in items:
+        name = rendered_item.get("pythonName")
+        if isinstance(name, str) and name:
+            rendered_names.add(name)
+        candidates = toolkit_by_name.get(name, []) if isinstance(name, str) else []
+        if len(candidates) == 1:
+            identifier, toolkit_item = candidates[0]
+            clone = dict(rendered_item)
             clone = merge_toolkit_parameter_aliases(clone, toolkit_item)
             clone["id"] = identifier
             clone["nativeIdentifier"] = identifier
@@ -974,24 +823,23 @@ def align_toolrenderer_items_by_exact_name(items: list[dict], kind: str) -> tupl
             output.append(clone)
             matched += 1
             continue
-        missing_definitions += 1
-        output.append({
-            "kind": "action" if kind == "actions" else "trigger",
-            "pythonName": name,
-            "nativeIdentifier": identifier,
-            "id": identifier,
-            "displayName": toolkit_item.get("displayName") or name,
-            "summary": toolkit_item.get("summary") or "",
-            "documentation": toolkit_item.get("summary") or "",
-            "parameters": toolkit_item.get("parameters") or [],
-            "source": "sqlite-pythonName",
-            "definitionMissing": True,
-        })
+        if len(candidates) > 1:
+            ambiguous += 1
+        output.append(rendered_item)
+
+    missing_definitions = sum(
+        1
+        for name, candidates in toolkit_by_name.items()
+        if name not in rendered_names
+        for _candidate in candidates
+    )
 
     return output, {
         "source": "ToolRenderer.pythonInterface exact pythonName",
         "matchedDefinitions": matched,
         "missingDefinitions": missing_definitions,
+        "ambiguousMatches": ambiguous,
+        "renderedDefinitions": len(output),
     }
 
 
@@ -1016,6 +864,59 @@ def align_toolrenderer_metadata_by_exact_name(metadata: dict) -> dict:
     return output
 
 
+def toolrenderer_type_references(value: object) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    try:
+        expression = ast.parse(text, mode="eval")
+    except SyntaxError as exc:
+        raise ToolRendererMetadataError(f"ToolRenderer emitted an invalid type expression {text!r}: {exc}") from exc
+    return {
+        node.id
+        for node in ast.walk(expression)
+        if isinstance(node, ast.Name) and node.id not in TOOLRENDERER_TYPE_WRAPPERS
+    }
+
+
+def validate_toolrenderer_type_references(metadata: dict) -> None:
+    types = [item for item in metadata.get("types", []) or [] if isinstance(item, dict)]
+    known_types = {
+        item.get("pythonName")
+        for item in types
+        if isinstance(item.get("pythonName"), str) and item.get("pythonName")
+    }
+    missing: dict[str, set[str]] = {}
+    items = [
+        *(metadata.get("helpers", []) or []),
+        *(metadata.get("actions", []) or []),
+        *(metadata.get("triggers", []) or []),
+        *types,
+    ]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        owner = str(item.get("pythonName") or "<unnamed>")
+        expressions = [item.get("returnType"), item.get("aliasedTo"), *(item.get("bases") or [])]
+        expressions.extend(
+            parameter.get("type")
+            for parameter in item.get("parameters", []) or []
+            if isinstance(parameter, dict)
+        )
+        for expression in expressions:
+            for name in toolrenderer_type_references(expression):
+                if name not in known_types and not name.startswith("query_"):
+                    missing.setdefault(name, set()).add(owner)
+    if missing:
+        details = "; ".join(
+            f"{name} referenced by {', '.join(sorted(owners)[:5])}"
+            for name, owners in sorted(missing.items())
+        )
+        raise ToolRendererMetadataError(
+            f"ToolRenderer structured metadata is missing native type definitions: {details}"
+        )
+
+
 def visible_toolrenderer_metadata(metadata: dict) -> dict:
     metadata = align_toolrenderer_metadata_by_exact_name(metadata)
     output = {
@@ -1027,10 +928,6 @@ def visible_toolrenderer_metadata(metadata: dict) -> dict:
     triggers = [visible_toolrenderer_item(item) for item in output.get("triggers", []) or []]
     helpers = [visible_toolrenderer_item(item) for item in output.get("helpers", []) or []]
     types = [visible_toolrenderer_item(item) for item in output.get("types", []) or []]
-    type_names = {item.get("pythonName") for item in types if isinstance(item, dict)}
-    for enum_type in FILTER_ENUM_TYPES:
-        if enum_type["pythonName"] not in type_names:
-            types.append(enum_type)
     output.update({
         "source": "ToolRenderer.pythonInterface",
         "actions": actions,
@@ -1047,6 +944,7 @@ def visible_toolrenderer_metadata(metadata: dict) -> dict:
             "items": len(helpers) + len(actions) + len(triggers),
         },
     })
+    validate_toolrenderer_type_references(output)
     return output
 
 
@@ -1105,7 +1003,7 @@ def enrich_toolrenderer_metadata_from_source(metadata: dict, source: str) -> dic
     }
 
 
-def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
+def _toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
     response = None
     if refresh:
         try:
@@ -1160,6 +1058,18 @@ def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> 
         "mode": "toolrenderer-structured-metadata",
         "error": "No live or cached ToolRenderer interface is available",
     }
+
+
+def toolrenderer_structured_metadata(socket_path: str, refresh: bool = True) -> dict:
+    try:
+        return _toolrenderer_structured_metadata(socket_path, refresh)
+    except ToolRendererMetadataError as exc:
+        return {
+            "ok": False,
+            "mode": "toolrenderer-structured-metadata",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
 
 
 def query_terms(query: str) -> list[str]:
@@ -1269,11 +1179,9 @@ def safe_toolrenderer_search(socket_path: str, query: str, kind: str, limit: int
         "kind": kind,
         "limit": max(1, limit),
         "tool_visibility_source": "active-toolkit-sqlite",
-        "native_agent_toolbox_status": "guarded behind --native",
         "notes": [
             "Search uses Apple's ToolRenderer.pythonInterface from the active simulator ToolKit database.",
             "The active ToolKit sqlite is adjusted before bridge launch so rows have visibleForShortcuts and approved visibility bits.",
-            "Native AgentToolbox.query remains guarded because ToolKit dispatch-precondition evidence shows a null queue crash in this bridge context.",
         ],
         "counts": {
             "items": len(items),
@@ -1837,7 +1745,17 @@ def inline_catalog_literals(value_node: ast.AST, parameter_info: dict) -> list[a
 
 def rewrite_inline_catalog_metadata(source: bytes) -> dict:
     text = source.decode("utf-8")
-    tree = ast.parse(text)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        # Inline catalog rewriting is optional preprocessing. Let the native
+        # Shortcuts frontend own syntax diagnostics and debug-stage output.
+        return {
+            "source": source,
+            "source_text": text,
+            "entries": [],
+            "rewritten": False,
+        }
     line_offsets = line_offsets_for(text)
     used_tags: set[str] = set(refs_in_source(source))
     entries: list[dict] = []
@@ -2349,29 +2267,6 @@ def workflow_import_source_bytes(input_bytes: bytes) -> tuple[bytes, dict | None
     return plist_data, signed_metadata, None
 
 
-def compile_python_record_file_probe(
-    socket_path: str,
-    source: bytes,
-    flags: int,
-    catalog_payload: object | None = None,
-) -> dict:
-    prepared = rewrite_inline_catalog_metadata(source)
-    native_catalog_payload = native_catalog_json(catalog_payload) if catalog_payload is not None else None
-    expand_response = None
-    if prepared.get("entries"):
-        expand_response = expand_inline_catalog(socket_path, prepared["entries"])
-        native_catalog_payload = expand_response.get("catalog")
-
-    payload = base64.b64encode(prepared["source"]).decode("ascii")
-    if native_catalog_payload is not None:
-        catalog_text = json.dumps(native_catalog_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        catalog_b64 = base64.b64encode(catalog_text).decode("ascii")
-        raw = send_command(socket_path, f"record-file-probe-catalog-b64-flags {flags} {payload} {catalog_b64}")
-    else:
-        raw = send_command(socket_path, f"record-file-probe-b64-flags {flags} {payload}")
-    return attach_inline_catalog_summary(json.loads(raw), prepared, expand_response)
-
-
 def python_literal(value: object) -> str:
     if isinstance(value, dict):
         return "{" + ", ".join(
@@ -2497,31 +2392,6 @@ def transpiler_feedback(socket_path: str, source: bytes, flags: int, catalog_met
     }
 
 
-def resolve_entity_native(
-    socket_path: str,
-    method_parameter_type: str,
-    query: str,
-    method_name: str,
-    method_parameter_name: str,
-    workflow_id: str | None,
-    debug_native_find_entities: bool = False,
-) -> dict:
-    request = {
-        "method_name": method_name,
-        "method_parameter_name": method_parameter_name,
-        "method_parameter_type": method_parameter_type,
-        "query": query,
-        "debug_native_find_entities": debug_native_find_entities,
-    }
-    if workflow_id:
-        request["workflow_id"] = workflow_id
-    payload = base64.b64encode(
-        json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
-    raw = send_command(socket_path, f"resolve-entity-b64 {payload}")
-    return json.loads(raw)
-
-
 def add_source_args(parser: argparse.ArgumentParser) -> argparse._MutuallyExclusiveGroup:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--file", type=Path)
@@ -2605,17 +2475,6 @@ def main() -> int:
         default=os.environ.get("SHORTPY_SHORTCUTS_CLI", DEFAULT_SHORTCUTS_CLI),
         help=f"Path to macOS shortcuts CLI [{DEFAULT_SHORTCUTS_CLI}]",
     )
-    record_file_probe = sub.add_parser(
-        "record-file-probe",
-        help="Debug probe: compile Python, then serialize via WFWorkflowRecord.fileRepresentation",
-    )
-    add_source_args(record_file_probe)
-    record_file_probe.add_argument(
-        "--flags",
-        type=int,
-        default=0,
-        help="Bridge transport flags passed to record-file-probe-b64-flags [0]",
-    )
     plist_to_python = sub.add_parser(
         "plist-to-python",
         help="Convert a shortcut plist JSON dictionary back to edit-mode Python",
@@ -2626,38 +2485,6 @@ def main() -> int:
         help="Convert binary or XML plist bytes back to edit-mode Python",
     )
     add_source_args(plist_data_to_python)
-    agent_toolbox_query = sub.add_parser(
-        "agent-toolbox-query",
-        help="Query ShortcutsAgent.AgentToolbox and return Result.stringRepresentation",
-    )
-    agent_toolbox_query.add_argument("query")
-    agent_toolbox_query.add_argument(
-        "--kind",
-        choices=["trigger", "tool"],
-        default="trigger",
-        help="AgentToolbox embedding type to limit [trigger]",
-    )
-    agent_toolbox_query.add_argument(
-        "--limit",
-        type=int,
-        default=3,
-        help="Maximum render count for the selected kind [3]",
-    )
-    agent_toolbox_query.add_argument(
-        "--mainactor",
-        action="store_true",
-        help="With --native, run the experimental native query from a MainActor task",
-    )
-    agent_toolbox_query.add_argument(
-        "--native",
-        action="store_true",
-        help="Use the unsafe private AgentToolbox.query endpoint instead of stable ToolRenderer search",
-    )
-    agent_toolbox_query.add_argument(
-        "--refresh-interface",
-        action="store_true",
-        help="Refresh ToolRenderer.pythonInterface through the live bridge before searching; cached metadata is used by default",
-    )
     retrieve_actions = sub.add_parser(
         "retrieve-relevant-actions",
         help="Agent-compatible action retrieval over native ToolRenderer Python definitions",
@@ -2679,24 +2506,6 @@ def main() -> int:
     add_source_args(transpiler)
     transpiler.add_argument("--flags", type=int, default=0)
     transpiler.add_argument("--catalog-metadata", type=Path)
-    resolve_entity = sub.add_parser(
-        "resolve-entity",
-        help="Resolve an entity ref through ShortcutsAgent.FindEntitiesTool",
-    )
-    resolve_entity.add_argument("method_parameter_type")
-    resolve_entity.add_argument("query")
-    resolve_entity.add_argument("--method-name", default="")
-    resolve_entity.add_argument("--method-parameter-name", default="")
-    resolve_entity.add_argument("--workflow-id")
-    resolve_entity.add_argument(
-        "--native-find-entities",
-        action="store_true",
-        help="Debug only: call ShortcutsAgent.FindEntitiesTool.call directly; this path can crash while ABI work is in progress",
-    )
-    sub.add_parser(
-        "agent-toolbox-init-dump",
-        help="Dump raw AgentToolbox.init storage words without running query",
-    )
     sub.add_parser(
         "toolrenderer-python-interface",
         help="Render the full ToolRenderer Python interface",
@@ -2776,19 +2585,6 @@ def main() -> int:
         print_response(json.dumps(response, sort_keys=True), not args.raw)
         return 0
 
-    if args.command == "record-file-probe":
-        try:
-            response = compile_python_record_file_probe(args.socket, read_source(args), args.flags)
-        except InlineCatalogError as exc:
-            response = {
-                "ok": False,
-                "mode": "workflow-record-file-representation-probe",
-                "diagnostic": str(exc),
-                "inline_catalog_diagnostics": exc.diagnostics,
-            }
-        print_response(json.dumps(response, sort_keys=True), not args.raw)
-        return 0
-
     if args.command == "plist-to-python":
         plist_json = read_source(args)
         payload = base64.b64encode(plist_json).decode("ascii")
@@ -2822,30 +2618,6 @@ def main() -> int:
                 "diagnostic": str(exc),
             }
         print_response(json.dumps(response, sort_keys=True), not args.raw)
-        return 0
-
-    if args.command == "agent-toolbox-query":
-        if not args.native:
-            payload = safe_toolrenderer_search(
-                args.socket,
-                args.query,
-                args.kind,
-                max(1, args.limit),
-                refresh=args.refresh_interface,
-            )
-            print_response(json.dumps(payload, sort_keys=True), not args.raw)
-            return 0
-        payload = base64.b64encode(args.query.encode("utf-8")).decode("ascii")
-        command = (
-            "agent-toolbox-query-mainactor-b64"
-            if args.mainactor
-            else "agent-toolbox-query-b64"
-        )
-        raw = send_command(
-            args.socket,
-            f"{command} {args.kind} {max(1, args.limit)} {payload}",
-        )
-        print_response(raw, not args.raw)
         return 0
 
     if args.command == "retrieve-relevant-actions":
@@ -2892,24 +2664,6 @@ def main() -> int:
                 "inline_catalog_diagnostics": exc.diagnostics,
             }
         print_response(json.dumps(payload, sort_keys=True), not args.raw)
-        return 0
-
-    if args.command == "resolve-entity":
-        payload = resolve_entity_native(
-            args.socket,
-            args.method_parameter_type,
-            args.query,
-            args.method_name,
-            args.method_parameter_name,
-            args.workflow_id,
-            args.native_find_entities,
-        )
-        print_response(json.dumps(payload, sort_keys=True), not args.raw)
-        return 0
-
-    if args.command == "agent-toolbox-init-dump":
-        raw = send_command(args.socket, "agent-toolbox-init-dump")
-        print_response(raw, not args.raw)
         return 0
 
     if args.command == "toolrenderer-python-interface":

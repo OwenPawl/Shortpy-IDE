@@ -9,9 +9,13 @@ The production serializer path is:
 ```text
 ShortpyToShortcut
   -> ShortcutsLanguage.PythonToIR
-  -> Shortpy native IR correction passes
-  -> ShortcutsLanguage native IR passes
+  -> Shortpy control-flow plan and input preparation
+  -> ShortcutsLanguage ControlFlowOutputInferencePass
+  -> Shortpy control-flow output repair
+  -> ShortcutsLanguage VariableInliningPass and DropCommentsPass
+  -> terminal native mode-0 witnesses for Else If conditions
   -> ShortcutsLanguage.IRToShortcut
+  -> validated Else If payload transfer and witness-marker removal
   -> captured recurrence correction on native WFAction parameters (if required)
   -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync
   -> WFWorkflow.saveToRecord
@@ -57,10 +61,10 @@ Direct `elif` lowering also omitted later conditions, while menu/conditional
 list accumulators remained disconnected named-variable actions.
 
 The production fix is `ShortpyToShortcut`, an owned compiler pipeline rather
-than a hook or source rewrite. It parses unchanged Python with
-`PythonToIR`, captures statement/scope bindings before destructive native
-passes, applies metadata-driven corrections, then runs Apple's control-flow
-inference, variable inlining, `IRToShortcut`, and workflow serializer.
+than a hook or source rewrite. It parses unchanged Python with `PythonToIR`,
+captures a read-only statement/scope plan, applies bounded input preparation,
+runs Apple's control-flow inference, applies one bounded output repair, then
+runs Apple's variable inlining, `IRToShortcut`, and workflow serializer.
 Finite/foreach/menu/conditional collision and nesting fixtures pass public
 `Python -> plist -> Python -> plist` cycles with stable native action shapes.
 The signed `Shortcut Debugger.shortcut` fixture additionally proved the more
@@ -70,7 +74,7 @@ native result binding without changing the Python. Loop-carried recurrence uses
 a native IR preparation to make the unchanged source lowerable, followed by a
 fail-closed native `WFAction` correction that changes only the recursive
 branch's captured action-output edge before `saveToRecord`. Conditional,
-`elif`, and Choose from Menu recurrences pass
+repaired `elif`, and Choose from Menu recurrences pass
 two independent compile cycles. Native Comment actions import as explicit
 `com_apple_shortcuts_comment(...)` calls. Real Add Variable actions with direct
 casts or subscripts import through
@@ -80,6 +84,42 @@ casts or subscripts import through
 workflow compiles from 94 actions to the same 94 action identifiers in the same
 order. All 64 action-output dependency edges and their aggrandizements remain
 stable across the original and both independent compile cycles.
+
+## Explicit Action / Structural Control-Flow Boundary
+
+The Shortpy reverse path now classifies every non-control native action by its
+exported `WFProgramNode` tree. A specialized exporter is retained only when the
+tree contains exactly one execution node owned by that source action. A
+shorthand exporter containing no owned execution node is replaced, on an
+isolated action copy, by Apple's generic ToolKit action exporter. Ambiguous or
+unexportable shapes fail with a diagnostic.
+
+This makes real List, Variable, Text, Dictionary, Nothing, and Comment actions
+explicit while leaving only structurally captured control-flow syntax implicit.
+Typed Dictionary numbers use Apple's existing verbatim program-node
+representation, including nested numeric list items.
+
+The final simulator evidence is:
+
+- focused runtime matrix: 36/36 cases pass;
+- exact-input matrix: 4/4 expected outcomes pass, including the supplied signed
+  Add Comment workflow and explicit Shortcut Debugger workflow;
+- semantic native-workflow matrix: 30/30 required action graphs are equivalent;
+- exact source renders are stable for 29/30 required workflows; the remaining
+  nested Dictionary render changes key order without changing its action graph;
+- multiple non-empty Else If branches, an absent source Else, nested Else If
+  groups, loop-carried recurrence, and an action-output-backed condition all
+  preserve branch counts, action shapes, and dependency edges across two
+  independent compile cycles;
+- the explicitly selected native pipeline remains untouched and reproduces
+  Apple's unconditioned mode-1 markers with `owned_passes: []`;
+- nine optional filter fixtures fail as `Unknown Action` through both native and
+  Shortpy reverse paths in this simulator registration context;
+- a separately built `ENABLE_SHORTPY_PIPELINE=0` dylib passes symbol validation
+  and contains no Shortpy IR-adapter symbols.
+
+Dictionary key order and generated local names may canonicalize between source
+renders. They do not change the native semantic action graph.
 
 Compiled plist bytes are still not byte-identical because Shortpy does not
 represent generated UUIDs, implicit defaults, or opaque per-action/root

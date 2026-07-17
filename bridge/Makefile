@@ -22,6 +22,7 @@ SHIMS := $(BUILD_DIR)/runtime_direct_shims_sim.o
 OBJC_HELPERS := $(BUILD_DIR)/runtime_objc_helpers_sim.o
 IR_ADAPTER := $(BUILD_DIR)/shortpy_ir_adapter_sim.o
 SWIFT_SOURCE := src/ShortcutsRuntimeDirectSim.swift
+OBJC_BRIDGING_HEADER := $(CURDIR)/src/runtime_objc_helpers.h
 ENABLE_SHORTPY_PIPELINE ?= 1
 
 ifeq ($(ENABLE_SHORTPY_PIPELINE),1)
@@ -57,14 +58,14 @@ $(C_BRIDGE): src/ShortcutsIDESimBridge.c | $(BUILD_DIR)
 $(SHIMS): src/runtime_direct_shims_sim.S | $(BUILD_DIR)
 	$(CC) $(TARGET_FLAGS) -c -o $@ $<
 
-$(OBJC_HELPERS): src/runtime_objc_helpers.m | $(BUILD_DIR)
+$(OBJC_HELPERS): src/runtime_objc_helpers.m $(OBJC_BRIDGING_HEADER) | $(BUILD_DIR)
 	$(CC) $(TARGET_FLAGS) -fobjc-arc -O2 -g -c -o $@ $<
 
 $(IR_ADAPTER): src/shortpy/shortpy_ir_adapter.c | $(BUILD_DIR)
 	$(CC) $(TARGET_FLAGS) $(CFLAGS) -c -o $@ $<
 
-$(DYLIB): $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) | $(BUILD_DIR)
-	$(SWIFTC) -swift-version 5 -O -g -emit-library $(SHORTPY_SWIFT_FLAGS) -target $(TARGET) -sdk "$(SDKROOT)" -module-name ShortcutsIDESimBridge -o $@ $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) $(FRAMEWORK_FLAGS) $(SHORTPY_LINK_FLAGS)
+$(DYLIB): $(SWIFT_SOURCE) $(OBJC_BRIDGING_HEADER) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) | $(BUILD_DIR)
+	$(SWIFTC) -swift-version 5 -O -g -emit-library $(SHORTPY_SWIFT_FLAGS) -target $(TARGET) -sdk "$(SDKROOT)" -import-objc-header "$(OBJC_BRIDGING_HEADER)" -module-name ShortcutsIDESimBridge -o $@ $(SWIFT_SOURCE) $(C_BRIDGE) $(SHIMS) $(OBJC_HELPERS) $(SHORTPY_OBJECTS) $(FRAMEWORK_FLAGS) $(SHORTPY_LINK_FLAGS)
 	codesign --force --sign - $@
 
 inspect: $(DYLIB)

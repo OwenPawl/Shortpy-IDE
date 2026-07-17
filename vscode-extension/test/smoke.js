@@ -127,15 +127,6 @@ async function main() {
     "--text",
     source,
   ])).stdout);
-  const cliResolveEntity = JSON.parse((await execFile("python3", [
-    bridgeCtl,
-    "--raw",
-    "resolve-entity",
-    "AppEntity",
-    "Shortcuts",
-    "--method-parameter-name",
-    "app",
-  ])).stdout);
   const plist = bplistBufferFromResponse(compiled);
   const signedShortcut = shortcutBufferFromResponse(compiled);
   const plistPath = path.join(logs, "vscode-extension-smoke.workflow.plist");
@@ -308,10 +299,6 @@ async function main() {
       triggers_top: (cliTriggerSearch.results || []).map((item) => item.pythonName),
       transpiler_mode: cliTranspilerFeedback.mode,
       transpiler_valid: cliTranspilerFeedback.valid,
-      resolve_mode: cliResolveEntity.mode,
-      resolve_ok: cliResolveEntity.ok,
-      resolve_result_count: (cliResolveEntity.results || cliResolveEntity.candidates || []).length,
-      resolve_blocker_present: Boolean(cliResolveEntity.blocker),
     },
     show_notification_parameters: showNotificationParameters,
     third_party_show_notification_parameters: thirdPartyShowNotificationParameters,

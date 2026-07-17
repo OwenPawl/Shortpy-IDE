@@ -7,11 +7,13 @@ const os = require("os");
 const path = require("path");
 const {
   bridgeCtlPathForRoot,
+  disconnectBridge,
   ensureBridgeLaunched,
   normalizeOptions,
   resolveBridgeRuntime,
   runBridgeCommand,
   validateImportedPythonSource,
+  validateSimulatorSession,
   versionedStorageBridgeRoot,
 } = require("../src/bridge");
 
@@ -578,11 +580,12 @@ payload = {
     }),
     "mergedFilter": visible(merge_aliases(
         {"kind": "action", "pythonName": "com_apple_shortcuts_filter_files", "parameters": [
-            {"pythonName": "query", "type": "query_file", "inline": True},
-            {"pythonName": "sort_by", "type": "filter_files_wfcontent_item_sort_property"},
-            {"pythonName": "limit", "type": "Optional[bool]"},
-            {"pythonName": "get", "type": "Optional[float]"},
-            {"pythonName": "files", "type": "com_apple_shortcuts_wfcontent_item"},
+            {"pythonName": "query", "type": "List[query_file]"},
+            {"pythonName": "query_operator", "type": "QUERY_OPERATOR"},
+            {"pythonName": "sort_by", "type": "Optional[filter_files_wfcontent_item_sort_property]"},
+            {"pythonName": "query_sort_order", "type": "QUERY_SORT_ORDER"},
+            {"pythonName": "limit", "type": "Optional[int]"},
+            {"pythonName": "scope", "type": "Optional[com_apple_shortcuts_wfcontent_item]"},
         ]},
         {"parameters": [
             {"pythonName": "wfcontentitemfilter", "key": "WFContentItemFilter"},
@@ -612,14 +615,15 @@ print(json.dumps(payload))
     ["detail", "wi_fi_detail"],
     ["detail", "cellular_detail"],
   ]);
-  assert.strictEqual(payload.filter.filterActionSurface, "expanded-query");
+  assert.strictEqual(payload.filter.filterActionSurface, undefined);
   assert.deepStrictEqual(payload.filter.parameters.map((parameter) => parameter.pythonName), [
-    "query",
-    "query_operator",
+    "wfcontentitemfilter",
     "sort_by",
-    "query_sort_order",
+    "order",
     "limit",
-    "scope",
+    "get",
+    "wfcompoundtype",
+    "files",
   ]);
   assert.deepStrictEqual(payload.mergedFilter.parameters.map((parameter) => parameter.pythonName), [
     "query",
@@ -671,6 +675,83 @@ print(json.dumps({
   assert(argv.includes("--no-sign"), "validation compile should pass --no-sign");
   assert(argv.includes("--sign-mode"), "sign mode remains explicit for CLI compatibility");
   assert.strictEqual(await fs.readFile(inputFile, "utf8"), "def shortcut() -> None:\n    pass\n");
+}
+
+async function testExactSimulatorDisconnect(bridgeCtlPath) {
+  const session = {
+    simulatorUDID: "SHORTPY-DEVICE",
+    runtimeBuild: "24A123",
+    bridgePID: 4242,
+    socketPath: "/tmp/shortpy-test.sock",
+  };
+  const status = { ok: true, pid: 4242, socket_path: "/tmp/shortpy-test.sock" };
+  const states = new Map([
+    ["SHORTPY-DEVICE", "Booted"],
+    ["UNRELATED-DEVICE", "Booted"],
+  ]);
+  const shutdowns = [];
+  let cleanupCount = 0;
+  const execAdapter = async (_command, args) => {
+    if (args[0] === "simctl" && args[1] === "list") {
+      return JSON.stringify({
+        devices: {
+          "com.apple.CoreSimulator.SimRuntime.iOS-27-0": Array.from(states, ([udid, state]) => ({ udid, state })),
+        },
+      });
+    }
+    if (args[0] === "simctl" && args[1] === "shutdown") {
+      shutdowns.push(args[2]);
+      states.set(args[2], "Shutdown");
+      return "";
+    }
+    throw new Error(`unexpected command: ${args.join(" ")}`);
+  };
+  const adapters = {
+    readSession: async () => session,
+    runStatus: async () => status,
+    execFile: execAdapter,
+    cleanup: async () => { cleanupCount += 1; },
+    pollMs: 1,
+    timeoutMs: 100,
+  };
+  const result = await disconnectBridge({ bridgeCtlPath }, adapters);
+  assert.strictEqual(result.ok, true);
+  assert.deepStrictEqual(shutdowns, ["SHORTPY-DEVICE"]);
+  assert.strictEqual(states.get("UNRELATED-DEVICE"), "Booted");
+  assert.strictEqual(cleanupCount, 1);
+
+  shutdowns.length = 0;
+  states.set("SHORTPY-DEVICE", "Booted");
+  await assert.rejects(
+    disconnectBridge({ bridgeCtlPath }, {
+      ...adapters,
+      runStatus: async () => ({ ...status, pid: 9999 }),
+    }),
+    /does not match bridge PID/
+  );
+  assert.deepStrictEqual(shutdowns, []);
+
+  states.set("SHORTPY-DEVICE", "Shutdown");
+  const alreadyStopped = await disconnectBridge({ bridgeCtlPath }, {
+    ...adapters,
+    runStatus: async () => { throw new Error("offline"); },
+  });
+  assert.strictEqual(alreadyStopped.alreadyStopped, true);
+
+  states.set("SHORTPY-DEVICE", "Booted");
+  await assert.rejects(
+    disconnectBridge({ bridgeCtlPath }, {
+      ...adapters,
+      runStatus: async () => { throw new Error("offline"); },
+    }),
+    /is booted but the bridge no longer responds/
+  );
+  assert.deepStrictEqual(shutdowns, []);
+
+  assert.throws(
+    () => validateSimulatorSession(undefined, status),
+    /session marker is missing or incomplete/
+  );
 }
 
 async function main() {
@@ -750,6 +831,8 @@ async function main() {
     assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_OPEN_SIMULATOR, "1");
     assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_QUIT_SIMULATOR_APP, "0");
     assert.strictEqual(overriddenLaunchEnv.SHORTPY_IDE_SINGLE_SIMULATOR, "0");
+
+    await testExactSimulatorDisconnect(explicitCtl);
 
     await testToolkitDuplicateRewrite(temp);
     await testToolkitNativeNameAlignment(temp);

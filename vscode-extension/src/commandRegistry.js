@@ -1,6 +1,7 @@
 "use strict";
 
 const CUSTOM_EDITOR_VIEW_TYPE = "shortcutsRuntimeIDE.workflowEditor";
+const CUSTOM_EDITOR_TIER_ORDER = ["session", "authoring", "sync"];
 
 const BASE_ACTIVATION_EVENTS = [
   "onStartupFinished",
@@ -13,12 +14,18 @@ const VISIBLE_COMMANDS = [
     key: "connectBridge",
     command: "shortcutsRuntimeIDE.connectBridge",
     title: "Shortcuts IDE: Connect To Bridge",
-    customEditor: { message: "connect", label: "Connect", order: 10 },
+    commandPalette: { when: "shortcutsRuntimeIDE.bridgeCanConnect" },
+  },
+  {
+    key: "disconnectBridge",
+    command: "shortcutsRuntimeIDE.disconnectBridge",
+    title: "Shortcuts IDE: Disconnect Bridge",
+    commandPalette: { when: "shortcutsRuntimeIDE.bridgeCanDisconnect" },
   },
   {
     key: "saveRuntimePlistFromPython",
     command: "shortcutsRuntimeIDE.saveRuntimePlistFromPython",
-    title: "Shortcuts IDE: Export Python To Shortcut",
+    title: "Shortcuts IDE: Build Shortcut From Python",
     editorContext: { when: "editorLangId == python", group: "navigation@50" },
   },
   {
@@ -32,28 +39,33 @@ const VISIBLE_COMMANDS = [
     command: "shortcutsRuntimeIDE.validatePython",
     title: "Shortcuts IDE: Validate With Apple Runtime",
     editorContext: { when: "editorLangId == python", group: "navigation@52" },
-    customEditor: { message: "validate", label: "Validate", primary: true, order: 30 },
+    customEditor: { message: "validate", label: "Validate", tier: "authoring", order: 40 },
+  },
+  {
+    key: "showCompilerTrace",
+    command: "shortcutsRuntimeIDE.showCompilerTrace",
+    title: "Shortcuts IDE: Show Compiler Trace",
   },
   {
     key: "syncToHostShortcuts",
     command: "shortcutsRuntimeIDE.syncToHostShortcuts",
     title: "Shortcuts IDE: Sync With Host Shortcuts",
     editorContext: { when: "editorLangId == python", group: "navigation@49" },
-    customEditor: { message: "syncHost", label: "Sync With Host", primary: true, order: 45 },
+    customEditor: { message: "syncHost", label: "Sync With Host", tier: "sync", order: 60 },
   },
   {
     key: "toggleLiveSync",
     command: "shortcutsRuntimeIDE.toggleLiveSync",
     title: "Shortcuts IDE: Toggle Live Sync",
     editorContext: { when: "editorLangId == python", group: "navigation@48" },
-    customEditor: { message: "toggleLiveSync", label: "Live Sync", order: 46 },
+    customEditor: { message: "toggleLiveSync", label: "Live Sync", tier: "sync", order: 70 },
   },
   {
     key: "openHostShortcutEditor",
     command: "shortcutsRuntimeIDE.openHostShortcutEditor",
     title: "Shortcuts IDE: Open Shortcut Editor",
     editorContext: { when: "editorLangId == python", group: "navigation@47" },
-    customEditor: { message: "openHostShortcutEditor", label: "Open in Shortcuts", order: 47 },
+    customEditor: { message: "openHostShortcutEditor", label: "Open in Shortcuts", tier: "session", order: 21 },
   },
   {
     key: "openWorkflowPlistFromPython",
@@ -83,41 +95,33 @@ const VISIBLE_COMMANDS = [
     key: "searchActions",
     command: "shortcutsRuntimeIDE.searchActions",
     title: "Shortcuts IDE: Retrieve Relevant Actions",
-    editorContext: { when: "editorLangId == python", group: "navigation@54" },
-    customEditor: { message: "searchActions", label: "Search Actions", order: 60 },
+    customEditor: { message: "searchActions", label: "Search Actions", tier: "authoring", order: 30 },
   },
   {
     key: "searchTriggers",
     command: "shortcutsRuntimeIDE.searchTriggers",
     title: "Shortcuts IDE: Retrieve Relevant Triggers",
-    editorContext: { when: "editorLangId == python", group: "navigation@55" },
-    customEditor: { message: "searchTriggers", label: "Search Triggers", order: 70 },
-  },
-  {
-    key: "refreshToolMetadata",
-    command: "shortcutsRuntimeIDE.refreshToolMetadata",
-    title: "Shortcuts IDE: Refresh ToolRenderer Metadata",
-    editorContext: { when: "editorLangId == python", group: "navigation@56" },
-    customEditor: { message: "refreshMetadata", label: "Refresh Metadata", order: 80 },
+    customEditor: { message: "searchTriggers", label: "Search Triggers", tier: "authoring", order: 31 },
   },
   {
     key: "loadToolkitSqlite",
     command: "shortcutsRuntimeIDE.loadToolkitSqlite",
     title: "Shortcuts IDE: Load ToolKit SQLite",
-    editorContext: { group: "navigation@59" },
-    customEditor: { message: "loadToolkit", label: "Load ToolKit", order: 85 },
-  },
-  {
-    key: "refreshToolRendererInterface",
-    command: "shortcutsRuntimeIDE.refreshToolRendererInterface",
-    title: "Shortcuts IDE: Refresh Native ToolRenderer Interface",
+    customEditor: {
+      message: "loadToolkit",
+      label: "Load ToolKit",
+      tier: "sync",
+      order: 80,
+      conditional: "toolkitMissing",
+    },
   },
 ];
 
 const CUSTOM_EDITOR_LOCAL_ACTIONS = [
-  { message: "openPython", label: "Open Python Editor", primary: true, order: 20 },
-  { message: "export", label: "Export Plist", primary: true, order: 40 },
-  { message: "import", label: "Reimport", order: 50 },
+  { message: "toggleBridge", label: "Connect", tier: "session", order: 10, bridgeToggle: true },
+  { message: "openPython", label: "Open Python Editor", primary: true, tier: "session", order: 20 },
+  { message: "export", label: "Build Shortcut", primary: true, tier: "authoring", order: 50 },
+  { message: "import", label: "Reload Python from Shortcut", tier: "sync", order: 90, overflow: true },
 ];
 
 function customEditorActions() {
@@ -129,6 +133,14 @@ function customEditorActions() {
   ].sort((left, right) => (left.order || 0) - (right.order || 0));
 }
 
+function customEditorActionTiers() {
+  const actions = customEditorActions();
+  return CUSTOM_EDITOR_TIER_ORDER.map((id) => ({
+    id,
+    actions: actions.filter((action) => action.tier === id),
+  }));
+}
+
 function packageActivationEvents() {
   return [
     ...BASE_ACTIVATION_EVENTS,
@@ -137,27 +149,28 @@ function packageActivationEvents() {
 }
 
 function packageCommands() {
-  return VISIBLE_COMMANDS.map((item) => ({
-    command: item.command,
-    title: item.title,
-  }));
+  return VISIBLE_COMMANDS.map((item) => ({ command: item.command, title: item.title }));
 }
 
 function packageMenus() {
-  const editorContext = VISIBLE_COMMANDS
-    .filter((item) => item.editorContext)
-    .map((item) => ({ command: item.command, ...item.editorContext }));
-  const explorerContext = VISIBLE_COMMANDS
-    .filter((item) => item.explorerContext)
-    .map((item) => ({ command: item.command, ...item.explorerContext }));
-  return { "editor/context": editorContext, "explorer/context": explorerContext };
+  const surfaces = [
+    ["commandPalette", "commandPalette"],
+    ["editor/context", "editorContext"],
+    ["explorer/context", "explorerContext"],
+  ];
+  return Object.fromEntries(surfaces.map(([menu, field]) => [
+    menu,
+    VISIBLE_COMMANDS
+      .filter((item) => item[field])
+      .map((item) => ({ command: item.command, ...item[field] })),
+  ]));
 }
 
 module.exports = {
   BASE_ACTIVATION_EVENTS,
   CUSTOM_EDITOR_VIEW_TYPE,
   VISIBLE_COMMANDS,
-  customEditorActions,
+  customEditorActionTiers,
   packageActivationEvents,
   packageCommands,
   packageMenus,

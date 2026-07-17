@@ -36,6 +36,28 @@ public func bridgeShortpyArrayRemoveLastGeneric<Element>(
     array.removeLast()
 }
 
+@_silgen_name("bridge_shortpy_array_insert_copy_generic")
+@inline(never)
+public func bridgeShortpyArrayInsertCopyGeneric<Element>(
+    _ array: inout [Element],
+    _ element: UnsafePointer<Element>,
+    _ index: Int
+) {
+    array.insert(element.pointee, at: index)
+}
+
+@_cdecl("bridge_shortpy_swift_string_equal_utf8")
+public func bridgeShortpySwiftStringEqualUTF8(
+    _ value: UnsafeRawPointer?,
+    _ expected: UnsafePointer<CChar>?
+) -> Bool {
+    guard let value, let expected else {
+        return false
+    }
+    return value.assumingMemoryBound(to: String.self).pointee
+        == String(cString: expected)
+}
+
 private struct ErrorPolicyDecision {
     let inputDescription: String
     let outputDescription: String?
@@ -102,20 +124,6 @@ private struct PythonExportResult {
     let context: EditModeContextStorage
     let pipeline: RuntimePipeline
     let adaptedActionCount: UInt64
-}
-
-private let recordFileNativeRetentionLock = NSLock()
-private var recordFileNativeRetention: [AnyObject] = []
-
-private func retainRecordFileNativeObjects(_ objects: [AnyObject?]) {
-    recordFileNativeRetentionLock.lock()
-    for object in objects {
-        if let object {
-            recordFileNativeRetention.append(object)
-        }
-    }
-    appendRecordFileProbeStage("retained native object count=\(recordFileNativeRetention.count)")
-    recordFileNativeRetentionLock.unlock()
 }
 
 private final class ImportedPythonContext: @unchecked Sendable {
@@ -236,6 +244,9 @@ private struct ShortpyCompileRun {
     let finalIR: String
     let passes: [ShortpyPassReport]
     let recurrencePlans: [ShortpyRecurrencePlan]
+    let repeatResultLowering: [[String: Any]]
+    let elseIfConditionLowering: [String: Any]
+    let protectedActionProvenance: [[String: Any]]
     let frontendPolicyDecisions: [ErrorPolicyDecision]
     let backendContextSize: UInt32
     let backendConformance: UnsafeRawPointer
@@ -251,30 +262,6 @@ private struct PipelineCompileRun {
     let details: [String: Any]
 }
 
-private struct AgentToolboxStorage {
-    var w0: UInt64 = 0
-    var w1: UInt64 = 0
-    var w2: UInt64 = 0
-    var w3: UInt64 = 0
-    var w4: UInt64 = 0
-    var w5: UInt64 = 0
-    var w6: UInt64 = 0
-    var w7: UInt64 = 0
-}
-
-private struct AgentToolboxResultStorage {
-    var w0: UInt64 = 0
-    var w1: UInt64 = 0
-    var w2: UInt64 = 0
-    var w3: UInt64 = 0
-    var w4: UInt64 = 0
-    var w5: UInt64 = 0
-}
-
-private struct ToolEmbeddingRecordToolTypeStorage: Hashable {
-    var rawValue: Int64 = 0
-}
-
 private struct CompatibilityShimsStorage {
     var rawValue: UInt64 = 0
 }
@@ -285,122 +272,6 @@ private struct ProtocolExistentialStorage {
     var buffer2: UInt64 = 0
     var type: UInt64 = 0
     var witness: UInt64 = 0
-}
-
-private struct FindEntitiesToolStorage {
-    var w0: UInt64 = 0
-    var w1: UInt64 = 0
-    var w2: UInt64 = 0
-    var w3: UInt64 = 0
-    var w4: UInt64 = 0
-    var w5: UInt64 = 0
-}
-
-private struct FindEntitiesArgumentsStorage {
-    var methodName: String = ""
-    var methodParameterName: String = ""
-    var methodParameterType: String = ""
-    var query: String = ""
-}
-
-private struct FindEntitiesOutputStorage {
-    var w0: UInt64 = 0
-    var w1: UInt64 = 0
-}
-
-private struct DynamicCodingKey: CodingKey {
-    let stringValue: String
-    let intValue: Int?
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-        self.intValue = nil
-    }
-
-    init?(intValue: Int) {
-        self.stringValue = String(intValue)
-        self.intValue = intValue
-    }
-}
-
-private struct ResolveEntityRequestInput: Decodable {
-    let query: String
-    let methodName: String
-    let methodParameterName: String
-    let methodParameterType: String
-    let workflowID: String
-    let debugNativeFindEntities: Bool
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-
-        func stringValue(
-            _ key: String,
-            fallbackKeys: [String] = [],
-            required: Bool = true,
-            default defaultValue: String = ""
-        ) throws -> String {
-            for candidate in [key] + fallbackKeys {
-                guard let codingKey = DynamicCodingKey(stringValue: candidate) else {
-                    continue
-                }
-                if let value = try? container.decode(String.self, forKey: codingKey) {
-                    return value
-                }
-                if let value = try? container.decode(Int.self, forKey: codingKey) {
-                    return String(value)
-                }
-                if let value = try? container.decode(Double.self, forKey: codingKey) {
-                    return String(value)
-                }
-            }
-            if required {
-                throw DecodingError.keyNotFound(
-                    DynamicCodingKey(stringValue: key)!,
-                    DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing required string field \(key)")
-                )
-            }
-            return defaultValue
-        }
-
-        func boolValue(_ key: String, default defaultValue: Bool = false) -> Bool {
-            guard let codingKey = DynamicCodingKey(stringValue: key) else {
-                return defaultValue
-            }
-            if let value = try? container.decode(Bool.self, forKey: codingKey) {
-                return value
-            }
-            if let value = try? container.decode(String.self, forKey: codingKey) {
-                return ["1", "true", "yes", "native"].contains(value.lowercased())
-            }
-            if let value = try? container.decode(Int.self, forKey: codingKey) {
-                return value != 0
-            }
-            return defaultValue
-        }
-
-        self.query = try stringValue("query")
-        self.methodName = try stringValue(
-            "method_name",
-            fallbackKeys: ["methodName"],
-            required: false
-        )
-        self.methodParameterName = try stringValue(
-            "method_parameter_name",
-            fallbackKeys: ["methodParameterName"],
-            required: false
-        )
-        self.methodParameterType = try stringValue(
-            "method_parameter_type",
-            fallbackKeys: ["methodParameterType", "type_name", "typeName"]
-        )
-        self.workflowID = try stringValue(
-            "workflow_id",
-            fallbackKeys: ["workflowID"],
-            required: false
-        )
-        self.debugNativeFindEntities = boolValue("debug_native_find_entities")
-    }
 }
 
 @_silgen_name("$s14ShortcutsAgent017DescribeAShortcutB0V13configuration10workflowID18groundTruthEntries14initialCatalogAcA0B13ConfigurationV_SSSgSDySSSo016WFParameterStateL5EntryCGSgSo0noL0CtKcfcfA2_")
@@ -551,20 +422,33 @@ private func bridgeCopyIRProgram(
 @_silgen_name("bridge_destroy_shortcuts_language_ir_program")
 private func bridgeDestroyIRProgram(_ program: UnsafeMutablePointer<IRProgramStorage>)
 
-@_silgen_name("bridge_shortpy_capture_control_flow_bindings")
-private func bridgeShortpyCaptureControlFlowBindings(
+@_silgen_name("bridge_shortpy_capture_control_flow_plan")
+private func bridgeShortpyCaptureControlFlowPlan(
     _ program: UnsafeMutablePointer<IRProgramStorage>
 ) -> UnsafeMutableRawPointer?
 
-@_silgen_name("bridge_shortpy_destroy_control_flow_bindings")
-private func bridgeShortpyDestroyControlFlowBindings(
-    _ bindings: UnsafeMutableRawPointer
+@_silgen_name("bridge_shortpy_destroy_control_flow_plan")
+private func bridgeShortpyDestroyControlFlowPlan(
+    _ plan: UnsafeMutableRawPointer
 )
 
-@_silgen_name("bridge_shortpy_control_flow_binding_count")
-private func bridgeShortpyControlFlowBindingCount(
-    _ bindings: UnsafeRawPointer
-) -> UInt32
+@_silgen_name("bridge_shortpy_count_function_calls")
+private func bridgeShortpyCountFunctionCalls(
+    _ program: UnsafePointer<IRProgramStorage>,
+    _ functionName: UnsafePointer<CChar>,
+    _ count: UnsafeMutablePointer<UInt32>
+) -> Int32
+
+@_silgen_name("bridge_shortpy_prepare_else_if_witnesses")
+private func bridgeShortpyPrepareElseIfWitnesses(
+    _ program: UnsafeMutablePointer<IRProgramStorage>,
+    _ changeCount: UnsafeMutablePointer<UInt32>
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("bridge_shortpy_destroy_else_if_witness_plan")
+private func bridgeShortpyDestroyElseIfWitnessPlan(
+    _ plan: UnsafeMutableRawPointer
+)
 
 @_silgen_name("bridge_shortpy_recurrence_binding_count")
 private func bridgeShortpyRecurrenceBindingCount(
@@ -603,17 +487,17 @@ private func bridgeShortpyRecurrenceSeedBranchAt(
     _ branchIndex: UInt32
 ) -> UInt32
 
-@_silgen_name("bridge_shortpy_prepare_loop_carried_recurrences")
-private func bridgeShortpyPrepareLoopCarriedRecurrences(
+@_silgen_name("bridge_shortpy_prepare_control_flow_input")
+private func bridgeShortpyPrepareControlFlowInput(
     _ program: UnsafeMutablePointer<IRProgramStorage>,
-    _ bindings: UnsafeRawPointer,
+    _ plan: UnsafeRawPointer,
     _ changeCount: UnsafeMutablePointer<UInt32>
 ) -> Int32
 
-@_silgen_name("bridge_shortpy_rewrite_nested_control_flow_results")
-private func bridgeShortpyRewriteNestedControlFlowResults(
+@_silgen_name("bridge_shortpy_repair_control_flow_output")
+private func bridgeShortpyRepairControlFlowOutput(
     _ program: UnsafeMutablePointer<IRProgramStorage>,
-    _ bindings: UnsafeRawPointer,
+    _ plan: UnsafeRawPointer,
     _ changeCount: UnsafeMutablePointer<UInt32>
 ) -> Int32
 
@@ -695,63 +579,6 @@ private func bridgeDropCommentsPassApplyNative(
     _ pass: UnsafePointer<IRPassStorage>
 ) throws
 
-@_silgen_name("$s14ShortcutsAgent0B7ToolboxV29alwaysIncludedToolIdentifiersACShySSG_tKcfC")
-private func agentToolboxInit(alwaysIncludedToolIdentifiers: Set<String>) throws -> AgentToolboxStorage
-
-@_silgen_name("$s14ShortcutsAgent0B7ToolboxV29alwaysIncludedToolIdentifiersACShySSG_tKcfcfA_")
-private func agentToolboxDefaultAlwaysIncludedToolIdentifiers() -> Set<String>
-
-@_silgen_name("$s14ShortcutsAgent0B7ToolboxV5query_6limitsAC6ResultVSS_SDyAA19ToolEmbeddingRecordV0G4TypeVSiGtYaKF")
-private func agentToolboxQuery(
-    _ query: String,
-    _ limits: [ToolEmbeddingRecordToolTypeStorage: Int],
-    _ toolbox: AgentToolboxStorage
-) async throws -> AgentToolboxResultStorage
-
-@_silgen_name("$s14ShortcutsAgent0B7ToolboxV6ResultV20stringRepresentationSSvg")
-private func agentToolboxResultStringRepresentation(_ result: AgentToolboxResultStorage) -> String
-
-@_silgen_name("bridge_agent_toolbox_result_string_representation")
-private func bridgeAgentToolboxResultStringRepresentation(
-    _ result: UnsafePointer<AgentToolboxResultStorage>
-) -> String
-
-@_silgen_name("bridge_tool_embedding_database_query")
-private func bridgeToolEmbeddingDatabaseQuery(
-    _ query: String,
-    _ limits: [ToolEmbeddingRecordToolTypeStorage: Int],
-    _ database: AnyObject
-) throws -> [ToolEmbeddingRecordToolTypeStorage: [(score: Double, identifier: String)]]
-
-@_silgen_name("$s14ShortcutsAgent16FindEntitiesToolV12toolDatabase7catalog10workflowID18groundTruthEntriesAC0E3Kit0eG0C_So23WFParameterStateCatalogCSSSgSDySSSo0opQ5EntryCGSgtcfC")
-private func findEntitiesToolInit(
-    _ toolDatabase: AnyObject,
-    _ catalog: AnyObject,
-    _ workflowID: String?,
-    _ groundTruthEntries: [String: AnyObject]?
-) -> FindEntitiesToolStorage
-
-@_silgen_name("$s14ShortcutsAgent16FindEntitiesToolV9ArgumentsV11method_name0g11_parameter_H00g1_I5_type5queryAESS_S3StcfC")
-private func findEntitiesArgumentsInit(
-    _ methodName: String,
-    _ methodParameterName: String,
-    _ methodParameterType: String,
-    _ query: String
-) -> FindEntitiesArgumentsStorage
-
-@_silgen_name("$s14ShortcutsAgent16FindEntitiesToolV4call9arguments16agentEventStreamAC6OutputVAC9ArgumentsV_7Combine18PassthroughSubjectCyAA017DescribeAShortcutbI0Os5NeverOGtYaAC5ErrorOYKF")
-private func findEntitiesToolCall(
-    _ arguments: FindEntitiesArgumentsStorage,
-    _ agentEventStream: AnyObject,
-    _ tool: FindEntitiesToolStorage
-) async throws -> FindEntitiesOutputStorage
-
-@_silgen_name("bridge_find_entities_output_content")
-private func findEntitiesOutputContent(_ output: inout FindEntitiesOutputStorage) -> String
-
-@_silgen_name("bridge_make_describe_agent_event_stream")
-private func bridgeMakeDescribeAgentEventStream() -> AnyObject
-
 @_silgen_name("bridge_describe_edit_mode_context_nil")
 private func bridgeDescribeEditModeContextNil(
     _ result: UnsafeMutablePointer<EditModeContextStorage>,
@@ -802,106 +629,6 @@ private func bridgeMakeFlags(
     _ toolVisibility: UnsafePointer<ToolVisibilityFilterStorage>
 )
 
-@_silgen_name("bridge_objc_alloc_class")
-private func bridgeObjcAllocClass(_ className: UnsafePointer<CChar>) -> AnyObject?
-
-@_silgen_name("bridge_objc_class_msg_send0")
-private func bridgeObjcClassMsgSend0(
-    _ className: UnsafePointer<CChar>,
-    _ selectorName: UnsafePointer<CChar>
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_responds")
-private func bridgeObjcResponds(_ object: AnyObject, _ selectorName: UnsafePointer<CChar>) -> Bool
-
-@_silgen_name("bridge_objc_msg_send0")
-private func bridgeObjcMsgSend0(_ object: AnyObject, _ selectorName: UnsafePointer<CChar>) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send_void0")
-private func bridgeObjcMsgSendVoid0(_ object: AnyObject, _ selectorName: UnsafePointer<CChar>)
-
-@_silgen_name("bridge_objc_msg_send_void0_barrier_sync")
-private func bridgeObjcMsgSendVoid0BarrierSync(
-    _ queue: AnyObject,
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>
-)
-
-@_silgen_name("bridge_objc_msg_send1")
-private func bridgeObjcMsgSend1(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: AnyObject?
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send2")
-private func bridgeObjcMsgSend2(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: AnyObject?,
-    _ arg2: AnyObject?
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send3")
-private func bridgeObjcMsgSend3(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: AnyObject?,
-    _ arg2: AnyObject?,
-    _ arg3: AnyObject?
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send4")
-private func bridgeObjcMsgSend4(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: AnyObject?,
-    _ arg2: AnyObject?,
-    _ arg3: AnyObject?,
-    _ arg4: AnyObject?
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send2_bool")
-private func bridgeObjcMsgSend2Bool(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: AnyObject?,
-    _ arg2: AnyObject?,
-    _ arg3: Bool
-) -> AnyObject?
-
-@_silgen_name("bridge_objc_msg_send_uint64")
-private func bridgeObjcMsgSendUInt64(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>
-) -> UInt64
-
-@_silgen_name("bridge_objc_msg_send_uint64_arg")
-private func bridgeObjcMsgSendUInt64Arg(
-    _ object: AnyObject,
-    _ selectorName: UnsafePointer<CChar>,
-    _ arg1: UInt64
-)
-
-@_silgen_name("bridge_shortpy_make_edit_export_workflow")
-private func bridgeShortpyMakeEditExportWorkflow(
-    _ workflow: AnyObject,
-    _ adaptedActionCount: UnsafeMutablePointer<UInt64>
-) -> AnyObject?
-
-@_silgen_name("bridge_shortpy_replace_workflow_action_serialized_parameters")
-private func bridgeShortpyReplaceWorkflowActionSerializedParameters(
-    _ workflow: AnyObject,
-    _ index: UInt64,
-    _ serializedParameters: NSDictionary
-) -> Bool
-
-private func shortHexPrefix<T>(of value: T, maxBytes: Int = 32) -> String {
-    withUnsafeBytes(of: value) { raw in
-        raw.prefix(maxBytes).map { String(format: "%02x", $0) }.joined()
-    }
-}
-
 private func jsonString(_ payload: [String: Any]) -> String {
     guard JSONSerialization.isValidJSONObject(payload),
           let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
@@ -909,6 +636,46 @@ private func jsonString(_ payload: [String: Any]) -> String {
         return "{\"ok\":false,\"error\":\"failed to encode JSON payload\"}"
     }
     return text
+}
+
+private func attachingCompilerTrace(
+    to payloadText: String,
+    capture: UnsafeMutableRawPointer?
+) -> String {
+    var totalBytes = UInt64(0)
+    var returnedBytes = UInt64(0)
+    var truncated = false
+    guard let rawBytes = bridgeCompilerTraceEnd(
+        capture,
+        &totalBytes,
+        &returnedBytes,
+        &truncated
+    ) else {
+        return payloadText
+    }
+    defer { free(rawBytes) }
+
+    guard let payloadData = payloadText.data(using: .utf8),
+          var payload = try? JSONSerialization.jsonObject(
+              with: payloadData,
+              options: []
+          ) as? [String: Any] else {
+        return payloadText
+    }
+    let traceData = Data(
+        bytes: rawBytes,
+        count: Int(returnedBytes)
+    )
+    payload["compiler_trace"] = [
+        "version": 1,
+        "format": "apple-shortcuts-language-debug-stdout",
+        "encoding": "base64",
+        "byte_length": Int(totalBytes),
+        "captured_byte_length": Int(returnedBytes),
+        "truncated": truncated,
+        "data": traceData.base64EncodedString(),
+    ]
+    return jsonString(payload)
 }
 
 private func jsonStringLiteral(_ value: String) -> String {
@@ -955,13 +722,6 @@ private func jsonObject(from text: String) throws -> Any {
         throw bridgeFailure("request JSON was not valid UTF-8")
     }
     return try JSONSerialization.jsonObject(with: data, options: [])
-}
-
-private func resolveEntityRequest(from text: String) throws -> ResolveEntityRequestInput {
-    guard let data = text.data(using: .utf8) else {
-        throw bridgeFailure("resolve_entity request JSON was not valid UTF-8")
-    }
-    return try JSONDecoder().decode(ResolveEntityRequestInput.self, from: data)
 }
 
 private func stringField(
@@ -1056,13 +816,13 @@ private func performObjectSelector(_ object: AnyObject, _ selectorName: String) 
 }
 
 private func objcAlloc(_ className: String) -> AnyObject? {
-    className.withCString { bridgeObjcAllocClass($0) }
+    className.withCString { bridgeObjcAllocClass($0) as AnyObject? }
 }
 
 private func objcClassSend0(_ className: String, _ selectorName: String) -> AnyObject? {
     className.withCString { classCString in
         selectorName.withCString { selectorCString in
-            bridgeObjcClassMsgSend0(classCString, selectorCString)
+            bridgeObjcClassMsgSend0(classCString, selectorCString) as AnyObject?
         }
     }
 }
@@ -1072,7 +832,7 @@ private func objcResponds(_ object: AnyObject, _ selectorName: String) -> Bool {
 }
 
 private func objcSend0(_ object: AnyObject, _ selectorName: String) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend0(object, $0) }
+    selectorName.withCString { bridgeObjcMsgSend0(object, $0) as AnyObject? }
 }
 
 private func objcSendVoid0(_ object: AnyObject, _ selectorName: String) {
@@ -1085,7 +845,9 @@ private func objcSendVoid0BarrierSync(on queue: AnyObject, object: AnyObject, se
 
 @discardableResult
 private func objcSend1(_ object: AnyObject, _ selectorName: String, _ arg1: AnyObject?) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend1(object, $0, arg1) }
+    selectorName.withCString {
+        bridgeObjcMsgSend1(object, $0, arg1) as AnyObject?
+    }
 }
 
 private func objcSend2(
@@ -1094,7 +856,9 @@ private func objcSend2(
     _ arg1: AnyObject?,
     _ arg2: AnyObject?
 ) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend2(object, $0, arg1, arg2) }
+    selectorName.withCString {
+        bridgeObjcMsgSend2(object, $0, arg1, arg2) as AnyObject?
+    }
 }
 
 private func objcSend3(
@@ -1104,7 +868,9 @@ private func objcSend3(
     _ arg2: AnyObject?,
     _ arg3: AnyObject?
 ) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend3(object, $0, arg1, arg2, arg3) }
+    selectorName.withCString {
+        bridgeObjcMsgSend3(object, $0, arg1, arg2, arg3) as AnyObject?
+    }
 }
 
 private func objcSend4(
@@ -1115,7 +881,9 @@ private func objcSend4(
     _ arg3: AnyObject?,
     _ arg4: AnyObject?
 ) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend4(object, $0, arg1, arg2, arg3, arg4) }
+    selectorName.withCString {
+        bridgeObjcMsgSend4(object, $0, arg1, arg2, arg3, arg4) as AnyObject?
+    }
 }
 
 private func objcSend2Bool(
@@ -1125,7 +893,9 @@ private func objcSend2Bool(
     _ arg2: AnyObject?,
     _ arg3: Bool
 ) -> AnyObject? {
-    selectorName.withCString { bridgeObjcMsgSend2Bool(object, $0, arg1, arg2, arg3) }
+    selectorName.withCString {
+        bridgeObjcMsgSend2Bool(object, $0, arg1, arg2, arg3) as AnyObject?
+    }
 }
 
 private func objcSendUInt64(_ object: AnyObject, _ selectorName: String) -> UInt64? {
@@ -1990,15 +1760,33 @@ private func compileSource(
     )
 }
 
+private func shortpyCompilerDebug(
+    _ enabled: Bool,
+    _ message: @autoclosure () -> String
+) {
+    guard enabled else {
+        return
+    }
+    print(message())
+}
+
+private func shortpyCompilerDebugSeparator(_ enabled: Bool) {
+    shortpyCompilerDebug(enabled, "---")
+    shortpyCompilerDebug(enabled, "")
+}
+
 private func applyShortpyFixpointPass(
     name: String,
     program: inout IRProgramStorage,
+    debugTrace: Bool,
     limit: Int = 64,
     applyOnce: (inout IRProgramStorage) throws -> Void
 ) throws -> ShortpyPassReport {
+    shortpyCompilerDebug(debugTrace, "> Running \(name)")
     var calls = 0
     var changes = 0
     while calls < limit {
+        let iteration = calls
         var before = IRProgramStorage()
         guard bridgeCopyIRProgram(&before, &program) else {
             throw RuntimeBridgeError(
@@ -2006,11 +1794,25 @@ private func applyShortpyFixpointPass(
             )
         }
         do {
+            shortpyCompilerDebug(
+                debugTrace,
+                "apply until fixpoint iteration \(iteration)"
+            )
+            shortpyCompilerDebug(
+                debugTrace,
+                "ITER \(iteration) IN: \(bridgeIRProgramPrint(&before))"
+            )
             calls += 1
             try applyOnce(&program)
+            shortpyCompilerDebug(
+                debugTrace,
+                "ITER \(iteration) OUT: \(bridgeIRProgramPrint(&program))"
+            )
             let stable = bridgeIRProgramEqual(&before, &program)
             bridgeDestroyIRProgram(&before)
             if stable {
+                shortpyCompilerDebug(debugTrace, "> Done")
+                shortpyCompilerDebug(debugTrace, "")
                 return ShortpyPassReport(
                     name: name,
                     calls: calls,
@@ -2033,8 +1835,10 @@ private func applyShortpyFixpointPass(
 private func applyShortpyOwnedPass(
     name: String,
     program: inout IRProgramStorage,
+    debugTrace: Bool,
     apply: (UnsafeMutablePointer<IRProgramStorage>, UnsafeMutablePointer<UInt32>) -> Int32
 ) throws -> ShortpyPassReport {
+    shortpyCompilerDebug(debugTrace, "> Running \(name)")
     var changes = UInt32(0)
     guard apply(&program, &changes) == 0 else {
         let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
@@ -2042,6 +1846,11 @@ private func applyShortpyOwnedPass(
         throw RuntimeBridgeError(description: "\(name) failed: \(diagnostic)")
     }
     let trace = bridgeShortpyIRAdapterLastTrace().map(String.init(cString:)) ?? ""
+    if !trace.isEmpty {
+        shortpyCompilerDebug(debugTrace, trace)
+    }
+    shortpyCompilerDebug(debugTrace, "> Done")
+    shortpyCompilerDebug(debugTrace, "")
     return ShortpyPassReport(
         name: name,
         calls: 1,
@@ -2052,9 +1861,9 @@ private func applyShortpyOwnedPass(
 }
 
 private func shortpyRecurrencePlans(
-    _ bindings: UnsafeRawPointer
+    _ plan: UnsafeRawPointer
 ) throws -> [ShortpyRecurrencePlan] {
-    let count = bridgeShortpyRecurrenceBindingCount(bindings)
+    let count = bridgeShortpyRecurrenceBindingCount(plan)
     return try (0..<count).map { recurrenceIndex in
         func branches(
             count: UInt32,
@@ -2072,7 +1881,7 @@ private func shortpyRecurrencePlans(
         }
 
         let controlKind = bridgeShortpyRecurrenceControlKind(
-            bindings, recurrenceIndex
+            plan, recurrenceIndex
         )
         guard controlKind == 1 || controlKind == 2 else {
             throw RuntimeBridgeError(
@@ -2081,21 +1890,21 @@ private func shortpyRecurrencePlans(
         }
         let targetBranches = try branches(
             count: bridgeShortpyRecurrenceTargetBranchCount(
-                bindings, recurrenceIndex
+                plan, recurrenceIndex
             ),
             at: {
                 bridgeShortpyRecurrenceTargetBranchAt(
-                    bindings, recurrenceIndex, $0
+                    plan, recurrenceIndex, $0
                 )
             }
         )
         let seedBranches = try branches(
             count: bridgeShortpyRecurrenceSeedBranchCount(
-                bindings, recurrenceIndex
+                plan, recurrenceIndex
             ),
             at: {
                 bridgeShortpyRecurrenceSeedBranchAt(
-                    bindings, recurrenceIndex, $0
+                    plan, recurrenceIndex, $0
                 )
             }
         )
@@ -2112,6 +1921,150 @@ private func shortpyRecurrencePlans(
     }
 }
 
+private struct ShortpyImplicitActionRule {
+    let displayName: String
+    let functionName: String
+    let actionIdentifier: String
+}
+
+private let shortpyImplicitActionRules = [
+    ShortpyImplicitActionRule(
+        displayName: "List",
+        functionName: "com_apple_shortcuts_list",
+        actionIdentifier: "is.workflow.actions.list"
+    ),
+    ShortpyImplicitActionRule(
+        displayName: "Text",
+        functionName: "com_apple_shortcuts_text",
+        actionIdentifier: "is.workflow.actions.gettext"
+    ),
+    ShortpyImplicitActionRule(
+        displayName: "Dictionary",
+        functionName: "com_apple_shortcuts_dictionary",
+        actionIdentifier: "is.workflow.actions.dictionary"
+    ),
+    ShortpyImplicitActionRule(
+        displayName: "Nothing",
+        functionName: "com_apple_shortcuts_nothing",
+        actionIdentifier: "is.workflow.actions.nothing"
+    ),
+    ShortpyImplicitActionRule(
+        displayName: "Set Variable",
+        functionName: "com_apple_shortcuts_set_variable",
+        actionIdentifier: "is.workflow.actions.setvariable"
+    ),
+    ShortpyImplicitActionRule(
+        displayName: "Add to Variable",
+        functionName: "com_apple_shortcuts_add_to_variable",
+        actionIdentifier: "is.workflow.actions.appendvariable"
+    ),
+]
+
+private func shortpyExplicitCallCount(
+    _ rule: ShortpyImplicitActionRule,
+    program: inout IRProgramStorage
+) throws -> Int {
+    var count = UInt32(0)
+    let status = withUnsafePointer(to: &program) { programPointer in
+        rule.functionName.withCString { functionName in
+            bridgeShortpyCountFunctionCalls(
+                programPointer, functionName, &count
+            )
+        }
+    }
+    guard status == 0 else {
+        let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
+            ?? "unknown native IR adapter error"
+        throw RuntimeBridgeError(
+            description: "Shortpy action provenance inspection failed: \(diagnostic)"
+        )
+    }
+    return Int(count)
+}
+
+private func shortpyExplicitCallCounts(
+    program: inout IRProgramStorage
+) throws -> [String: Int] {
+    var counts: [String: Int] = [:]
+    for rule in shortpyImplicitActionRules {
+        counts[rule.functionName] = try shortpyExplicitCallCount(
+            rule, program: &program
+        )
+    }
+    return counts
+}
+
+private func shortpyNativeActionIdentifierCounts(
+    _ workflow: AnyObject
+) throws -> [String: Int] {
+    guard let actions = performObjectSelector(workflow, "actions") as? NSArray else {
+        throw RuntimeBridgeError(
+            description: "WFWorkflow did not expose actions for Shortpy action provenance"
+        )
+    }
+    var counts: [String: Int] = [:]
+    for index in 0..<actions.count {
+        let action = actions[index] as AnyObject
+        guard let identifier = stringFromObject(
+            performObjectSelector(action, "identifier")
+        ), !identifier.isEmpty else {
+            throw RuntimeBridgeError(
+                description: "WFAction at index \(index) has no identifier for Shortpy action provenance"
+            )
+        }
+        counts[identifier, default: 0] += 1
+    }
+    return counts
+}
+
+private func validateShortpyImplicitActionBoundary(
+    explicitCallCounts: [String: Int],
+    workflow: AnyObject,
+    debugTrace: Bool
+) throws -> [[String: Any]] {
+    let nativeCounts = try shortpyNativeActionIdentifierCounts(workflow)
+    var report: [[String: Any]] = []
+    var violations: [String] = []
+    shortpyCompilerDebug(
+        debugTrace,
+        "> Checking ShortpyImplicitActionBoundary"
+    )
+    for rule in shortpyImplicitActionRules {
+        guard let explicitCount = explicitCallCounts[rule.functionName] else {
+            throw RuntimeBridgeError(
+                description: "missing pre-backend provenance for \(rule.functionName)"
+            )
+        }
+        let nativeCount = nativeCounts[rule.actionIdentifier, default: 0]
+        let implicitCount = max(0, nativeCount - explicitCount)
+        report.append([
+            "actionIdentifier": rule.actionIdentifier,
+            "displayName": rule.displayName,
+            "explicitFunction": rule.functionName,
+            "explicitCallCount": explicitCount,
+            "nativeActionCount": nativeCount,
+            "implicitActionCount": implicitCount,
+        ])
+        shortpyCompilerDebug(
+            debugTrace,
+            "\(rule.actionIdentifier): explicit=\(explicitCount) native=\(nativeCount) implicit=\(implicitCount)"
+        )
+        if implicitCount > 0 {
+            violations.append(
+                "\(rule.displayName) generated \(implicitCount) implicit action(s); use \(rule.functionName)(...)"
+            )
+        }
+    }
+    guard violations.isEmpty else {
+        throw RuntimeBridgeError(
+            description: "implicit action lowering is disabled: "
+                + violations.joined(separator: "; ")
+        )
+    }
+    shortpyCompilerDebug(debugTrace, "> Done")
+    return report
+}
+
 private func ShortpyToShortcut(
     _ source: String,
     catalogOverride: AnyObject? = nil,
@@ -2125,6 +2078,8 @@ private func ShortpyToShortcut(
     // shared by PythonToIR, IRToShortcut, and both matchers.
     let database = try freshToolDatabase()
     var flags = makeCompilerFlags()
+    let debugTrace = flags.logLevel == 0
+    let traceStartedAt = DispatchTime.now().uptimeNanoseconds
 
     var backendContextSize = UInt32(0)
     var backendConformance: UnsafeRawPointer?
@@ -2154,6 +2109,11 @@ private func ShortpyToShortcut(
         bridgeDestroyShortcutsLanguageIRBackend(backend)
     }
 
+    shortpyCompilerDebug(debugTrace, "--- Stage 0: Input ---")
+    shortpyCompilerDebug(debugTrace, source)
+    shortpyCompilerDebugSeparator(debugTrace)
+
+    shortpyCompilerDebug(debugTrace, "--- Stage 1: IR ---")
     let frontend = bridgePythonToIRInit(&flags.flags, database)
     var frontendResult = FrontendResultStorage()
     try bridgePythonToIRVisitIntoThrowing(&frontendResult, source, frontend)
@@ -2167,40 +2127,51 @@ private func ShortpyToShortcut(
     defer {
         bridgeDestroyIRProgram(&program)
     }
-    let frontendIR = "opaque IRProgram (IRPrintable capture is not on the compiler path)"
+    let frontendIR = bridgeIRProgramPrint(&program)
+    shortpyCompilerDebug(debugTrace, frontendIR)
+    shortpyCompilerDebugSeparator(debugTrace)
 
-    guard let controlFlowBindings = bridgeShortpyCaptureControlFlowBindings(&program) else {
+    shortpyCompilerDebug(debugTrace, "--- Stage 2: IR Passes ---")
+    shortpyCompilerDebug(debugTrace, "> Running ShortpyControlFlowPlan")
+
+    guard let controlFlowPlan = bridgeShortpyCaptureControlFlowPlan(&program) else {
         let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
-            ?? "unknown control-flow binding capture error"
+            ?? "unknown control-flow plan error"
         throw RuntimeBridgeError(
-            description: "Shortpy control-flow binding capture failed: \(diagnostic)"
+            description: "Shortpy control-flow planning failed: \(diagnostic)"
         )
     }
     defer {
-        bridgeShortpyDestroyControlFlowBindings(controlFlowBindings)
+        bridgeShortpyDestroyControlFlowPlan(controlFlowPlan)
     }
-    let recurrencePlans = try shortpyRecurrencePlans(controlFlowBindings)
-    let bindingCaptureTrace = bridgeShortpyIRAdapterLastTrace().map(String.init(cString:)) ?? ""
-    let bindingCaptureReport = ShortpyPassReport(
-        name: "ShortpyControlFlowBindingCapture",
+    let recurrencePlans = try shortpyRecurrencePlans(controlFlowPlan)
+    let controlFlowPlanTrace = bridgeShortpyIRAdapterLastTrace().map(String.init(cString:)) ?? ""
+    if !controlFlowPlanTrace.isEmpty {
+        shortpyCompilerDebug(debugTrace, controlFlowPlanTrace)
+    }
+    shortpyCompilerDebug(debugTrace, "> Done")
+    shortpyCompilerDebug(debugTrace, "")
+    let controlFlowPlanReport = ShortpyPassReport(
+        name: "ShortpyControlFlowPlan",
         calls: 1,
-        changes: Int(bridgeShortpyControlFlowBindingCount(controlFlowBindings)),
+        changes: 0,
         input: "untouched frontend IRProgram value",
-        output: bindingCaptureTrace.isEmpty
-            ? "lexically scoped native statement bindings"
-            : bindingCaptureTrace
+        output: controlFlowPlanTrace.isEmpty
+            ? "read-only native statement plan"
+            : controlFlowPlanTrace
     )
 
     var controlFlowPass = IRPassStorage()
     bridgeControlFlowPassInit(&controlFlowPass, &flags.flags)
 
-    let recurrenceReport = try applyShortpyOwnedPass(
-        name: "ShortpyLoopCarriedRecurrencePreparationPass",
+    let controlFlowInputReport = try applyShortpyOwnedPass(
+        name: "ShortpyControlFlowInputPreparation",
         program: &program,
+        debugTrace: debugTrace,
         apply: { program, changes in
-            return bridgeShortpyPrepareLoopCarriedRecurrences(
+            return bridgeShortpyPrepareControlFlowInput(
                 program,
-                controlFlowBindings,
+                controlFlowPlan,
                 changes
             )
         }
@@ -2208,16 +2179,31 @@ private func ShortpyToShortcut(
 
     let controlFlowReport = try applyShortpyFixpointPass(
         name: "ControlFlowOutputInferencePass",
-        program: &program
+        program: &program,
+        debugTrace: debugTrace
     ) { program in
         try bridgeControlFlowPassApplyOnceThrowing(&program, &controlFlowPass)
     }
+
+    let controlFlowOutputReport = try applyShortpyOwnedPass(
+        name: "ShortpyControlFlowOutputRepair",
+        program: &program,
+        debugTrace: debugTrace,
+        apply: { program, changes in
+            bridgeShortpyRepairControlFlowOutput(
+                program,
+                controlFlowPlan,
+                changes
+            )
+        }
+    )
 
     var variableInliningPass = IRPassStorage()
     bridgeVariableInliningPassInit(&variableInliningPass, &flags.flags)
     let variableInliningReport = try applyShortpyFixpointPass(
         name: "VariableInliningPass",
-        program: &program
+        program: &program,
+        debugTrace: debugTrace
     ) { program in
         try bridgeVariableInliningPassApplyOnceThrowing(
             &program,
@@ -2227,7 +2213,10 @@ private func ShortpyToShortcut(
 
     var dropCommentsPass = IRPassStorage()
     bridgeDropCommentsPassInit(&dropCommentsPass, &flags.flags)
+    shortpyCompilerDebug(debugTrace, "> Running DropCommentsPass")
     try bridgeDropCommentsPassApplyThrowing(&program, &dropCommentsPass)
+    shortpyCompilerDebug(debugTrace, "> Done")
+    shortpyCompilerDebug(debugTrace, "")
     let dropCommentsReport = ShortpyPassReport(
         name: "DropCommentsPass",
         calls: 1,
@@ -2236,35 +2225,128 @@ private func ShortpyToShortcut(
         output: "native IRProgram value"
     )
 
-    let nestedControlFlowReport = try applyShortpyOwnedPass(
-        name: "ShortpyNestedControlFlowResultPass",
-        program: &program,
-        apply: { program, changes in
-            bridgeShortpyRewriteNestedControlFlowResults(
-                program,
-                controlFlowBindings,
-                changes
+    let finalIR = bridgeIRProgramPrint(&program)
+    shortpyCompilerDebug(debugTrace, finalIR)
+    shortpyCompilerDebugSeparator(debugTrace)
+
+    // Nothing may inspect the IRProgram after this point except Apple's
+    // backend. The compatibility adapter mutates this now-ephemeral value.
+    let explicitCallCounts = try shortpyExplicitCallCounts(program: &program)
+    shortpyCompilerDebug(
+        debugTrace,
+        "> Running ShortpyElseIfConditionWitnessPreparation"
+    )
+    var elseIfWitnessInsertions = UInt32(0)
+    guard let elseIfWitnessPlan = bridgeShortpyPrepareElseIfWitnesses(
+        &program, &elseIfWitnessInsertions
+    ) else {
+        let diagnostic = bridgeShortpyIRAdapterLastError().map(String.init(cString:))
+            ?? "unknown Else If witness preparation error"
+        throw RuntimeBridgeError(
+            description: "ShortpyElseIfConditionWitnessPreparation failed: \(diagnostic)"
+        )
+    }
+    defer {
+        bridgeShortpyDestroyElseIfWitnessPlan(elseIfWitnessPlan)
+    }
+    let elseIfWitnessTrace = bridgeShortpyIRAdapterLastTrace().map(
+        String.init(cString:)
+    ) ?? ""
+    if !elseIfWitnessTrace.isEmpty {
+        shortpyCompilerDebug(debugTrace, elseIfWitnessTrace)
+    }
+    shortpyCompilerDebug(debugTrace, "> Done")
+    shortpyCompilerDebug(debugTrace, "")
+
+    shortpyCompilerDebug(debugTrace, "--- Stage 3: Workflow generation ---")
+    let compiled = try await bridgeShortpyBackendSelected(&program, backend)
+    let compiledObjects = compiledShortcutObjectView(compiled)
+    let repeatResultLowering: [[String: Any]] = []
+    var elseIfConditionRepairs = UInt32(0)
+    var elseIfElseInsertions = UInt32(0)
+    var elseIfWitnessMarkersRemoved = UInt32(0)
+    let protectedActionProvenance: [[String: Any]]
+    if let workflow = compiledObjects.preferredWorkflow {
+        guard bridgeShortpyRepairElseIfWitnesses(
+            workflow,
+            elseIfWitnessPlan,
+            &elseIfConditionRepairs,
+            &elseIfElseInsertions,
+            &elseIfWitnessMarkersRemoved
+        ) else {
+            let diagnostic = bridgeShortpyElseIfRepairLastError().map(
+                String.init(cString:)
+            ) ?? "unknown Else If workflow repair error"
+            throw RuntimeBridgeError(
+                description: "Shortpy Else If workflow repair failed: \(diagnostic)"
             )
         }
+        shortpyCompilerDebug(debugTrace, String(describing: workflow))
+        protectedActionProvenance = try validateShortpyImplicitActionBoundary(
+            explicitCallCounts: explicitCallCounts,
+            workflow: workflow,
+            debugTrace: debugTrace
+        )
+    } else {
+        if elseIfWitnessInsertions != 0 {
+            throw RuntimeBridgeError(
+                description: "IRToShortcut returned no WFWorkflow for Else If witness repair"
+            )
+        }
+        protectedActionProvenance = []
+    }
+    let elseIfConditionLowering: [String: Any] = [
+        "architecture": "terminal-in-place native mode-0 witnesses",
+        "witnessInsertions": Int(elseIfWitnessInsertions),
+        "conditionRepairs": Int(elseIfConditionRepairs),
+        "elseInsertions": Int(elseIfElseInsertions),
+        "witnessMarkersRemoved": Int(elseIfWitnessMarkersRemoved),
+        "conditionSerialization": "Apple IRToShortcut",
+        "workflowCommit": "single validated setActions:",
+    ]
+    let elseIfWitnessReport = ShortpyPassReport(
+        name: "ShortpyElseIfConditionWitnessPreparation",
+        calls: 1,
+        changes: Int(elseIfWitnessInsertions),
+        input: "canonical final IR captured before terminal mutation",
+        output: [
+            elseIfWitnessTrace,
+            "condition_repairs=\(elseIfConditionRepairs)",
+            "else_insertions=\(elseIfElseInsertions)",
+            "witness_markers_removed=\(elseIfWitnessMarkersRemoved)",
+        ].filter { !$0.isEmpty }.joined(separator: " ")
     )
+    shortpyCompilerDebugSeparator(debugTrace)
 
-    let compiled = try await bridgeShortpyBackendSelected(&program, backend)
+    // Apple's tool configures no workflow validators, but its generic Compiler
+    // still emits the Stage 4 boundary before returning a successful result.
+    shortpyCompilerDebug(debugTrace, "--- Stage 4: Workflow validation ---")
+    shortpyCompilerDebugSeparator(debugTrace)
+    let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds - traceStartedAt
+    shortpyCompilerDebug(
+        debugTrace,
+        "Took \(Double(elapsedNanoseconds) / 1_000_000_000)s"
+    )
     return ShortpyCompileRun(
         catalog: catalog,
         catalogSource: resolvedCatalogSource,
         flags: flags,
         compiled: compiled,
         frontendIR: frontendIR,
-        finalIR: "opaque IRProgram (IRPrintable capture is not on the compiler path)",
+        finalIR: finalIR,
         passes: [
-            bindingCaptureReport,
-            recurrenceReport,
+            controlFlowPlanReport,
+            controlFlowInputReport,
             controlFlowReport,
+            controlFlowOutputReport,
             variableInliningReport,
             dropCommentsReport,
-            nestedControlFlowReport,
+            elseIfWitnessReport,
         ],
         recurrencePlans: recurrencePlans,
+        repeatResultLowering: repeatResultLowering,
+        elseIfConditionLowering: elseIfConditionLowering,
+        protectedActionProvenance: protectedActionProvenance,
         frontendPolicyDecisions: frontendPolicyDecisions,
         backendContextSize: backendContextSize,
         backendConformance: backendConformance
@@ -2316,6 +2398,9 @@ private func compileWithRuntimePipeline(
                 "entrypoint": "ShortpyToShortcut",
                 "passes": run.passes.map(\.json),
                 "recurrencePlans": run.recurrencePlans.map(\.json),
+                "repeatResultLowering": run.repeatResultLowering,
+                "elseIfConditionLowering": run.elseIfConditionLowering,
+                "protectedActionProvenance": run.protectedActionProvenance,
                 "backend_context_size": Int(run.backendContextSize),
                 "backend_conformance": pointerString(run.backendConformance),
             ]
@@ -2330,30 +2415,13 @@ private func pointerString(_ pointer: UnsafeRawPointer?) -> String {
     return String(format: "0x%016llx", UInt64(UInt(bitPattern: pointer)))
 }
 
-private func appendRecordFileProbeStage(_ stage: String) {
-    let path = "/tmp/shortcuts-record-file-probe-stage.log"
-    let line = "\(ISO8601DateFormatter().string(from: Date())) \(stage)\n"
-    guard let data = line.data(using: .utf8) else {
-        return
-    }
-    if !FileManager.default.fileExists(atPath: path) {
-        FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
-    }
-    guard let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) else {
-        return
-    }
-    handle.seekToEndOfFile()
-    handle.write(data)
-    try? handle.close()
-}
-
 private func workflowRecordFileDataPayloadFromWorkflow(
     _ workflow: AnyObject,
     trigger: AnyObject?,
     callSaveToRecord: Bool,
-    recurrencePlans: [ShortpyRecurrencePlan] = []
+    recurrencePlans: [ShortpyRecurrencePlan] = [],
+    reifyVariableReferences: Bool = false
 ) throws -> WorkflowFileDataPayload {
-    appendRecordFileProbeStage("enter workflow=\(objectPointerString(workflow)) callSaveToRecord=\(callSaveToRecord)")
     guard objcResponds(workflow, "saveToRecord") else {
         throw bridgeFailure("WFWorkflow is missing saveToRecord")
     }
@@ -2368,57 +2436,44 @@ private func workflowRecordFileDataPayloadFromWorkflow(
         workflow,
         plans: recurrencePlans
     )
+    let nativeVariableReferenceReport = reifyVariableReferences
+        ? try applyShortpyVariableReferenceReification(workflow)
+        : []
 
-    appendRecordFileProbeStage("before recordBefore")
     let recordBefore = performObjectSelector(workflow, "record")
-    appendRecordFileProbeStage("after recordBefore record=\(objectPointerString(recordBefore))")
     if callSaveToRecord {
-        appendRecordFileProbeStage("before databaseAccessQueue")
         guard let databaseAccessQueue = performObjectSelector(workflow, "databaseAccessQueue") else {
             throw bridgeFailure("WFWorkflow databaseAccessQueue returned nil")
         }
-        appendRecordFileProbeStage("after databaseAccessQueue queue=\(objectPointerString(databaseAccessQueue))")
-        appendRecordFileProbeStage("before saveToRecord barrier")
         objcSendVoid0BarrierSync(on: databaseAccessQueue, object: workflow, selectorName: "saveToRecord")
-        appendRecordFileProbeStage("after saveToRecord barrier")
-    } else {
-        appendRecordFileProbeStage("skip saveToRecord")
     }
 
-    appendRecordFileProbeStage("before recordAfter")
     guard let record = performObjectSelector(workflow, "record") else {
         throw bridgeFailure("WFWorkflow record returned nil after saveToRecord")
     }
-    appendRecordFileProbeStage("after recordAfter record=\(objectPointerString(record))")
     guard objcResponds(record, "fileRepresentation") else {
         throw bridgeFailure("\(objectClassName(record)) is missing fileRepresentation")
     }
-    appendRecordFileProbeStage("before fileRepresentation")
     guard let file = performObjectSelector(record, "fileRepresentation") else {
         throw bridgeFailure("WFWorkflowRecord fileRepresentation returned nil")
     }
-    appendRecordFileProbeStage("after fileRepresentation file=\(objectPointerString(file))")
     guard objcResponds(file, "fileDataWithError:") else {
         throw bridgeFailure("\(objectClassName(file)) is missing fileDataWithError:")
     }
-    appendRecordFileProbeStage("before fileDataWithError")
     guard let dataObject = objcSend1(file, "fileDataWithError:", nil) else {
         throw bridgeFailure("WFWorkflowRecord fileRepresentation fileDataWithError: returned nil")
     }
-    appendRecordFileProbeStage("after fileDataWithError data=\(objectPointerString(dataObject))")
     guard let nsData = dataObject as? NSData else {
         throw bridgeFailure("fileDataWithError: returned \(objectClassName(dataObject)), expected NSData")
     }
 
     let data = Data(bytes: nsData.bytes, count: nsData.length)
-    appendRecordFileProbeStage("before plist parse length=\(data.count)")
     var format = PropertyListSerialization.PropertyListFormat.binary
     let rootObject = try PropertyListSerialization.propertyList(
         from: data,
         options: [],
         format: &format
     )
-    appendRecordFileProbeStage("after plist parse")
     guard let root = rootObject as? NSDictionary else {
         throw bridgeFailure("WFWorkflowRecord fileRepresentation data decoded to \(type(of: rootObject)), expected NSDictionary")
     }
@@ -2426,7 +2481,6 @@ private func workflowRecordFileDataPayloadFromWorkflow(
     let finalData = data
     let actions = finalRoot["WFWorkflowActions"] as? NSArray
     let triggers = finalRoot["WFWorkflowTriggers"] as? NSArray
-    retainRecordFileNativeObjects([workflow, recordBefore, record, file, dataObject])
     return WorkflowFileDataPayload(
         data: finalData,
         fileSummary: [
@@ -2444,6 +2498,10 @@ private func workflowRecordFileDataPayloadFromWorkflow(
             "shortpy_recurrence_boundary": recurrencePlans.isEmpty
                 ? "not-required"
                 : "native WFAction reconstruction before WFWorkflow.saveToRecord",
+            "shortpy_variable_reference_reification": nativeVariableReferenceReport,
+            "shortpy_variable_reference_boundary": reifyVariableReferences
+                ? "native WFAction reconstruction before WFWorkflow.saveToRecord"
+                : "not-enabled",
         ],
         rootSummary: rootSummary(finalRoot),
         actionsSummary: objectSummary(actions),
@@ -2865,11 +2923,13 @@ private func applyShortpyRecurrenceToWorkflow(
         if originalParameters.isEqual(rewrittenParameters) {
             continue
         }
-        guard bridgeShortpyReplaceWorkflowActionSerializedParameters(
-            workflow,
-            UInt64(index),
-            rewrittenParameters
-        ) else {
+        guard let importedParameters =
+                  rewrittenParameters as? [AnyHashable: Any],
+              bridgeShortpyReplaceWorkflowActionSerializedParameters(
+                  workflow,
+                  UInt64(index),
+                  importedParameters
+              ) else {
             throw bridgeFailure(
                 "unsupportedLoopCarriedRecurrence: failed to reconstruct native WFAction at index \(index)"
             )
@@ -2882,6 +2942,182 @@ private func applyShortpyRecurrenceToWorkflow(
         )
     }
     return lowering.report.map { entry in
+        var nativeEntry = entry
+        nativeEntry["nativeMutation"] = [
+            "boundary": "WFAction initWithIdentifier:definition:serializedParameters:",
+            "actionIndices": mutatedActionIndices,
+            "before": "WFWorkflow.saveToRecord",
+        ]
+        return nativeEntry
+    }
+}
+
+private let shortpyVariableMutationIdentifiers = Set([
+    "is.workflow.actions.setvariable",
+    "is.workflow.actions.appendvariable",
+])
+
+private func shortpyReifiedVariableReferences(
+    _ value: Any,
+    variableByUUID: [String: String],
+    path: [String],
+    rewrites: inout [[String: Any]]
+) -> Any {
+    if let dictionary = value as? NSDictionary {
+        let type = stringFromObject(dictionary["Type"] as AnyObject?)
+        let outputUUID = stringFromObject(
+            dictionary["OutputUUID"] as AnyObject?
+        )
+        if type == "ActionOutput",
+           let outputUUID,
+           let variableName = variableByUUID[outputUUID] {
+            let replacement = NSMutableDictionary(dictionary: dictionary)
+            replacement.removeObject(forKey: "OutputUUID")
+            replacement.removeObject(forKey: "OutputName")
+            replacement["Type"] = "Variable" as NSString
+            replacement["VariableName"] = variableName as NSString
+            rewrites.append([
+                "parameterPath": path,
+                "fromType": "ActionOutput",
+                "fromOutputUUID": outputUUID,
+                "toType": "Variable",
+                "variableName": variableName,
+            ])
+            return replacement
+        }
+
+        let replacement = NSMutableDictionary(capacity: dictionary.count)
+        for (key, child) in dictionary {
+            let component = stringFromObject(key as AnyObject?)
+                ?? String(describing: key)
+            replacement[key] = shortpyReifiedVariableReferences(
+                child,
+                variableByUUID: variableByUUID,
+                path: path + [component],
+                rewrites: &rewrites
+            )
+        }
+        return replacement
+    }
+
+    if let array = value as? NSArray {
+        let replacement = NSMutableArray(capacity: array.count)
+        for index in 0..<array.count {
+            replacement.add(shortpyReifiedVariableReferences(
+                array[index],
+                variableByUUID: variableByUUID,
+                path: path + ["[\(index)]"],
+                rewrites: &rewrites
+            ))
+        }
+        return replacement
+    }
+    return value
+}
+
+private func applyShortpyVariableReferenceReification(
+    _ workflow: AnyObject
+) throws -> [[String: Any]] {
+    guard let workflowActions = performObjectSelector(
+        workflow, "actions"
+    ) as? NSArray else {
+        throw bridgeFailure(
+            "WFWorkflow did not return actions for native variable-reference reification"
+        )
+    }
+    let snapshots = try shortpySerializedActionSnapshots(workflowActions)
+    var variableByUUID: [String: String] = [:]
+    for case let action as NSDictionary in snapshots {
+        guard let identifier = stringFromObject(
+            action["WFWorkflowActionIdentifier"] as AnyObject?
+        ), shortpyVariableMutationIdentifiers.contains(identifier) else {
+            continue
+        }
+        let parameters = shortpyActionParameters(action)
+        guard let variableName = stringFromObject(
+            parameters["WFVariableName"] as AnyObject?
+        ), !variableName.isEmpty,
+        let uuid = shortpyActionUUID(action), !uuid.isEmpty else {
+            continue
+        }
+        variableByUUID[uuid] = variableName
+    }
+    guard !variableByUUID.isEmpty else {
+        return []
+    }
+
+    var rewrittenParameters: [NSDictionary] = []
+    var report: [[String: Any]] = []
+    for index in 0..<snapshots.count {
+        guard let action = snapshots[index] as? NSDictionary,
+              let identifier = stringFromObject(
+                action["WFWorkflowActionIdentifier"] as AnyObject?
+              ) else {
+            throw bridgeFailure(
+                "native variable-reference reification found a malformed action at index \(index)"
+            )
+        }
+        let parameters = shortpyActionParameters(action)
+        var rewrites: [[String: Any]] = []
+        guard let rewrittenValue = shortpyReifiedVariableReferences(
+            parameters,
+            variableByUUID: variableByUUID,
+            path: [],
+            rewrites: &rewrites
+        ) as? NSDictionary else {
+            throw bridgeFailure(
+                "native variable-reference reification produced invalid parameters at index \(index)"
+            )
+        }
+        let rewritten = NSMutableDictionary(dictionary: rewrittenValue)
+        let removedProducerUUID: String?
+        if shortpyVariableMutationIdentifiers.contains(identifier),
+           let uuid = stringFromObject(rewritten["UUID"] as AnyObject?) {
+            rewritten.removeObject(forKey: "UUID")
+            removedProducerUUID = uuid
+        } else {
+            removedProducerUUID = nil
+        }
+        rewrittenParameters.append(rewritten)
+        if !rewrites.isEmpty || removedProducerUUID != nil {
+            var entry: [String: Any] = [
+                "actionIndex": index,
+                "actionIdentifier": identifier,
+                "rewrites": rewrites,
+            ]
+            if let removedProducerUUID {
+                entry["removedProducerUUID"] = removedProducerUUID
+            }
+            report.append(entry)
+        }
+    }
+
+    var mutatedActionIndices: [Int] = []
+    for index in 0..<snapshots.count {
+        guard let action = snapshots[index] as? NSDictionary else {
+            continue
+        }
+        let original = shortpyActionParameters(action)
+        let rewritten = rewrittenParameters[index]
+        if original.isEqual(rewritten) {
+            continue
+        }
+        guard let importedParameters = rewritten as? [AnyHashable: Any],
+              bridgeShortpyReplaceWorkflowActionSerializedParameters(
+                  workflow,
+                  UInt64(index),
+                  importedParameters
+              ) else {
+            throw bridgeFailure(
+                "native variable-reference reification failed to reconstruct WFAction at index \(index)"
+            )
+        }
+        mutatedActionIndices.append(index)
+    }
+    guard !mutatedActionIndices.isEmpty else {
+        return []
+    }
+    return report.map { entry in
         var nativeEntry = entry
         nativeEntry["nativeMutation"] = [
             "boundary": "WFAction initWithIdentifier:definition:serializedParameters:",
@@ -2946,9 +3182,12 @@ private func pythonCodeFromWorkflow(
         guard let adapted = bridgeShortpyMakeEditExportWorkflow(
             workflow,
             &adaptedActionCount
-        ) else {
+        ) as AnyObject? else {
+            let diagnostic = bridgeShortpyEditExportLastError().map {
+                String(cString: $0)
+            } ?? "unknown reverse-export classification error"
             throw bridgeFailure(
-                "ShortpyEditModeContext could not clone and adapt the native WFWorkflow"
+                "ShortpyEditModeContext could not clone and adapt the native WFWorkflow: \(diagnostic)"
             )
         }
         exportWorkflow = adapted
@@ -3085,259 +3324,6 @@ private func workflowFileDataToPythonPayload(
     ]
 }
 
-private func agentToolboxQueryPayload(
-    query: String,
-    kind: String,
-    limit: Int
-) async throws -> [String: Any] {
-    let clampedLimit = max(1, min(limit, 50))
-    let type: ToolEmbeddingRecordToolTypeStorage
-    switch kind {
-    case "tool", "tools", "action", "actions":
-        type = ToolEmbeddingRecordToolTypeStorage(rawValue: 1)
-    case "trigger", "triggers":
-        type = ToolEmbeddingRecordToolTypeStorage(rawValue: 2)
-    default:
-        throw bridgeFailure("unsupported AgentToolbox query kind \(kind); expected tool or trigger")
-    }
-    let toolbox = try agentToolboxInit(
-        alwaysIncludedToolIdentifiers: agentToolboxDefaultAlwaysIncludedToolIdentifiers()
-    )
-    var result = try await agentToolboxQuery(query, [type: clampedLimit], toolbox)
-    let rendered = withUnsafePointer(to: &result) { resultPointer in
-        bridgeAgentToolboxResultStringRepresentation(resultPointer)
-    }
-    return [
-        "ok": true,
-        "mode": "agent-toolbox-query",
-        "source": "ShortcutsAgent.AgentToolbox.query + AgentToolbox.Result.stringRepresentation",
-        "query": query,
-        "kind": kind,
-        "limit": clampedLimit,
-        "toolbox_words": [
-            pointerString(toolbox.w0),
-            pointerString(toolbox.w1),
-            pointerString(toolbox.w2),
-            pointerString(toolbox.w3),
-            pointerString(toolbox.w4),
-            pointerString(toolbox.w5),
-            pointerString(toolbox.w6),
-            pointerString(toolbox.w7),
-        ],
-        "result_words": [
-            pointerString(result.w0),
-            pointerString(result.w1),
-            pointerString(result.w2),
-            pointerString(result.w3),
-            pointerString(result.w4),
-            pointerString(result.w5),
-        ],
-        "tool_type_raw": type.rawValue,
-        "string_representation": rendered,
-        "string_length": rendered.utf8.count,
-    ]
-}
-
-@MainActor
-private func agentToolboxQueryPayloadMainActor(
-    query: String,
-    kind: String,
-    limit: Int
-) async throws -> [String: Any] {
-    var payload = try await agentToolboxQueryPayload(query: query, kind: kind, limit: limit)
-    payload["scheduler"] = "MainActor"
-    return payload
-}
-
-private func agentToolboxInitDumpPayload() throws -> [String: Any] {
-    let identifiers = agentToolboxDefaultAlwaysIncludedToolIdentifiers()
-    let toolbox = try agentToolboxInit(alwaysIncludedToolIdentifiers: identifiers)
-    return [
-        "ok": true,
-        "mode": "agent-toolbox-init-dump",
-        "source": "ShortcutsAgent.AgentToolbox.init(alwaysIncludedToolIdentifiers:)",
-        "always_included_count": identifiers.count,
-        "toolbox_words": [
-            pointerString(toolbox.w0),
-            pointerString(toolbox.w1),
-            pointerString(toolbox.w2),
-            pointerString(toolbox.w3),
-            pointerString(toolbox.w4),
-            pointerString(toolbox.w5),
-            pointerString(toolbox.w6),
-            pointerString(toolbox.w7),
-        ],
-        "notes": [
-            "Raw words only; fields are intentionally not dereferenced here so invalid/private storage cannot crash the bridge.",
-            "Static init disassembly writes primary fields at offsets 0x0, 0x8, and the metadata-provided third field offset.",
-        ],
-    ]
-}
-
-private let fallbackAppEntities: [(name: String, bundleIdentifier: String)] = [
-    ("Shortcuts", "com.apple.shortcuts"),
-    ("Safari", "com.apple.mobilesafari"),
-    ("Settings", "com.apple.Preferences"),
-    ("Messages", "com.apple.MobileSMS"),
-    ("Mail", "com.apple.mobilemail"),
-    ("Photos", "com.apple.mobileslideshow"),
-    ("Music", "com.apple.Music"),
-    ("Calendar", "com.apple.mobilecal"),
-    ("Reminders", "com.apple.reminders"),
-    ("Notes", "com.apple.mobilenotes"),
-    ("Clock", "com.apple.mobiletimer"),
-    ("Maps", "com.apple.Maps"),
-    ("Phone", "com.apple.mobilephone"),
-    ("Camera", "com.apple.camera"),
-    ("App Store", "com.apple.AppStore"),
-]
-
-private func isAppDescriptorResolve(_ request: ResolveEntityRequestInput) -> Bool {
-    let type = request.methodParameterType.lowercased()
-    return type.contains("wfapp_descriptor")
-        || type.contains("wfapp")
-        || request.methodName.lowercased().contains("app")
-        || request.methodParameterName.lowercased() == "app"
-}
-
-private func fallbackAppEntityCandidates(for query: String) -> [(name: String, bundleIdentifier: String)] {
-    let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    guard !normalized.isEmpty else {
-        return fallbackAppEntities
-    }
-    let direct = fallbackAppEntities.filter { app in
-        app.name.lowercased().contains(normalized)
-            || app.bundleIdentifier.lowercased().contains(normalized)
-            || normalized.contains(app.name.lowercased())
-    }
-    if !direct.isEmpty {
-        return direct
-    }
-    if normalized.contains(".") {
-        let name = query.split(separator: ".").last.map(String.init) ?? query
-        return [(name: name, bundleIdentifier: query)]
-    }
-    return []
-}
-
-private func resolveEntityFallbackPayloadJson(from request: ResolveEntityRequestInput) -> String {
-    let candidates = isAppDescriptorResolve(request)
-        ? fallbackAppEntityCandidates(for: request.query)
-        : []
-    let candidateJson = candidates.enumerated().map { index, app -> String in
-        let ref = String(format: "ref(0x%04x)", index)
-        let metadata = jsonString([
-            "Bundle Identifier": app.bundleIdentifier,
-            "Name": app.name,
-        ])
-        let fields = [
-            "\"index\":\(index)",
-            "\"ref\":\(jsonStringLiteral(ref))",
-            "\"tag\":\(jsonStringLiteral(String(format: "0x%04x", index)))",
-            "\"python_argument\":\(jsonStringLiteral(ref))",
-            "\"display_name\":\(jsonStringLiteral(app.name))",
-            "\"bundle_identifier\":\(jsonStringLiteral(app.bundleIdentifier))",
-            "\"metadata\":\(jsonStringLiteral(metadata))",
-        ]
-        return "{\(fields.joined(separator: ","))}"
-    }.joined(separator: ",")
-    let resultJson = candidates.enumerated().map { index, app -> String in
-        let tag = String(format: "0x%04X", index)
-        let metadata = jsonString([
-            "Bundle Identifier": app.bundleIdentifier,
-            "Name": app.name,
-        ])
-        return "{\(jsonStringLiteral(tag)):\(jsonStringLiteral(metadata))}"
-    }.joined(separator: ",")
-    let content: String
-    if candidates.isEmpty {
-        content = "No fallback entity candidates found. Native FindEntitiesTool.call remains debug-only until its resilient Swift ABI is fully wrapped."
-    } else {
-        content = candidates.enumerated().map { index, app in
-            "\(index): \(app.name) (\(app.bundleIdentifier)) -> ref(0x\(String(format: "%04x", index)))"
-        }.joined(separator: "\n")
-    }
-    let fields = [
-        "\"ok\":true",
-        "\"mode\":\"resolve_entity\"",
-        "\"agent_tool\":\"resolve_entity\"",
-        "\"source\":\"bridge fallback over ToolRenderer-compatible entity metadata; native FindEntitiesTool.call is debug-only\"",
-        "\"native_find_entities_enabled\":false",
-        "\"native_find_entities_status\":\"disabled by default after repeated EXC_BAD_ACCESS in FindEntitiesTool.Arguments copy; pass debug_native_find_entities=true only for guarded RE\"",
-        "\"query\":\(jsonStringLiteral(request.query))",
-        "\"method_name\":\(jsonStringLiteral(request.methodName))",
-        "\"method_parameter_name\":\(jsonStringLiteral(request.methodParameterName))",
-        "\"method_parameter_type\":\(jsonStringLiteral(request.methodParameterType))",
-        "\"workflow_id\":\(request.workflowID.isEmpty ? "null" : jsonStringLiteral(request.workflowID))",
-        "\"content\":\(jsonStringLiteral(content))",
-        "\"content_length\":\(content.utf8.count)",
-        "\"results\":[\(resultJson)]",
-        "\"candidates\":[\(candidateJson)]",
-        "\"catalog_metadata\":{\"status\":\"fallback app descriptor metadata; refs require WFParameterStateCatalog injection before compile\",\"entities\":[\(candidateJson)]}",
-    ]
-    return "{\(fields.joined(separator: ","))}"
-}
-
-@MainActor
-private func resolveEntityPayloadJson(from request: ResolveEntityRequestInput) async throws -> String {
-    if !request.debugNativeFindEntities {
-        return resolveEntityFallbackPayloadJson(from: request)
-    }
-
-    let query = request.query
-    let methodName = request.methodName
-    let methodParameterName = request.methodParameterName
-    let methodParameterType = request.methodParameterType
-    let workflowID = request.workflowID
-
-    let databaseProvider = sharedToolDatabaseProvider()
-    let database = try bridgeSharedToolDatabaseProviderDatabase(databaseProvider)
-    let importContext = latestImportCatalogContext()
-    let catalog = importContext?.proxyCatalog ?? defaultInitialCatalog()
-    let tool = findEntitiesToolInit(
-        database,
-        catalog,
-        workflowID.isEmpty ? nil : workflowID,
-        nil
-    )
-    let arguments = findEntitiesArgumentsInit(
-        methodName,
-        methodParameterName,
-        methodParameterType,
-        query
-    )
-    let eventStream = bridgeMakeDescribeAgentEventStream()
-    let output = try await findEntitiesToolCall(arguments, eventStream, tool)
-
-    let catalogSource = importContext == nil
-        ? "defaultInitialCatalog"
-        : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")"
-    let fields = [
-        "\"ok\":true",
-        "\"mode\":\"resolve_entity\"",
-        "\"agent_tool\":\"resolve_entity\"",
-        "\"source\":\"ShortcutsAgent.FindEntitiesTool.call(arguments:agentEventStream:)\"",
-        "\"query\":\(jsonStringLiteral(query))",
-        "\"method_name\":\(jsonStringLiteral(methodName))",
-        "\"method_parameter_name\":\(jsonStringLiteral(methodParameterName))",
-        "\"method_parameter_type\":\(jsonStringLiteral(methodParameterType))",
-        "\"workflow_id\":\(workflowID.isEmpty ? "null" : jsonStringLiteral(workflowID))",
-        "\"catalog\":\(jsonStringLiteral(objectClassName(catalog)))",
-        "\"catalog_pointer\":\(jsonStringLiteral(objectPointerString(catalog)))",
-        "\"catalog_source\":\(jsonStringLiteral(catalogSource))",
-        "\"database_class\":\(jsonStringLiteral(objectClassName(database)))",
-        "\"database_pointer\":\(jsonStringLiteral(objectPointerString(database)))",
-        "\"tool_storage_prefix\":\(jsonStringLiteral(shortHexPrefix(of: tool)))",
-        "\"arguments_storage_prefix\":\(jsonStringLiteral(shortHexPrefix(of: arguments)))",
-        "\"output_storage_prefix\":\(jsonStringLiteral(shortHexPrefix(of: output)))",
-        "\"content\":null",
-        "\"content_length\":null",
-        "\"native_call_completed\":true",
-        "\"catalog_metadata\":{\"status\":\"native FindEntitiesTool call completed; content getter is disabled until the output string ownership shim is fixed\",\"catalog_pointer\":\(jsonStringLiteral(objectPointerString(catalog)))}",
-    ]
-    return "{\(fields.joined(separator: ","))}"
-}
-
 private func toolRendererPythonInterfacePayload() async throws -> [String: Any] {
     let databaseProvider = sharedToolDatabaseProvider()
     let database = try bridgeSharedToolDatabaseProviderDatabase(databaseProvider)
@@ -3420,18 +3406,14 @@ private func callToolRendererPythonInterface(
     shims: UnsafePointer<CompatibilityShimsStorage>
 ) async throws -> ToolRendererPythonInterfaceResult {
     if let pointer = symbolAddress(toolRendererPythonInterfaceRequiredFilterSymbol) {
-        appendRecordFileProbeStage("toolrenderer select required function=\(pointerString(pointer))")
         bridgeSetToolRendererPythonInterfaceTarget(pointer)
         let filterProvider = nullFilterProviderExistential()
-        appendRecordFileProbeStage("toolrenderer required null provider type=\(pointerString(filterProvider.type)) witness=\(pointerString(filterProvider.witness))")
-        appendRecordFileProbeStage("toolrenderer required native call before")
         let interface = try await bridgeToolRendererPythonInterfaceSelected(
             database,
             filterProvider,
             parameterMetadataProvider,
             shims
         )
-        appendRecordFileProbeStage("toolrenderer required native call after length=\(interface.utf8.count)")
         return ToolRendererPythonInterfaceResult(
             interface: interface,
             symbol: toolRendererPythonInterfaceRequiredFilterSymbol,
@@ -3440,18 +3422,14 @@ private func callToolRendererPythonInterface(
         )
     }
     if let pointer = symbolAddress(toolRendererPythonInterfaceOptionalFilterSymbol) {
-        appendRecordFileProbeStage("toolrenderer select optional function=\(pointerString(pointer))")
         bridgeSetToolRendererPythonInterfaceTarget(pointer)
         let filterProvider = ProtocolExistentialStorage()
-        appendRecordFileProbeStage("toolrenderer optional nil provider")
-        appendRecordFileProbeStage("toolrenderer optional native call before")
         let interface = try await bridgeToolRendererPythonInterfaceSelected(
             database,
             filterProvider,
             parameterMetadataProvider,
             shims
         )
-        appendRecordFileProbeStage("toolrenderer optional native call after length=\(interface.utf8.count)")
         return ToolRendererPythonInterfaceResult(
             interface: interface,
             symbol: toolRendererPythonInterfaceOptionalFilterSymbol,
@@ -3595,160 +3573,6 @@ private func errorPolicyDecisions(
     }
 }
 
-@_cdecl("bridge_swift_agent_toolbox_init_dump")
-public func bridge_swift_agent_toolbox_init_dump() -> UnsafeMutablePointer<CChar>? {
-    do {
-        return strdup(jsonString(try agentToolboxInitDumpPayload()))
-    } catch {
-        return strdup(jsonString([
-            "ok": false,
-            "mode": "agent-toolbox-init-dump",
-            "diagnostic": String(describing: error),
-            "error_type": String(describing: type(of: error)),
-        ]))
-    }
-}
-
-@_cdecl("bridge_swift_agent_toolbox_query")
-public func bridge_swift_agent_toolbox_query(
-    _ cQuery: UnsafePointer<CChar>?,
-    _ cKind: UnsafePointer<CChar>?,
-    _ rawLimit: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cQuery else {
-        return strdup(jsonString(["ok": false, "error": "missing query"]))
-    }
-    let query = String(cString: cQuery)
-    let kind = cKind.map { String(cString: $0) } ?? "trigger"
-    let limit = Int(min(rawLimit == 0 ? 3 : rawLimit, 50))
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        do {
-            box.payload = jsonString(try await agentToolboxQueryPayload(
-                query: query,
-                kind: kind,
-                limit: limit
-            ))
-        } catch {
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "agent-toolbox-query",
-                "query": query,
-                "kind": kind,
-                "limit": limit,
-                "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
-            ])
-        }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "agent-toolbox-query",
-            "query": query,
-            "kind": kind,
-            "limit": limit,
-            "error": "AgentToolbox query timed out",
-        ])
-    }
-
-    return strdup(box.payload)
-}
-
-@_cdecl("bridge_swift_agent_toolbox_query_mainactor")
-public func bridge_swift_agent_toolbox_query_mainactor(
-    _ cQuery: UnsafePointer<CChar>?,
-    _ cKind: UnsafePointer<CChar>?,
-    _ rawLimit: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cQuery else {
-        return strdup(jsonString(["ok": false, "error": "missing query"]))
-    }
-    let query = String(cString: cQuery)
-    let kind = cKind.map { String(cString: $0) } ?? "trigger"
-    let limit = Int(min(rawLimit == 0 ? 3 : rawLimit, 50))
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task { @MainActor in
-        do {
-            box.payload = jsonString(try await agentToolboxQueryPayloadMainActor(
-                query: query,
-                kind: kind,
-                limit: limit
-            ))
-        } catch {
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "agent-toolbox-query-mainactor",
-                "query": query,
-                "kind": kind,
-                "limit": limit,
-                "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
-            ])
-        }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "agent-toolbox-query-mainactor",
-            "query": query,
-            "kind": kind,
-            "limit": limit,
-            "error": "AgentToolbox main-actor query timed out",
-        ])
-    }
-
-    return strdup(box.payload)
-}
-
-@_cdecl("bridge_swift_resolve_entity")
-public func bridge_swift_resolve_entity(_ cJson: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
-    guard let cJson else {
-        return strdup(jsonString(["ok": false, "error": "missing resolve entity JSON"]))
-    }
-
-    let requestText = String(cString: cJson)
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        do {
-            let request = try resolveEntityRequest(from: requestText)
-            box.payload = try await resolveEntityPayloadJson(from: request)
-        } catch {
-            box.payload = "{"
-                + "\"ok\":false,"
-                + "\"mode\":\"resolve_entity\","
-                + "\"agent_tool\":\"resolve_entity\","
-                + "\"request_length\":\(requestText.utf8.count),"
-                + "\"diagnostic\":\(jsonStringLiteral(String(describing: error))),"
-                + "\"error_type\":\(jsonStringLiteral(String(describing: type(of: error))))"
-                + "}"
-        }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = "{"
-            + "\"ok\":false,"
-            + "\"mode\":\"resolve_entity\","
-            + "\"agent_tool\":\"resolve_entity\","
-            + "\"request_length\":\(requestText.utf8.count),"
-            + "\"error\":\"FindEntitiesTool call timed out\""
-            + "}"
-    }
-
-    return strdup(box.payload)
-}
-
 @_cdecl("bridge_swift_catalog_dump_latest")
 public func bridge_swift_catalog_dump_latest() -> UnsafeMutablePointer<CChar>? {
     let context = latestImportCatalogContext()
@@ -3868,7 +3692,8 @@ private func pythonToBplistPayload(
             workflow,
             trigger: compiledObjects.preferredTrigger,
             callSaveToRecord: true,
-            recurrencePlans: run.recurrencePlans
+            recurrencePlans: run.recurrencePlans,
+            reifyVariableReferences: run.pipeline == .shortpy
         )
         return jsonString([
             "ok": true,
@@ -3882,6 +3707,9 @@ private func pythonToBplistPayload(
             "pipeline": run.details.merging([
                 "recurrenceLowering": fileDataResult.fileSummary[
                     "shortpy_recurrence_lowering"
+                ] ?? [],
+                "variableReferenceReification": fileDataResult.fileSummary[
+                    "shortpy_variable_reference_reification"
                 ] ?? [],
             ]) { _, new in new },
             "workflow": [
@@ -3928,6 +3756,7 @@ public func bridge_swift_pipeline_python_to_bplist(
         return strdup(jsonString(["ok": false, "error": "missing source"]))
     }
     let source = String(cString: cSource)
+    let traceCapture = bridgeCompilerTraceBegin()
     let semaphore = DispatchSemaphore(value: 0)
     let box = ResultBox()
     Task.detached {
@@ -3956,7 +3785,7 @@ public func bridge_swift_pipeline_python_to_bplist(
             "error": "python-to-workflow-file-data call timed out",
         ])
     }
-    return strdup(box.payload)
+    return strdup(attachingCompilerTrace(to: box.payload, capture: traceCapture))
 }
 
 @_cdecl("bridge_swift_pipeline_python_to_bplist_with_catalog_metadata")
@@ -3974,6 +3803,7 @@ public func bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
     }
     let source = String(cString: cSource)
     let catalogMetadataText = String(cString: cCatalogMetadata)
+    let traceCapture = bridgeCompilerTraceBegin()
     let semaphore = DispatchSemaphore(value: 0)
     let box = ResultBox()
     Task.detached {
@@ -4010,216 +3840,7 @@ public func bridge_swift_pipeline_python_to_bplist_with_catalog_metadata(
             "error": "python-to-workflow-file-data catalog call timed out",
         ])
     }
-    return strdup(box.payload)
-}
-
-private func recordFileProbePayload(
-    source: String,
-    flags: UInt16,
-    probeMode: UInt64,
-    catalogOverride: AnyObject?,
-    catalogSource: String,
-    importContext: ImportedPythonContext?
-) async -> String {
-    do {
-        let run = try await ShortpyToShortcut(
-            source,
-            catalogOverride: catalogOverride,
-            catalogSource: catalogSource
-        )
-        let compiledObjects = compiledShortcutObjectView(run.compiled)
-        guard let workflow = compiledObjects.preferredWorkflow else {
-            throw bridgeFailure("compiled shortcut did not produce a WFWorkflow")
-        }
-        let callSaveToRecord = (probeMode & 1) == 0
-        let fileDataResult = try workflowRecordFileDataPayloadFromWorkflow(
-            workflow,
-            trigger: compiledObjects.preferredTrigger,
-            callSaveToRecord: callSaveToRecord,
-            recurrencePlans: run.recurrencePlans
-        )
-        appendRecordFileProbeStage("before plist base64")
-        let plistBase64 = fileDataResult.data.base64EncodedString()
-        appendRecordFileProbeStage("after plist base64 length=\(plistBase64.utf8.count)")
-        appendRecordFileProbeStage("before probe json")
-        let response = jsonString([
-            "ok": true,
-            "mode": "workflow-record-file-representation-probe",
-            "flags": Int(flags),
-            "probe_mode": Int(probeMode),
-            "call_save_to_record": callSaveToRecord,
-            "source_length": source.utf8.count,
-            "catalog": String(describing: type(of: run.catalog)),
-            "catalog_source": run.catalogSource,
-            "latest_import_context": importContextSummary(importContext),
-            "shortpy_pipeline": [
-                "entrypoint": "ShortpyToShortcut",
-                "passes": run.passes.map(\.json),
-                "recurrencePlans": run.recurrencePlans.map(\.json),
-                "recurrenceLowering": fileDataResult.fileSummary[
-                    "shortpy_recurrence_lowering"
-                ] ?? [],
-            ],
-            "workflow": [
-                "workflow": pointerOnlySummary(workflow),
-                "trigger": pointerOnlySummary(compiledObjects.preferredTrigger),
-            ],
-            "plist_builder": [
-                "kind": "native WFWorkflowRecord.fileRepresentation whole-file serializer probe",
-                "path": callSaveToRecord
-                    ? "ShortpyToShortcut -> PythonToIR -> Shortpy IR passes -> native IR passes -> IRToShortcut -> WFWorkflow.databaseAccessQueue dispatch_barrier_sync -> WFWorkflow.saveToRecord -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:"
-                    : "ShortpyToShortcut -> PythonToIR -> Shortpy IR passes -> native IR passes -> IRToShortcut -> WFWorkflow.record -> WFWorkflowRecord.fileRepresentation -> WFWorkflowFile.fileDataWithError:",
-                "static_evidence": "LLDB proved saveToRecord asserts the workflow databaseAccessQueue; the bridge now performs the same queue hop directly before calling saveToRecord. WFWorkflowRecord.fileRepresentation initializes WFWorkflowFile storage then calls WFRecord.writeToStorage:error:.",
-                "workflow_file": fileDataResult.fileSummary,
-                "root": fileDataResult.rootSummary,
-                "actions": fileDataResult.actionsSummary,
-                "unifiedAutomationTriggers": fileDataResult.triggersSummary,
-            ],
-            "plist_payload": [
-                "format": "com.apple.binary-property-list",
-                "encoding": "base64",
-                "length": fileDataResult.data.count,
-                "data": plistBase64,
-            ],
-            "error_policy_decision_count": "omitted-in-record-file-probe",
-        ])
-        appendRecordFileProbeStage("after probe json length=\(response.utf8.count)")
-        return response
-    } catch {
-        return jsonString([
-            "ok": false,
-            "mode": "workflow-record-file-representation-probe",
-            "flags": Int(flags),
-            "probe_mode": Int(probeMode),
-            "call_save_to_record": (probeMode & 1) == 0,
-            "source_length": source.utf8.count,
-            "catalog_source": catalogSource,
-            "latest_import_context": importContextSummary(importContext),
-            "diagnostic": String(describing: error),
-            "error_type": String(describing: type(of: error)),
-        ])
-    }
-}
-
-@_cdecl("bridge_swift_python_record_file_probe")
-public func bridge_swift_python_record_file_probe(
-    _ cSource: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cSource else {
-        return strdup(jsonString(["ok": false, "error": "missing source"]))
-    }
-
-    let source = String(cString: cSource)
-    let flags = UInt16(truncatingIfNeeded: rawFlags)
-    let probeMode = rawFlags >> 16
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        let importContext = importedPythonContext(matchingRefsIn: source)
-        let catalogOverride = importContext?.proxyCatalog
-        let catalogSource = catalogOverride == nil
-            ? "defaultInitialCatalog"
-            : "latest plist-data-to-python import via \(importContext?.proxyCatalogSelector ?? "unknown selector")"
-        appendRecordFileProbeStage("before async recordFileProbePayload assign")
-        box.payload = await recordFileProbePayload(
-            source: source,
-            flags: flags,
-            probeMode: probeMode,
-            catalogOverride: catalogOverride,
-            catalogSource: catalogSource,
-            importContext: importContext
-        )
-        appendRecordFileProbeStage("after async recordFileProbePayload assign length=\(box.payload.utf8.count)")
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "workflow-record-file-representation-probe",
-            "flags": Int(flags),
-            "probe_mode": Int(probeMode),
-            "source_length": source.utf8.count,
-            "error": "workflow-record-file-representation probe timed out",
-        ])
-    }
-
-    appendRecordFileProbeStage("before strdup payload length=\(box.payload.utf8.count)")
-    let payload = box.payload
-    let copied = strdup(payload)
-    appendRecordFileProbeStage("after strdup payload copied=\(copied != nil)")
-    return copied
-}
-
-@_cdecl("bridge_swift_python_record_file_probe_with_catalog_metadata")
-public func bridge_swift_python_record_file_probe_with_catalog_metadata(
-    _ cSource: UnsafePointer<CChar>?,
-    _ cCatalogMetadata: UnsafePointer<CChar>?,
-    _ rawFlags: UInt64
-) -> UnsafeMutablePointer<CChar>? {
-    guard let cSource else {
-        return strdup(jsonString(["ok": false, "error": "missing source"]))
-    }
-    guard let cCatalogMetadata else {
-        return strdup(jsonString(["ok": false, "error": "missing catalog metadata"]))
-    }
-
-    let source = String(cString: cSource)
-    let catalogMetadataText = String(cString: cCatalogMetadata)
-    let flags = UInt16(truncatingIfNeeded: rawFlags)
-    let probeMode = rawFlags >> 16
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ResultBox()
-
-    Task.detached {
-        do {
-            guard let catalogData = catalogMetadataText.data(using: .utf8) else {
-                throw bridgeFailure("catalog metadata was not valid UTF-8")
-            }
-            let catalog = try pythonWorkflowProxyDecodeCatalog(catalogData)
-            appendRecordFileProbeStage("before async recordFileProbePayload catalog assign")
-            box.payload = await recordFileProbePayload(
-                source: source,
-                flags: flags,
-                probeMode: probeMode,
-                catalogOverride: catalog,
-                catalogSource: "WFPythonWorkflowProxy.decodeCatalog(from:) input",
-                importContext: nil
-            )
-            appendRecordFileProbeStage("after async recordFileProbePayload catalog assign length=\(box.payload.utf8.count)")
-        } catch {
-            box.payload = jsonString([
-                "ok": false,
-                "mode": "workflow-record-file-representation-probe",
-                "flags": Int(flags),
-                "probe_mode": Int(probeMode),
-                "source_length": source.utf8.count,
-                "catalog_metadata_length": catalogMetadataText.utf8.count,
-                "diagnostic": String(describing: error),
-                "error_type": String(describing: type(of: error)),
-            ])
-        }
-        semaphore.signal()
-    }
-
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
-        box.payload = jsonString([
-            "ok": false,
-            "mode": "workflow-record-file-representation-probe",
-            "flags": Int(flags),
-            "source_length": source.utf8.count,
-            "catalog_metadata_length": catalogMetadataText.utf8.count,
-            "error": "workflow-record-file-representation catalog probe timed out",
-        ])
-    }
-
-    appendRecordFileProbeStage("before strdup catalog payload length=\(box.payload.utf8.count)")
-    let payload = box.payload
-    let copied = strdup(payload)
-    appendRecordFileProbeStage("after strdup catalog payload copied=\(copied != nil)")
-    return copied
+    return strdup(attachingCompilerTrace(to: box.payload, capture: traceCapture))
 }
 
 @_cdecl("bridge_swift_pipeline_plist_to_python")
